@@ -16,30 +16,30 @@ import CandorCore
 // decl-attribute might be an attached macro"; only a name on this list, or a locally-declared
 // `@resultBuilder`/`@globalActor` type (handled separately, see their own tables), is exempted.
 /// SOUNDNESS R867 §1b KILL SWITCH (the in-scan twin; main.swift reads the same variable for the producer).
-private let driverR867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
+private let driverR867Off = Env.on("CANDOR_R867_OFF")
 /// SOUNDNESS R1416 — kill switch for the `open`-class half of ⟨0.39⟩ obligation 1 (call-target round 1).
-private let r1416Off = ProcessInfo.processInfo.environment["CANDOR_R1416_OFF"] != nil
-private let r1416Probe = ProcessInfo.processInfo.environment["CANDOR_R1416_PROBE"] != nil   // reach: one line per key formed
+private let r1416Off = Env.on("CANDOR_R1416_OFF")
+private let r1416Probe = Env.trace("CANDOR_R1416_PROBE")   // reach: one line per key formed
 /// CALL-TARGET ROUND 2 — kill switch for the obligation-3 join's transitive implementor set (`unionOwnImplementors`).
-private let ctSubtreeOff = ProcessInfo.processInfo.environment["CANDOR_CT2_SUBTREE_OFF"] != nil
-private let ctSubtreeProbe = ProcessInfo.processInfo.environment["CANDOR_CT2_SUBTREE_PROBE"] != nil   // reach: one line per join that adds
+private let ctSubtreeOff = Env.on("CANDOR_CT2_SUBTREE_OFF")
+private let ctSubtreeProbe = Env.trace("CANDOR_CT2_SUBTREE_PROBE")   // reach: one line per join that adds
 /// VEIN C §1b KILL SWITCH (R903, R876).
-private let veinCOff = ProcessInfo.processInfo.environment["CANDOR_VEINC_OFF"] != nil
+private let veinCOff = Env.on("CANDOR_VEINC_OFF")
 /// SOUNDNESS R1109 §1b KILL SWITCH (main.swift reads the same variable for the producer's union) and REACH
 /// PROBE: one stderr line per sub-protocol witness edge actually added.
-let r1109Off = ProcessInfo.processInfo.environment["CANDOR_R1109_OFF"] != nil
-private let r1109Probe = ProcessInfo.processInfo.environment["CANDOR_R1109_PROBE"] != nil
+let r1109Off = Env.on("CANDOR_R1109_OFF")
+private let r1109Probe = Env.trace("CANDOR_R1109_PROBE")
 /// SOUNDNESS R1486 §1b KILL SWITCH — a concrete type's PROVIDER supertypes include the protocols its conformed protocols
 /// refine (see `providerSupers`). `CANDOR_R1486_OFF=1` restores the direct-supertype walk.
-private let r1486Off = ProcessInfo.processInfo.environment["CANDOR_R1486_OFF"] != nil
+private let r1486Off = Env.on("CANDOR_R1486_OFF")
 /// SOUNDNESS R1486 method-path hedge §1b KILL SWITCH — `CANDOR_R1486_HEDGE=1` restores the kept `dispatch:` hedge on a
 /// member found only on a REFINED protocol (it then edges AND hedges, as b079d4f did).
-private let r1486HedgeKept = ProcessInfo.processInfo.environment["CANDOR_R1486_HEDGE"] != nil
+private let r1486HedgeKept = Env.on("CANDOR_R1486_HEDGE")
 /// SOUNDNESS R1485 §1b KILL SWITCH — a platform (Objective-C imported) class reaches the members a LOCAL extension or
 /// retroactive conformance gives `NSObject` (see `objcRootSupers`). `CANDOR_R1485_OFF=1` restores the release.
-let r1485Off = ProcessInfo.processInfo.environment["CANDOR_R1485_OFF"] != nil
+let r1485Off = Env.on("CANDOR_R1485_OFF")
 /// VEIN C REACH PROBE (§E1): one stderr line per down-walk edge actually added.
-private let veinCProbe = ProcessInfo.processInfo.environment["CANDOR_VEINC_PROBE"] != nil
+private let veinCProbe = Env.trace("CANDOR_VEINC_PROBE")
 private let KNOWN_BUILTIN_DECL_ATTRS: Set<String> = [
     "MainActor", "UIApplicationMain", "NSApplicationMain",
     "IBAction", "IBSegueAction", "IBOutlet", "IBInspectable", "IBDesignable",
@@ -210,7 +210,7 @@ func buildTypeSurfaceReturns(_ allFns: [FnInfo], _ localTypePaths: Set<String>) 
               let resolved = resolveTypePath(written, scope: f.enclosingTypePath) else { continue }
         out[f.qual] = resolved
     }
-    if ProcessInfo.processInfo.environment["CANDOR_TYPESURFACE_DEBUG"] != nil {
+    if Env.trace("CANDOR_TYPESURFACE_DEBUG") {
         let spelled = allFns.filter { $0.retBoundTypeSpelling != nil }.count
         let ambiguous = allFns.filter { $0.retBoundTypeSpelling != nil && byQualCount[$0.qual]! > 1 }.count
         let line = "TYPESURFACE producer: fns=\(allFns.count) plain-nominal-returns=\(spelled) "
@@ -1758,7 +1758,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         initSigByQual[f.qual] = zip(f.paramLabels, f.paramSig).map {
             ($0.0 == "_" ? nil : $0.0, $0.1.hasDefault, $0.1.variadic) }
     }
-    let r1047Off = ProcessInfo.processInfo.environment["CANDOR_R1047_OFF"] != nil
+    let r1047Off = Env.on("CANDOR_R1047_OFF")
     // SOUNDNESS R1504 — R656'S CONSTRUCTOR HALF. With any `extension DT { }` in the consumer (EMPTY included), `DT(v: 1)`
     // and `self.init(v: w)` inside that extension took the LOCAL constructor arms (`localTypes` holds every extended type),
     // R1047's label filter correctly admitted no local init, and the arm still set `resolved` — so the dependency join
@@ -1785,7 +1785,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // can not be proved extension-only here: it is left unfiltered (the release's union).
         guard !r1047Off, let labels = call.argLabels, !owner.contains("."), !declaredTypes.contains(owner),
               let sig = initSigByQual[target], target.contains(".init") else { return true }
-        if ProcessInfo.processInfo.environment["CANDOR_R1047_PROBE"] != nil {
+        if Env.trace("CANDOR_R1047_PROBE") {
             FileHandle.standardError.write("R1047 \(target) labels=\(labels) sig=\(sig)\n".data(using: .utf8)!)
         }
         var j = 0
@@ -2805,7 +2805,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R827 REACH PROBE (§E1) — one line per (file, module) the R827 gates CHANGE: an import the
     // chain would have taken as covered (its owner is chained) but no Swift report can contain, and a
     // re-exported module the file never names. An unchanged A/B row is not evidence the branch ran.
-    if ProcessInfo.processInfo.environment["CANDOR_R827_PROBE"] != nil {
+    if Env.trace("CANDOR_R827_PROBE") {
         for (file, imports) in fileImports.sorted(by: { $0.key < $1.key }) {
             for m in imports where deps.notSwiftCoverable.contains(m)
                                    && deps.isChained(deps.notSwiftOwner[m] ?? deps.pkgOfModule(m)) {
@@ -2864,7 +2864,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// target this run analyzed. Two candidates refuse — the never-guess rule the whole dep index runs on
     /// — which costs a disclosure the engine did not have before and can never mint a charge.
     ///
-    let r592Probe = ProcessInfo.processInfo.environment["CANDOR_R592_PROBE"] != nil
+    let r592Probe = Env.trace("CANDOR_R592_PROBE")
     /// SOUNDNESS R592 — AND A TARGET OF THE FILE'S OWN PACKAGE IS NOT A FOREIGN OWNER, ANALYZED OR NOT.
     /// `importable` is `declaredNames` INTERSECTED WITH `analyzedTargets`, and that intersection is the
     /// trap: it answers "did this run read it", not "is it ours". A C target has no `.swift` files, so no
@@ -2941,8 +2941,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     //     candidate's sources were read in full and declare no such name. A candidate that cannot be read,
     //     is a C module, or holds a top-level macro expansion cannot be excluded, so it refuses.
     // Anything else stays refused — no key is ever minted from a guess.
-    let veinDOff = ProcessInfo.processInfo.environment["CANDOR_VEIND_OFF"] != nil
-    let veinDProbe = ProcessInfo.processInfo.environment["CANDOR_VEIND_PROBE"] != nil
+    let veinDOff = Env.on("CANDOR_VEIND_OFF")
+    let veinDProbe = Env.trace("CANDOR_VEIND_PROBE")
     var moduleDeclCache: [String: (names: [String: Bool], opaque: Bool)?] = [:]
     func moduleDeclarations(_ m: String) -> (names: [String: Bool], opaque: Bool)? {
         if let c = moduleDeclCache[m] { return c }
@@ -3056,10 +3056,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// evidence of the owner: where the dependency EXTENDS the platform type (`extension Date { func stamp() }`)
     /// the same spelling is the only carrier of the member's effect to a downstream consumer (measured: stripping
     /// it took `Fs` off the consumer, executed). So the key stays the floor, and ownership is asked here instead.
-    let r1066Off = ProcessInfo.processInfo.environment["CANDOR_R1066_OFF"] != nil
+    let r1066Off = Env.on("CANDOR_R1066_OFF")
     /// SOUNDNESS R1104 — kill switch for both halves (the self-field argRef exemption and the unreadable-dependency
     /// receiver attribution), for the A/B.
-    let r1104Off = ProcessInfo.processInfo.environment["CANDOR_R1104_OFF"] != nil
+    let r1104Off = Env.on("CANDOR_R1104_OFF")
     let r1066Probe = CallCollector.veinBProbe
     var sourceProvenCache: [String: Set<String>] = [:]
     func sourceProvenDepModules(of spelled: String, inFile file: String, extendedInit: Bool = false) -> Set<String> {
@@ -3128,7 +3128,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// dependency's only where the platform does not also declare it; that cannot be read here, so a match
     /// over-attributes in that case — an `invisible` naming a module the call may not reach, which is the
     /// direction a disclosure is allowed to err in, never a charge.
-    let r1071Off = ProcessInfo.processInfo.environment["CANDOR_R1071_OFF"] != nil
+    let r1071Off = Env.on("CANDOR_R1071_OFF")
     var moduleExtCache: [String: [String: [String: Bool]]?] = [:]
     func moduleExtensionMembers(_ m: String) -> [String: [String: Bool]]? {
         if let c = moduleExtCache[m] { return c }
@@ -3224,28 +3224,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// in-scan CHA this function defers to never runs on this spelling and dropping the key loses the
     /// chain outright. The OWNERSHIP is what was wrong, and it is fixed where the key is SPELLED — see
     /// the publish site's R555 comment. This function keeps one job: name the abstraction.
-    let r550Probe = ProcessInfo.processInfo.environment["CANDOR_R550_PROBE"] != nil
-    let r555Probe = ProcessInfo.processInfo.environment["CANDOR_R555_PROBE"] != nil
+    let r550Probe = Env.trace("CANDOR_R550_PROBE")
+    let r555Probe = Env.trace("CANDOR_R555_PROBE")
     /// SOUNDNESS R836 §1b KILL SWITCH — restores the chained-only gate on a guessed owner's disclosure, so
     /// a standalone producer's row falls silent again and the three-package-chain tests go red.
-    let r836Off = ProcessInfo.processInfo.environment["CANDOR_R836_OFF"] != nil
-    let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
+    let r836Off = Env.on("CANDOR_R836_OFF")
+    let r836Probe = Env.trace("CANDOR_R836_PROBE")
     /// SOUNDNESS R859 §1b KILL SWITCH and reach probe — see the R859 arm after the R705 disclosure.
-    let r859Off = ProcessInfo.processInfo.environment["CANDOR_R859_OFF"] != nil
-    let r859Probe = ProcessInfo.processInfo.environment["CANDOR_R859_PROBE"] != nil
+    let r859Off = Env.on("CANDOR_R859_OFF")
+    let r859Probe = Env.trace("CANDOR_R859_PROBE")
     /// SOUNDNESS R706 §1b KILL SWITCH (and `CANDOR_VT_OFF`) and reach probe (under `CANDOR_VEINB_PROBE`).
-    let r706Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R706_OFF"] != nil
-    let r706iOff = ProcessInfo.processInfo.environment["CANDOR_R706I_OFF"] != nil   // SOUNDNESS R706 residual
+    let r706Off = DeclCollector.vtOff || Env.on("CANDOR_R706_OFF")
+    let r706iOff = Env.on("CANDOR_R706I_OFF")   // SOUNDNESS R706 residual
     let r706iProbe = CallCollector.veinBProbe
     let r706Probe = CallCollector.veinBProbe
     /// SPEC ⟨0.25⟩ at the cross-package join: §1b kill switch (restores drop-on-ambiguity) and reach probe.
-    let joinUnionOff = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_OFF"] != nil
-    let joinUnionProbe = ProcessInfo.processInfo.environment["CANDOR_JOIN_UNION_PROBE"] != nil
-    let joinDebug = ProcessInfo.processInfo.environment["CANDOR_JOIN_DEBUG"] != nil
+    let joinUnionOff = Env.on("CANDOR_JOIN_UNION_OFF")
+    let joinUnionProbe = Env.trace("CANDOR_JOIN_UNION_PROBE")
+    let joinDebug = Env.trace("CANDOR_JOIN_DEBUG")
     /// SOUNDNESS R910 §1b KILL SWITCH and reach probe — see `askOwnKey`.
-    let r910Off = ProcessInfo.processInfo.environment["CANDOR_R910_OFF"] != nil
-    let r910Probe = ProcessInfo.processInfo.environment["CANDOR_R910_PROBE"] != nil
-    let r849Off = ProcessInfo.processInfo.environment["CANDOR_R849_OFF"] != nil
+    let r910Off = Env.on("CANDOR_R910_OFF")
+    let r910Probe = Env.trace("CANDOR_R910_PROBE")
+    let r849Off = Env.on("CANDOR_R849_OFF")
     /// SOUNDNESS R847 / R850 — THE BARE-NAME DEPENDENCY JOIN KEEPS v0.39.2'S `pkg#<leaf>` LOOKUP, AND THE
     /// ONLY REMOVAL IS ONE THAT IS A PROOF UNDER SWIFT'S OWN LOOKUP: a name a BINDER holds in the current
     /// lexical scope (`binderShadow`, a case payload) is that local and nothing else — the callers skip it
@@ -3486,7 +3486,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return !refuted
     }
-    let r974aProbe = ProcessInfo.processInfo.environment["CANDOR_R974A_PROBE"] != nil
+    let r974aProbe = Env.trace("CANDOR_R974A_PROBE")
     var depApplyTick = 0   // SOUNDNESS R974 (a) — counts joins, so a call can tell it reached a chained entry
     func applyDepEntry(_ de: DepEntry, to qual: String) {
         depApplyTick += 1
@@ -3584,8 +3584,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // surface resolves is applied beside whatever the site already charged, and a hop the surface does not
     // fully answer adds `Unknown`. Nothing here sets `resolved`, so every disclosure the release made at a
     // site still fires — the clause's MAY-withdrawal is deliberately not taken. ──
-    let r843Off = ProcessInfo.processInfo.environment["CANDOR_R843_OFF"] != nil
-    let r843Probe = ProcessInfo.processInfo.environment["CANDOR_R843_PROBE"] != nil
+    let r843Off = Env.on("CANDOR_R843_OFF")
+    let r843Probe = Env.trace("CANDOR_R843_PROBE")
     /// The walk from a declared target `start` for `leaf`: `<T>.<leaf>` where the index has it (and stop
     /// on that path), else every supertype in `T`'s COMPLETE `supers` plus every `adds` a chained report
     /// records for `T`. A type with no key or a KIND-ONLY key ends its path as a MISS — never as "no
@@ -4150,7 +4150,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // leaf emits a `<platext>.` marker (CallCollector), answered in the call loop below against the DERIVED
     // conformance table (`StdlibConformances.swift`, generated from the SDK's module interfaces).
     let r1071pOff = CallCollector.r1071Off
-    let r1071Probe = ProcessInfo.processInfo.environment["CANDOR_R1071_PROBE"] != nil
+    let r1071Probe = Env.trace("CANDOR_R1071_PROBE")
     /// A chained package's OWN type that shares a platform protocol's name is not the platform protocol.
     func isDeclaredNonProtocol(_ key: String) -> Bool { deps.surface.knownKind(key).map { $0 != "protocol" } ?? false }
     // leaf -> the units THIS scan's extensions of a platform protocol declare under it, with each one's labels
@@ -4226,8 +4226,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // package's conformers cannot be named. R859's bound, word for word: the file imports a chained package and some
     // chained report publishes a body under the leaf — a package whose dependencies publish no row under that leaf
     // costs nothing.
-    let r1473Off = ProcessInfo.processInfo.environment["CANDOR_R1473_OFF"] != nil
-    let r1473Probe = ProcessInfo.processInfo.environment["CANDOR_R1473_PROBE"] != nil
+    let r1473Off = Env.on("CANDOR_R1473_OFF")
+    let r1473Probe = Env.trace("CANDOR_R1473_PROBE")
     var stdlibRefinersR1473: [String: Set<String>] = [:]   // platform protocol -> the platform protocols refining it
     for q in STDLIB_PROTOCOLS {
         var seen = Set<String>(), frontier = STDLIB_DIRECT_CONFORMANCES[q] ?? []
@@ -5004,7 +5004,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if let i = f.fnTypedParamIndex[n] { idxs.insert(i) }
                 else {
                     undischargeable.insert(n)
-                    if ProcessInfo.processInfo.environment["CANDOR_R720_PROBE"] != nil {
+                    if Env.trace("CANDOR_R720_PROBE") {
                         FileHandle.standardError.write(
                             "R720 undischargeable \(f.qual) :: \(n)\n".data(using: .utf8)!)
                     }
@@ -5592,7 +5592,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         let unknownSup = extSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })
                         var depAnswer: DepEntry?
                         if fluentEff != nil || unknownSup != nil, !deps.isEmpty,
-                           ProcessInfo.processInfo.environment["CANDOR_R657_OFF"] == nil {
+                           !Env.on("CANDOR_R657_OFF") {
                             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                             let pkgs = deps.chainedPkgs(importing: fileImports[file] ?? [])   // R565
                             for keys in [[type], extSupers.filter { !STD_PURE_PROTOCOLS.contains($0) }] {
@@ -5628,7 +5628,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             // REACH, counted on the CHANGED BRANCH (brief §E1): an unchanged row is not
                             // evidence the new code ran. `CANDOR_R657_PROBE=1` prints one line per call
                             // site this arm actually answered from a chained report.
-                            if ProcessInfo.processInfo.environment["CANDOR_R657_PROBE"] != nil {
+                            if Env.trace("CANDOR_R657_PROBE") {
                                 FileHandle.standardError.write(
                                     "R657HIT \(f.qual) -> \(type).\(member)\n".data(using: .utf8)!)
                             }
@@ -6047,8 +6047,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // matters most of all here: `Sendable`, `Collection`, `Sequence`, `Equatable`, `Hashable`
             // are the commonest generic bounds in Swift, their requirements are synthesized and pure,
             // and without that carve-out this would disclose over half the generic code in any package.
-            let r705Off = ProcessInfo.processInfo.environment["CANDOR_R705_OFF"] != nil
-            let r705UOff = ProcessInfo.processInfo.environment["CANDOR_R705U_OFF"] != nil   // §1b, the unchained arm
+            let r705Off = Env.on("CANDOR_R705_OFF")
+            let r705UOff = Env.on("CANDOR_R705U_OFF")   // §1b, the unchained arm
             var veinDUndecided: String? = nil   // VEIN D — set at the obligation-1 site, disclosed after the join
             let erasedForeignDispatch: String? = {
                 guard !r705Off, !call.unqualified, let owner = call.extOwner else { return nil }
@@ -6310,7 +6310,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let answers = Set(surfaced)
                     // An A/B diff cannot show that a mechanism never fired, or fired on the wrong thing —
                     // so the trigger, the `returns` answer and the entry lookup are each observable.
-                    if ProcessInfo.processInfo.environment["CANDOR_TYPESURFACE_DEBUG"] != nil {
+                    if Env.trace("CANDOR_TYPESURFACE_DEBUG") {
                         let verdict = answers.count > 1 ? "AMBIGUOUS"
                             : (hits.count == 1 ? "HIT " : (surfaced.isEmpty ? "MISS-returns" : "MISS-entry"))
                         let line = "TYPESURFACE-\(verdict) \(f.qual) :: \(callee) -> "
@@ -6625,7 +6625,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // it tagged every function touching a stdlib method in a blind-importing file (rampant false
             // uncertainty, sweep [33]/[36]). The construction (`BlindClient()`) / free call into a blind lib is
             // the honest signal; a member-only blind receiver is covered by the scan-level κ-ledger.
-            if ProcessInfo.processInfo.environment["CANDOR_R548_PROBE"] != nil, !resolved {
+            if Env.trace("CANDOR_R548_PROBE"), !resolved {
                 let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 FileHandle.standardError.write(
                     ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
@@ -6757,7 +6757,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 whyMap[f.qual, default: []].insert(why)
             }
             if !resolved, let abs = erasedForeignDispatch {
-                if ProcessInfo.processInfo.environment["CANDOR_R705_PROBE"] != nil {
+                if Env.trace("CANDOR_R705_PROBE") {
                     let line = "R705HIT \(f.qual) \(call.extOwner ?? "?")->\(abs).\(call.leaf) "
                         + "opaque=\(call.opaqueRecv)\n"
                     FileHandle.standardError.write(line.data(using: .utf8)!)
@@ -7208,7 +7208,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // An A/B diff shows which FUNCTIONS moved, never which KEY moved them — and the one
                 // over-fire this join has had (`String.init`, see `METATYPE_MEMBERS`) was invisible in
                 // the diff and obvious in this line. Same reason `CANDOR_TYPESURFACE_DEBUG` exists.
-                if ProcessInfo.processInfo.environment["CANDOR_DEPMEMBER_DEBUG"] != nil {
+                if Env.trace("CANDOR_DEPMEMBER_DEBUG") {
                     let kind = kinds.sorted().joined(separator: "+")
                     FileHandle.standardError.write(
                         "DEPMEMBER-\(hits.count == 1 ? "HIT " : "MISS") \(kind) \(f.qual) :: \(cand)\n"
@@ -7360,7 +7360,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for n in info.names { whyMap[caller, default: []].insert("callback:\(n)") }
             }
         }
-        if ProcessInfo.processInfo.environment["CANDOR_R127_PROBE"] != nil, !byCaller.isEmpty {
+        if Env.trace("CANDOR_R127_PROBE"), !byCaller.isEmpty {
             FileHandle.standardError.write(
                 ("R127 \(fq) callers=\(byCaller.count) anyResolved=\(anyCallerResolved) "
                  + "allResolved=\(allCallersResolved)\n").data(using: .utf8)!)

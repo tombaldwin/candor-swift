@@ -174,7 +174,7 @@ var target = "."
 var sawPositional = false
 var outPrefix: String? = nil
 var wantJson = false
-var policyPath: String? = ProcessInfo.processInfo.environment["CANDOR_POLICY"]
+var policyPath: String? = Env.operatorValue("CANDOR_POLICY")
 var gateJsonPath: String? = nil
 var wantWorkspace = false
 var scopeTarget: String? = nil
@@ -1545,9 +1545,7 @@ if wantWorkspace {
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: selfPath)
                 proc.arguments = [dp, "--json"]
-                var env = ProcessInfo.processInfo.environment
-                env["CANDOR_WORKSPACE_CHAIN"] = "1"; env["CANDOR_DEPS"] = depsDir
-                proc.environment = env
+                Env.applyChildEnvironment(proc, adding: ["CANDOR_WORKSPACE_CHAIN": "1", "CANDOR_DEPS": depsDir])
                 let pipe = Pipe(), errPipe = Pipe()
                 proc.standardOutput = pipe; proc.standardError = errPipe
                 // NOT `proc.waitUntilExit()`. On swift-corelibs-foundation it blocks FOREVER once the
@@ -1725,10 +1723,11 @@ if wantWorkspace {
 // Report chaining (SPEC §2, Deps.swift): CANDOR_DEPS overrides the config's `deps` key (the same
 // env-over-config precedence as `policy`). Fail-closed loading — a bad token/report exits 2 HERE,
 // before any analysis could silently read the dep as pure. --workspace's auto-scanned dir prepends.
-let envOrConfigDeps = ProcessInfo.processInfo.environment["CANDOR_DEPS"] ?? candorConfig["deps"]
+let envOrConfigDeps = Env.operatorValue("CANDOR_DEPS") ?? candorConfig["deps"]
 let depsSpec = [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":").isEmpty
     ? nil : [workspaceDepsDir, envOrConfigDeps].compactMap { $0 }.joined(separator: ":")
 var depsIndex = loadDepReports(spec: depsSpec, engineVersion: engineVersion)
+lastSwitchedDependencies = depsIndex.switchedPkgs.map { (package: $0.key, switches: $0.value.sorted(by: Env.byCodePoint)) }
 // SOUNDNESS R565 — the module -> owning-package map every §2 join, the κ coverage ledger and the two
 // ⟨0.39⟩ PUBLISH sites need. See `CandorCore.dependencyModulePackages` for the measurement and
 // `DepIndex.pkgOfModule` for the never-guess fallback.
@@ -1909,14 +1908,14 @@ for qual in reportQuals.sorted() {
 // Keyed under the implementor, as this loop did, the entry names a key nobody asks on and the measured
 // real-world instance is missed entirely. `abstractionOwnerPkg` decides, and OMITS what it cannot decide.
 /// SOUNDNESS R867 §1b KILL SWITCH and REACH PROBE (see the emission site below).
-let r867Off = ProcessInfo.processInfo.environment["CANDOR_R867_OFF"] != nil
-let r867Probe = ProcessInfo.processInfo.environment["CANDOR_R867_PROBE"] != nil
+let r867Off = Env.on("CANDOR_R867_OFF")
+let r867Probe = Env.trace("CANDOR_R867_PROBE")
 /// SOUNDNESS R1357/R1368 §1b KILL SWITCH — `CANDOR_R1357_OFF=1` restores v0.40.15's union exactly: the
 /// projection onto `inferred`/`invisible` alone, emitted iff that is non-empty, with no bound. See below.
-let r1357Off = ProcessInfo.processInfo.environment["CANDOR_R1357_OFF"] != nil
+let r1357Off = Env.on("CANDOR_R1357_OFF")
 /// …and its REACH probe: one `R1357HIT <kind> <hash>` stderr line per union this change touches (`dsp` gained
 /// a member, `pure` newly emitted, `broad` hedged past the bound), so a corpus A/B can say what it reached.
-let r1357Probe = ProcessInfo.processInfo.environment["CANDOR_R1357_PROBE"] != nil
+let r1357Probe = Env.trace("CANDOR_R1357_PROBE")
 do {
     // index: bare owner-type -> the (method, qual) pairs it owns (built once from the report quals);
     // ownersByTail tracks the DISTINCT full owner paths per bare tail, for the ambiguity guard below.
@@ -1928,7 +1927,7 @@ do {
     // `x.run(…)` through `any Runner` read `[]` (and, with R1551 closed, `Unknown`) over an implementor that
     // writes a file — while the same text with an unqualified parameter type published `Runner.run(Rec)`.
     // Kill switch `CANDOR_R1560_OFF` restores the old split.
-    let r1560Off = ProcessInfo.processInfo.environment["CANDOR_R1560_OFF"] != nil
+    let r1560Off = Env.on("CANDOR_R1560_OFF")
     for qual in reportQuals {
         let owner: String, method: String
         if r1560Off {
@@ -1940,7 +1939,7 @@ do {
             guard segs.count >= 2 else { continue }
             owner = segs.dropLast().joined(separator: ".")
             method = segs[segs.count - 1]
-            if ProcessInfo.processInfo.environment["CANDOR_R1551_PROBE"] != nil, segs != legacySegments(qual) {
+            if Env.trace("CANDOR_R1551_PROBE"), segs != legacySegments(qual) {
                 FileHandle.standardError.write("R1560HIT\t\(qual)\n".data(using: .utf8)!)
             }
         }
@@ -2791,6 +2790,9 @@ report.excluded = excludedByClass.keys.sorted().map {
      judgedElsewhere: DERIVED_EXCLUSIONS.contains($0),
      reason: EXCLUDED_REASON[$0] ?? "excluded (\($0))")
 }
+// ⟨0.42⟩ SPEC §2 `switches` — every result-moving switch this run SET and CONSULTED up to here (the reads are lazy, so
+// the analysis above is what consulted them). Taken as late as possible: the report is the last thing the analysis feeds.
+report.switches = Env.consultedSwitches()
 let envelope: [String: Any] = report.toJSON()
 var cg: [String: [String]] = [:]
 for f in allFns { cg[f.qual] = (edges[f.qual] ?? []).sorted() }  // §2.2: EVERY analyzed fn a key
@@ -3015,7 +3017,7 @@ var gatePolicyIgnored: [IgnoredLine] = []
 // env over the config `baseline` key (the same env-over-config precedence as `policy`; a relative
 // config value was anchored to the config's home dir in Config.swift). May exit 2 (invalid gate input:
 // unparseable / versionless / cross-build baseline); an ABSENT file is a note, guard inactive.
-var baselinePath: String? = ProcessInfo.processInfo.environment["CANDOR_BASELINE"]
+var baselinePath: String? = Env.operatorValue("CANDOR_BASELINE")
 // WHICH SOURCE supplied it decides what a MISSING file means (see checkBaseline): `CANDOR_BASELINE` is
 // set unconditionally by the adopt workflow, so an absent path there is "the ratchet is not adopted
 // yet"; a checked-in `baseline` line DECLARES that this repo has one, so an absent path there was
@@ -3038,11 +3040,14 @@ if peekListPath != nil { baselinePath = nil }
 // even empty) is true; else the config key present with an empty / true / 1 / yes value. When ON an
 // Unknown-only gain vs the baseline FAILS (AS-EFF-005) instead of being advisory.
 let unknownRatchet: Bool = {
-    if ProcessInfo.processInfo.environment["CANDOR_UNKNOWN_RATCHET"] != nil { return true }
+    if Env.operatorValue("CANDOR_UNKNOWN_RATCHET") != nil { return true }
     guard let v = candorConfig["unknown-ratchet"] else { return false }
     let lc = v.lowercased()
     return v.isEmpty || lc == "true" || v == "1" || lc == "yes"
 }()
+// ⟨0.42⟩ SPEC §3.3 cause (e): a gate (a baseline or a policy) run by a process that consulted a result-moving switch is
+// unanswerable. The report is already written above, so the refusal costs the harness nothing it attributes on.
+if policyPath != nil || baselinePath != nil { refuseGateIfSwitched() }
 if let bp = baselinePath {
     // `pkgName` is the §2 hash prefix this run publishes (`"<pkg>#<qualified>"`, line ~1582) — the guard
     // needs it to join on identity rather than on a bare name that any package can also spell.
@@ -3317,6 +3322,7 @@ for v in gateViolations { FileHandle.standardError.write(("[\(v.rule)] \(v.detai
 // --gate-json ⟨0.8⟩: the machine verdict, from the SAME gateViolations that set the exit code — written
 // BEFORE the exit below (ok:true,[] when no gate is configured). Unreadable policy already exited 2 above;
 // AS-EFF-005 records join the same list, so the verdict and the exit code can never disagree.
+if policyPath != nil || baselinePath != nil { refuseGateIfSwitched() }   // ⟨0.42⟩ again: the policy parse above may have consulted one
 if let gp = gateJsonPath { writeGateVerdict(gateViolations, to: gp, spec: specVersion, analyzedCount: allFns.count, unanalyzed: unanalyzedUnits, coverage: unlisted.map(\.key), policyVocabulary: gatePolicyVocabulary, netPartners: report.netPartners.map { [$0] } ?? [], unevaluated: gateUnevaluated, ignored: gatePolicyIgnored, outOfScope: report.outOfScope ?? [], unpeeked: unreadExclusions(report, policyDenies: peekPolicyDenies)) }   // ⟨0.15 staged⟩ advisory, verdict-preserving; ⟨0.21⟩ analyzed + fail-closed unanalyzed; ⟨0.24⟩ the config vocabulary that participated
 let gateConfigured = policyPath != nil || baselinePath != nil
 if gateConfigured {

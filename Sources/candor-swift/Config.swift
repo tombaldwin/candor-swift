@@ -47,7 +47,7 @@ func discoverConfig(targetPath: String, lenient: Bool = false) -> (path: String,
     // baseline, an engine pin, an `unknown-alias` vocabulary. The SCAN route already refuses; the QUERY
     // route did not, so `gate --report R --policy P` exited 1 here and 2 in java and ts on the same
     // input. §3.4's posture is the unreadable-policy one, and it does not vary by verb.
-    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+    if let override = Env.operatorValue("CANDOR_CONFIG") {
         guard let t = try? String(contentsOfFile: override, encoding: .utf8) else {
             // `lenient` RETURNS NIL WHERE THIS WOULD EXIT. The §3.3.1 pre-pass reads the config to learn
             // which files the sink must not overwrite, and it runs BEFORE arming — its own comment says
@@ -98,7 +98,7 @@ func discoverConfig(targetPath: String, lenient: Bool = false) -> (path: String,
 /// level too high and the guard protected a path the run never reads.
 func discoverConfigFile(targetPath: String) -> String? {
     let fm = FileManager.default
-    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+    if let override = Env.operatorValue("CANDOR_CONFIG") {
         return fm.fileExists(atPath: override) ? override : nil
     }
     var dir = (URL(fileURLWithPath: targetPath).standardizedFileURL.path as NSString).standardizingPath
@@ -118,7 +118,7 @@ func discoverConfigFile(targetPath: String) -> String? {
 
 func loadCandorConfig(targetPath: String, lenient: Bool = false) -> [String: String] {
     var file: String? = nil
-    if let override = ProcessInfo.processInfo.environment["CANDOR_CONFIG"] {
+    if let override = Env.operatorValue("CANDOR_CONFIG") {
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: override, isDirectory: &isDir) || isDir.boolValue {
             // ⟨0.24⟩ a broken gate CONFIG is an exit-2 cause like any other, and it writes the refusal

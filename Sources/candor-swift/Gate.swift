@@ -238,6 +238,10 @@ func writeGateVerdict(_ violations: [GateViolation], to path: String, spec: Stri
     // caller's exit code never consult it; omitted when empty so a fully-binding verdict is
     // byte-identical. Stashed by `evaluateGate` rather than passed, so no caller can forget it.
     if !lastGateZeroMatch.isEmpty { dict["zeroMatch"] = lastGateZeroMatch }
+    if !lastSwitchedDependencies.isEmpty {
+        dict["switchedDependencies"] = lastSwitchedDependencies.sorted { Env.byCodePoint($0.package, $1.package) }
+            .map { ["package": $0.package, "switches": $0.switches] as [String: Any] }
+    }
     if path == "-" {
         if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
            let s = String(data: data, encoding: .utf8) { print(s) }
@@ -308,6 +312,11 @@ nonisolated(unsafe) var lastGateZeroMatch: [String] = []
 /// `lastGateZeroMatch` above (so neither route can forget it). NIL means no `accept` line became an entry: the
 /// key is OMITTED and the verdict keeps its pre-⟨0.41⟩ bytes.
 nonisolated(unsafe) var lastGateAccepted: [[String: Any]]? = nil
+
+/// ⟨0.42⟩ SPEC §3.4 (d) `switchedDependencies` — the chained packages whose producers ran under a set switch, stashed by the
+/// scan route after `loadDepReports` and read by `writeGateVerdict`. Same shape and safety argument as `lastGateAccepted`.
+/// Empty means the key is OMITTED and the verdict keeps its pre-⟨0.42⟩ bytes. `gate --report` chains nothing, so it never sets it.
+nonisolated(unsafe) var lastSwitchedDependencies: [(package: String, switches: [String])] = []
 
 /// What `settleGateAccepts` hands back.
 struct GateAcceptOutcome {
@@ -566,8 +575,30 @@ func clearRefusalMarker(_ resolved: String? = nil) {
     }
 }
 
-func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Never {
-    writeRefusalMarker(reason)   // ⟨0.32⟩ over the RUN, not over the fourteen call sites
+/// ⟨0.42⟩ SPEC §3.3 cause (e) — the result-moving switches the refusal names (a union of the ones THIS process consulted and
+/// the ones the report being judged carries). Stashed by `gateCore`, like the other refusal facts, so the one writer below
+/// carries it on every route. Empty on every other refusal, whose document keeps its pre-⟨0.42⟩ bytes.
+nonisolated(unsafe) var gateRefusalSwitches: [String] = []
+
+/// ⟨0.42⟩ SPEC §3.4 (c): the sorted union of the switches this process consulted and `fromReports` (the `switches` of the
+/// report(s) being judged).
+func switchUnion(_ fromReports: some Sequence<String> = [String]()) -> [String] {
+    Array(Set(Env.consultedSwitches()).union(fromReports)).sorted(by: Env.byCodePoint)
+}
+
+/// ⟨0.42⟩ The scan route's cause (e): a gate (policy or baseline) run by a process that consulted a switch refuses. The
+/// report was already written (§3.4 (c): the refusal is the GATE's, and the report is what a harness attributes on), so no
+/// `.refused.json` marker is left either — the marker says "these reports are stale", and this one is not.
+func refuseGateIfSwitched() {
+    let names = switchUnion()
+    guard !names.isEmpty else { return }
+    refuseGateAndExit("candor-swift: " + Env.switchRefusalReason(names), switches: names, marker: false)
+}
+
+func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = [], switches: [String]? = nil,
+                       marker: Bool = true) -> Never {
+    let switches = switches ?? gateRefusalSwitches
+    if marker { writeRefusalMarker(reason) }   // ⟨0.32⟩ over the RUN, not over the fourteen call sites
     FileHandle.standardError.write((reason + "\n").data(using: .utf8)!)
     // DEDUPE AT THE WRITE, not at each append. Two code paths register the stream sink — the gate verb's
     // pre-pass (so a refusal during ARGUMENT PARSING still reaches stdout) and the flag loop that learns
@@ -580,7 +611,7 @@ func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Nev
     // the reason it is here and not in the two call sites that happen to exist today.
     var written = Set<String>()
     for t in gateVerdictSinks where written.insert(t).inserted {
-        writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated)
+        writeGateRefusal(reason, to: t, spec: specVersion, unevaluated: unevaluated, switches: switches)
     }
     // ⟨0.28⟩ REPORT STREAM: the same rule the verdict stream gets, one hop upstream. If `--json`
     // (report to stdout) was requested and stdout is not already claimed by `--gate-json -` (that
@@ -592,8 +623,10 @@ func refuseGateAndExit(_ reason: String, unevaluated: [Unevaluated] = []) -> Nev
     exit(2)
 }
 
-func writeGateRefusal(_ reason: String, to path: String, spec: String, unevaluated: [Unevaluated] = []) {
+func writeGateRefusal(_ reason: String, to path: String, spec: String, unevaluated: [Unevaluated] = [],
+                      switches: [String] = []) {
     var dict: [String: Any] = ["spec": spec, "ok": false, "refused": true, "reason": reason]
+    if !switches.isEmpty { dict["switches"] = switches }     // ⟨0.42⟩ §3.3 (e); omitted otherwise
     if !unevaluated.isEmpty { dict["unevaluated"] = unevaluatedJson(unevaluated) }
     guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]),
           let text = String(data: data, encoding: .utf8) else {
@@ -723,7 +756,7 @@ func gateInputFromScan(inferred: [String: Set<String>],
 /// Returns the violations AND the rules whose scope bound no function. The second is a DISCLOSURE
 /// beside the verdict, not a new verdict field — the verdict shape is spec-pinned.
 /// SOUNDNESS R952 §1b KILL SWITCH — restores the release's exemption of every `allow` from the zero-match pass.
-let r952Off = ProcessInfo.processInfo.environment["CANDOR_R952_OFF"] != nil
+let r952Off = Env.on("CANDOR_R952_OFF")
 
 func evaluateGate(_ pol: ParsedPolicy, _ gi: GateInput) -> (violations: [GateViolation], zeroMatch: [String], producers: [String]) {
     let inferred = gi.inferred

@@ -568,7 +568,7 @@ func buildTypeSurface040(pkg: String, collectors: [TypeSurfaceCollector], aliase
             }
             if !unknown.isEmpty {
                 unclosable.insert(path)
-                if ProcessInfo.processInfo.environment["CANDOR_R843_PROBE"] != nil {
+                if Env.trace("CANDOR_R843_PROBE") {
                     FileHandle.standardError.write("R843UNCLOSED \(pkg)#\(path) unknown=\(unknown.sorted()) extended=\(extendedPlatform.sorted())\n".data(using: .utf8)!)
                 }
             }

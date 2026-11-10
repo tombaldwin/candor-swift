@@ -89,6 +89,8 @@ struct GateReportEnvelope {
     /// soon as one member has. Starts `true` and is falsified per file, so a locator that resolved to no
     /// file at all never reaches the advisory — `loadGateReport` returns nil there and the caller exits 2.
     var judgedNothing = true
+    /// ⟨0.42⟩ SPEC §2 `switches`: the union of the result-moving switches the producers of these reports ran under.
+    var switches: Set<String> = []
 }
 
 /// Parse ONE report file into `env`. Returns false (loudly) on a file that is not a well-formed §2
@@ -245,6 +247,23 @@ private func mergeGateReport(_ full: String, into env: inout GateReportEnvelope)
     // cannot-answer): a report produced with no policy was never asked, so it must not exit 2 on contact.
     // ⟨0.31⟩ `netPartners` — read as written and shape-checked like every other §2 key: a present key
     // that cannot be read impeaches the document rather than being quietly dropped.
+    // ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634) — STRICT like every key whose non-emptiness is a refusal trigger: a
+    // present-but-garbled value read as "no switches" is the safe-LOOKING reading that deletes the refusal §3.3 (e)
+    // owes. ABSENT stays absent (a pre-⟨0.42⟩ producer, or a scan under no switch).
+    if let rawSW = obj["switches"] {
+        guard let arr = rawSW as? [Any] else {
+            return corrupt("`switches` is present and is not a list of names — a verdict-bearing key that cannot be "
+                           + "read impeaches the whole document (§2), and read as empty it would delete the refusal "
+                           + "§3.3 (e) owes")
+        }
+        for s in arr {
+            guard let n = s as? String, !n.isEmpty else {
+                return corrupt("a `switches` member is not a non-empty string — a verdict-bearing key that cannot "
+                               + "be read impeaches the whole document (§2)")
+            }
+            env.switches.insert(n)
+        }
+    }
     if let rawNP = obj["netPartners"] {
         guard let m = rawNP as? [String: Any],
               let cfg = m["config"] as? String,
@@ -918,6 +937,17 @@ func gateCore(policyPath: String, policyText: String, reportFlag: String?, annou
     }
     guard let env = loadGateReport(prefix: prefix) else {
         return die("candor-swift gate: no readable report at `\(prefix)` — nothing to gate (scan: candor-swift <dir>)")
+    }
+    // ⟨0.42⟩ SPEC §3.3 cause (e) / §3.4 (c), SOUNDNESS R1634: A GATE UNDER A SET RESULT-MOVING SWITCH IS UNANSWERABLE. Two
+    // sources, UNIONED: (i) a switch THIS process consulted — a gate that ran no analysis consults none, and an engine MUST
+    // NOT read every switch at start, so `gate --report` in an environment holding a scan-time switch judges a clean report
+    // as it would without it — and (ii) a non-empty `switches` on a report being judged, which a switched scan wrote. Exit 2
+    // and the §3.1 refusal document (no `violations`) naming them; a violation does NOT dominate it (§3.3 (e)), so this sits
+    // before the evaluation and not beside the other precedence arms.
+    let switched = switchUnion(env.switches)
+    if !switched.isEmpty {
+        gateRefusalSwitches = switched
+        return die("candor-swift gate: " + Env.switchRefusalReason(switched))
     }
     // ⟨0.24⟩ A REPORT THAT JUDGED NOTHING IS NOT AN ALL-CLEAR (SPEC §2's three-row table, bound to this
     // verb by §3.1: "a report presented DIRECTLY to the gate with `analyzed.count: 0` makes the same claim

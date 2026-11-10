@@ -166,7 +166,7 @@ struct DepIndex {
         // REACH, not an assumption: an unchanged A/B row is not evidence the branch ran (§E1). This prints
         // one line per call where the OLD membership test and the NEW predicate DISAGREE — i.e. exactly the
         // sites R649 moves — so "CHANGED n" can be read against a hit count rather than hoped about.
-        if !free, byKey[key] != nil, ProcessInfo.processInfo.environment["CANDOR_R649_DEBUG"] != nil {
+        if !free, byKey[key] != nil, Env.trace("CANDOR_R649_DEBUG") {
             FileHandle.standardError.write("R649-HIT \(key)\n".data(using: .utf8)!)
         }
         return r616Off ? (byKey[key] != nil) : free
@@ -242,6 +242,10 @@ struct DepIndex {
     /// has no entries to touch in the ordinary case; the branch matters for the contradictory report that
     /// carries entries anyway, where dropping them would be the mirror sin.
     var unjudgedPkgs: Set<String> = []
+    /// ⟨0.42⟩ SPEC §3.4 (d): per chained package, the result-moving switches a chained report says its PRODUCER ran under.
+    /// A DISCLOSURE only — no coverage, entry or exit decision reads it (the consumer's own run is not switched and cannot
+    /// judge what a dependency's environment did). Read leniently: it can only ADD the advisory.
+    var switchedPkgs: [String: Set<String>] = [:]
     /// Does ANY chained report — trusted or not — claim this package? The predicate the JOIN gates use.
     /// Coverage decides whether SILENCE is a claim; chaining decides whether a key is worth ASKING.
     /// Conflating the two is the defect this split exists to close, and it bites in BOTH directions:
@@ -581,18 +585,18 @@ private func depsFail(_ msg: String) -> Never {
 /// all split the same way, so a tail2 key reads `C.m` no matter which engine produced the report.
 /// SOUNDNESS R567(b) §1b KILL SWITCH — restores the free-function-only overload-key widening, i.e. the
 /// exact pre-fix key set for a METHOD. See the widening site in `loadDepReports`.
-private let r567bOff = ProcessInfo.processInfo.environment["CANDOR_R567B_OFF"] != nil
+private let r567bOff = Env.on("CANDOR_R567B_OFF")
 /// §1b KILL SWITCH for SOUNDNESS R649 — restores `depShadows`'s old `byKey` membership test, i.e. exactly
 /// the pre-fix behaviour, so `DepFreeNameShadowProcessTests` can be SHOWN to fail without a revert.
-private let r616Off = ProcessInfo.processInfo.environment["CANDOR_R616_OFF"] != nil
+private let r616Off = Env.on("CANDOR_R616_OFF")
 
 /// §1b KILL SWITCH for SOUNDNESS R1551 — restores the pre-⟨0.42⟩ key derivation (split inside the
 /// disambiguator; bare key only from the leaf's first `(`), i.e. exactly the pre-fix key set.
-private let r1551Off = ProcessInfo.processInfo.environment["CANDOR_R1551_OFF"] != nil
+private let r1551Off = Env.on("CANDOR_R1551_OFF")
 /// …and its REACH probe: one `R1551HIT <pkg>#<qual>` stderr line per chained entry whose segmentation the
 /// ⟨0.42⟩ rule changes (a separator inside its disambiguator, or a bare `#<N>`), so a corpus A/B can say
 /// how many producer entries the change reached.
-private let r1551Probe = ProcessInfo.processInfo.environment["CANDOR_R1551_PROBE"] != nil
+private let r1551Probe = Env.trace("CANDOR_R1551_PROBE")
 
 /// ⟨0.42⟩ SOUNDNESS R1551 — split OUTSIDE the disambiguator (CandorCore `nameSegments`). The old split
 /// made `Box.act(Models.Inner.Rec)`'s leaf `Rec)`, so the R567(b) bare-path key below never saw the `(`
@@ -650,6 +654,14 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
         // v0.2+ envelope `{candor, package, functions}` or the legacy bare array (no version → stale).
         let obj = root as? [String: Any]
         idx.reportsRead += 1   // ⟨0.29⟩ see `reportsRead` — a report was READ, whatever it holds
+        // ⟨0.42⟩ SPEC §3.4 (d): a chained report whose producer ran under a set switch. Keyed by package, so a package chained
+        // twice is advised once.
+        if let sw = (obj?["switches"] as? [Any])?.compactMap({ $0 as? String }).filter({ !$0.isEmpty }), !sw.isEmpty {
+            var pkgs = ((obj?["packages"] as? [String]) ?? []).filter { !$0.isEmpty }
+            if let p = obj?["package"] as? String, !p.isEmpty { pkgs.append(p) }
+            if pkgs.isEmpty { pkgs = [((f as NSString).lastPathComponent as NSString).deletingPathExtension] }
+            for p in pkgs { idx.switchedPkgs[p, default: []].formUnion(sw) }
+        }
         let fns = (obj?["functions"] as? [Any]) ?? (root as? [Any]) ?? []
         // §2.1 at the join: a MISSING producing version is as unverifiable as a mismatched one (the
         // family condition — candor-ts: `d.candor?.version !== ENGINE_VERSION`).
@@ -1028,6 +1040,15 @@ func loadDepReports(spec: String?, engineVersion: String) -> DepIndex {
     // negative one — and swift's `insert` keeps the TRUSTED answer on a fresh/stale collision (`ca5feb0`)
     // rather than withdrawing the key, which is what made rust's refusal rust-specific on that axis.
     idx.stalePkgs.subtract(idx.coveredPkgs)
+    // ⟨0.42⟩ SPEC §3.4 (d): ONE line per package, on stderr (the channel a corrupt chained report already uses); the exit is
+    // untouched and the verdict gains `switchedDependencies` (see `writeGateVerdict`).
+    for p in idx.switchedPkgs.keys.sorted(by: Env.byCodePoint) {
+        FileHandle.standardError.write(
+            ("candor-swift: the chained dependency report for `\(p)` was produced under a set result-moving switch "
+             + "(\(idx.switchedPkgs[p]!.sorted(by: Env.byCodePoint).joined(separator: ", "))) — its rows are NOT a conforming report "
+             + "of its `spec`, and an absent row is a purity claim made by an altered engine (SPEC §3.4 (d)); the exit is unchanged\n")
+                .data(using: .utf8)!)
+    }
     if !idx.incompletePkgs.isEmpty {
         FileHandle.standardError.write(
             ("candor-swift: \(idx.incompletePkgs.count) chained dependency report(s) declare source they "

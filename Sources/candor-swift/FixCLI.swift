@@ -86,6 +86,8 @@ struct ReportCoverage {
 // `claimsToHaveJudgedNothing` predicate the chained dep-join and `gate --report` already use, so a report
 // cannot be judged-nothing on one route and not the other.
 struct ReportCompleteness {
+    /// ⟨0.42⟩ SPEC §2 `switches`, unioned over the loaded reports: the result-moving switches their producers ran under.
+    var switches: Set<String> = []
     var unanalyzed: [(path: String, reason: String)] = []
     /// ⟨0.28⟩ The report FILES under this locator that say they judged nothing — SPEC §2's
     /// `analyzed.count == 0` row. A THIRD CAUSE, not a third spelling of the first: `unanalyzed` names
@@ -510,6 +512,13 @@ private func mergeCompleteness(_ obj: [String: Any], path: String, entryCount: I
         guard let p = m["path"] as? String else { continue }
         c.unanalyzed.append((path: p, reason: m["reason"] as? String ?? ""))
     }
+    // ⟨0.42⟩ `switches`: collected for the advisory verbs that answer `ok` (see `refuseAdvisoryUnderSwitches`). A garbled
+    // value rides `unreadable`, the fail-closed arm, as the other verdict-bearing keys do.
+    if let rawSW = obj["switches"] {
+        if let arr = rawSW as? [Any], arr.allSatisfy({ ($0 as? String)?.isEmpty == false }) {
+            for s in arr { c.switches.insert(s as! String) }
+        } else { c.unreadable.append(path) }
+    }
     // ⟨0.28⟩ …AND THEN SPLIT BY WHICH ROW OF SPEC §2's TABLE IT IS, which is a SECOND question asked of
     // the same envelope, never an edit to the answer above. `claimsToHaveJudgedNothing` decides COVERAGE
     // on two other routes (the chained dep-join's `coveredPkgs`, `gate --report`), where a manifest-less
@@ -643,6 +652,20 @@ func emitAdvisoryAnswer(_ body: [String: Any], ok: Bool, completeness c: ReportC
     if !withdrawOk { out["ok"] = ok }
     emitJSON(out)
     exit(strict && !ok ? 1 : 0)
+}
+
+/// ⟨0.42⟩ SPEC §3.4 (c): the ADVISORY verbs that answer `ok` (`unverified`, `fix-gate`) refuse, as the gate does, over a
+/// report whose producer ran under a set switch or in a process that consulted one — exit 2 and the §3.1 refusal document
+/// whether or not `--strict` is given, because a verb that answered over a switched report would accept what the gate
+/// refuses, and an advisory verb may be less certain than the gate, never more (§3.3.1). `fix`, which answers no `ok`, is
+/// not bound by this and never calls it.
+func refuseAdvisoryUnderSwitches(who: String, _ c: ReportCompleteness) {
+    let names = switchUnion(c.switches)
+    guard !names.isEmpty else { return }
+    let why = Env.switchRefusalReason(names)
+    FileHandle.standardError.write("candor-swift \(who): \(why)\n".data(using: .utf8)!)
+    emitJSON(["spec": specVersion, "ok": false, "refused": true, "reason": why, "switches": names] as [String: Any])
+    exit(2)
 }
 
 // Parse one `functions`-envelope report file into `byName` (+ its coverage disclosure into `coverage`).
@@ -1030,7 +1053,7 @@ private func quietPrefixMatches(_ prefix: String) -> Bool {
 // the CWD for a `.candor/` directory and use `<that>/.candor/report` as the prefix (§3.4 discovery,
 // mirroring Config.swift's ancestor walk). Returns nil if neither is found (the caller fails loud).
 func discoverReportPrefix() -> String? {
-    if let env = ProcessInfo.processInfo.environment["CANDOR_REPORT"], !env.isEmpty {
+    if let env = Env.operatorValue("CANDOR_REPORT"), !env.isEmpty {
         return resolveReportLocator(env)
     }
     var dir = (URL(fileURLWithPath: FileManager.default.currentDirectoryPath).standardizedFileURL.path as NSString).standardizingPath
@@ -1053,7 +1076,7 @@ func discoverReportPrefix() -> String? {
 // Internal (not private) so ⟨0.24⟩ `gate --report` inherits the SAME §3.3.1 fallback as fix/fix-gate/
 // unverified rather than open-coding a second one.
 func discoverPolicy() -> String? {
-    if let env = ProcessInfo.processInfo.environment["CANDOR_POLICY"], !env.isEmpty { return env }
+    if let env = Env.operatorValue("CANDOR_POLICY"), !env.isEmpty { return env }
     let cfg = loadCandorConfig(targetPath: ".")
     if let p = cfg["policy"], !p.isEmpty { return p }
     return nil
@@ -1269,6 +1292,7 @@ func runUnverifiedCLI(_ args: [String]) -> Never {
     guard let loaded = loadUnverifiedFns(prefix: prefix) else {
         fixDie("candor-swift unverified: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
     }
+    refuseAdvisoryUnderSwitches(who: "unverified", loaded.completeness)
     let fns = loaded.fns
     // §6.2 ⟨0.24⟩: an unrecognised token is a USAGE ERROR (exit 2) and NO answer is emitted — a narrower
     // result one exit code away from a refusal is the same fail-open in a different hat. See
@@ -1711,6 +1735,7 @@ func runFixCLI(_ args: [String]) -> Never {
         guard let model = loadFixModel(prefix: prefix, who: "fix-gate") else {
             fixDie("candor-swift fix-gate: no report for prefix `\(prefix)` — scan first (candor-swift <dir> --out \(prefix))")
         }
+        refuseAdvisoryUnderSwitches(who: "fix-gate", model.completeness)
         // ⟨0.28⟩ a zero-rule policy asked nothing — the caveat document, result keys withheld, exit
         // unchanged. No-op when any rule of any kind parsed.
         // ⟨0.32⟩ the unread-class cause, armed against THIS run's policy — see `armingUnread`. One

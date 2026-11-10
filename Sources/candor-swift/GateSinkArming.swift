@@ -9,6 +9,7 @@
 //  * NEVER ARM OVER AN INPUT. The write happens before the run knows its answer, so a sink that names
 //    the policy file destroys the policy — and a gate over zero rules is exit 0, `"ok": true`.
 
+import CandorCore
 import Foundation
 
 /// Learn `--gate-json` and `--policy` from argv with NO side effects.
@@ -491,18 +492,17 @@ func runInputs(_ target: String?, _ policyFlag: String?) -> [(String, String)] {
     // mistake that took 33 tests down when it was tried on the dep side. Defaults to "." exactly as
     // the config discovery below anchors there: the tree the run reads when no positional names one.
     out.append((target ?? ".", "the scan target"))
-    let env = ProcessInfo.processInfo.environment
     if let p = policyFlag { out.append((p, "--policy")) }
     for (v, label) in [("CANDOR_POLICY", "CANDOR_POLICY"), ("CANDOR_BASELINE", "CANDOR_BASELINE"),
                        ("CANDOR_CONFIG", "CANDOR_CONFIG")] {
-        if let x = env[v], !x.isEmpty { out.append((x, label)) }
+        if let x = Env.operatorValue(v), !x.isEmpty { out.append((x, label)) }
     }
     // THE SAME SET THE LOADER USES — `isDepSeparator`. This comment claimed that while spelling a
     // DIFFERENT set: it omitted `\n` and `\r`, so a newline-separated `CANDOR_DEPS` was ONE
     // unresolvable token here and two real paths in the loader. A `--gate-json` naming one of those
     // reports was then unguarded — arming overwrote it and the run exited 0 with `ok: true` written
     // over the operator's own dep report. Measured live in three engines; java was the intact control.
-    for d in (env["CANDOR_DEPS"] ?? "").split(whereSeparator: isDepSeparator)
+    for d in (Env.operatorValue("CANDOR_DEPS") ?? "").split(whereSeparator: isDepSeparator)
         .map(String.init) where !d.isEmpty {
         out.append((d, "a CANDOR_DEPS report"))
         // A DIRECTORY DEP IS EVERY REPORT INSIDE IT — the loader walks it, so registering only the

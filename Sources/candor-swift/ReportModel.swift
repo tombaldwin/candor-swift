@@ -165,6 +165,10 @@ struct Report {
     // to anchor `net-partner` at, and re-classifying through the consumer's own config is the
     // re-derivation ⟨0.24⟩ forbids; both routes copy this one record.
     var netPartners: (config: String, hosts: [String])? = nil
+    // ⟨0.42⟩ SPEC §2 `switches` (SOUNDNESS R1634): the result-moving environment switches SET and CONSULTED by the
+    // producing run — names only, code-point sorted. Empty (key OMITTED) under no switch, so such a report is
+    // byte-identical to a pre-rung one. `spec` is NOT changed (§3.4 (b)).
+    var switches: [String] = []
     // ⟨scope travels⟩ What `--target` resolved, when it resolved against an `.xcodeproj`. The report is
     // read LATER by `privacy-manifest --verify`, which has only a report and a plist — so everything the
     // scan learned about which binary this is has to be IN the artifact or it is lost. Today the verify
@@ -259,6 +263,7 @@ struct Report {
         // ⟨0.31⟩ after `outOfScope`, before `functions` — the position ts, rust and java also use, so key
         // order does not depend on which engine produced the report.
         if let np = netPartners { env["netPartners"] = ["config": np.config, "hosts": np.hosts] }
+        if !switches.isEmpty { env["switches"] = switches }
         return env
     }
 }

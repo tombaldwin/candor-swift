@@ -500,43 +500,43 @@ final class DeclCollector: SyntaxVisitor {
     var caseAssocMetatype: [String: Set<String>] = [:]
     /// SOUNDNESS R990–R998 §1b KILL SWITCHES — each restores the release's reading of one binder, so the
     /// value-typing fixtures can be SHOWN to fail without a revert. `CANDOR_VT_OFF` turns every one off.
-    static let vtOff = ProcessInfo.processInfo.environment["CANDOR_VT_OFF"] != nil
+    static let vtOff = Env.on("CANDOR_VT_OFF")
     /// SOUNDNESS R1176 / R1175 kill switches (R1176: the five in-package witness shapes; R1175: the deterministic,
     /// untruncated witness walk; R1175C: a CLASS operand's witnesses instead of a walk into its stored properties).
-    static let r1176Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R1176_OFF"] != nil
-    static let r1175Off = ProcessInfo.processInfo.environment["CANDOR_R1175_OFF"] != nil
-    static let r1175cOff = r1175Off || ProcessInfo.processInfo.environment["CANDOR_R1175C_OFF"] != nil
-    static let r990Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R990_OFF"] != nil
-    static let r905HOff = ProcessInfo.processInfo.environment["CANDOR_R905H_OFF"] != nil   // SOUNDNESS R905 residual
-    static let r1010Off = ProcessInfo.processInfo.environment["CANDOR_R1010_OFF"] != nil   // SOUNDNESS R1010
-    static let r1044Off = ProcessInfo.processInfo.environment["CANDOR_R1044_OFF"] != nil   // SOUNDNESS R1044
-    static let r1044bOff = ProcessInfo.processInfo.environment["CANDOR_R1044B_OFF"] != nil // SOUNDNESS R1044 residual
-    static let r1044nOff = ProcessInfo.processInfo.environment["CANDOR_R1044N_OFF"] != nil // SOUNDNESS R1044 nested
-    static let r1072Off = ProcessInfo.processInfo.environment["CANDOR_R1072_OFF"] != nil   // SOUNDNESS R1072
-    static let r1073Off = ProcessInfo.processInfo.environment["CANDOR_R1073_OFF"] != nil   // SOUNDNESS R1073
-    static let r1081Off = ProcessInfo.processInfo.environment["CANDOR_R1081_OFF"] != nil   // SOUNDNESS R1081
-    static let r991Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R991_OFF"] != nil
-    static let r992Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R992_OFF"] != nil
-    static let r993Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R993_OFF"] != nil
-    static let r994Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R994_OFF"] != nil
-    static let r995Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R995_OFF"] != nil
-    static let r996Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R996_OFF"] != nil
-    static let r997Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R997_OFF"] != nil
-    static let r998Off = vtOff || ProcessInfo.processInfo.environment["CANDOR_R998_OFF"] != nil
+    static let r1176Off = vtOff || Env.on("CANDOR_R1176_OFF")
+    static let r1175Off = Env.on("CANDOR_R1175_OFF")
+    static let r1175cOff = r1175Off || Env.on("CANDOR_R1175C_OFF")
+    static let r990Off = vtOff || Env.on("CANDOR_R990_OFF")
+    static let r905HOff = Env.on("CANDOR_R905H_OFF")   // SOUNDNESS R905 residual
+    static let r1010Off = Env.on("CANDOR_R1010_OFF")   // SOUNDNESS R1010
+    static let r1044Off = Env.on("CANDOR_R1044_OFF")   // SOUNDNESS R1044
+    static let r1044bOff = Env.on("CANDOR_R1044B_OFF") // SOUNDNESS R1044 residual
+    static let r1044nOff = Env.on("CANDOR_R1044N_OFF") // SOUNDNESS R1044 nested
+    static let r1072Off = Env.on("CANDOR_R1072_OFF")   // SOUNDNESS R1072
+    static let r1073Off = Env.on("CANDOR_R1073_OFF")   // SOUNDNESS R1073
+    static let r1081Off = Env.on("CANDOR_R1081_OFF")   // SOUNDNESS R1081
+    static let r991Off = vtOff || Env.on("CANDOR_R991_OFF")
+    static let r992Off = vtOff || Env.on("CANDOR_R992_OFF")
+    static let r993Off = vtOff || Env.on("CANDOR_R993_OFF")
+    static let r994Off = vtOff || Env.on("CANDOR_R994_OFF")
+    static let r995Off = vtOff || Env.on("CANDOR_R995_OFF")
+    static let r996Off = vtOff || Env.on("CANDOR_R996_OFF")
+    static let r997Off = vtOff || Env.on("CANDOR_R997_OFF")
+    static let r998Off = vtOff || Env.on("CANDOR_R998_OFF")
     /// SOUNDNESS R585 §1b KILL SWITCH, the DECLARATION-side half. `CallCollector`'s switch degrades the
     /// resolvers; this one degrades the one index change that is visible THROUGH an older resolver —
     /// `metatypeParams` peeling an Optional (b8), which reaches R584's `typeBoundParams` arm and would
     /// otherwise keep answering with R585 switched off. A kill switch that restores only part of a
     /// change is a comment, not a switch.
-    static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
+    static let r585Off = Env.on("CANDOR_R585_OFF")
     /// SOUNDNESS R915 §1b KILL SWITCH — restores 519f62d's receiver typing (member aliases, the specialised-ctor
     /// field, inherited fields, nested type paths). Read by DeclCollector, the Driver and CallCollector alike.
-    static let r915Off = ProcessInfo.processInfo.environment["CANDOR_R915_OFF"] != nil
+    static let r915Off = Env.on("CANDOR_R915_OFF")
     /// Per-arm switches (attribution only): A nested type path, B member alias, C inherited field, D specialised ctor.
-    static let r915AOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915A_OFF"] != nil
-    static let r915BOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915B_OFF"] != nil
-    static let r915COff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915C_OFF"] != nil
-    static let r915DOff = r915Off || ProcessInfo.processInfo.environment["CANDOR_R915D_OFF"] != nil
+    static let r915AOff = r915Off || Env.on("CANDOR_R915A_OFF")
+    static let r915BOff = r915Off || Env.on("CANDOR_R915B_OFF")
+    static let r915COff = r915Off || Env.on("CANDOR_R915C_OFF")
+    static let r915DOff = r915Off || Env.on("CANDOR_R915D_OFF")
     // `static let shared = factory()` — Type.field -> factory leaf, resolved to the vended type AFTER
     // the returns index is built (a free factory's return type isn't known during this first pass).
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
@@ -2066,8 +2066,8 @@ final class DeclCollector: SyntaxVisitor {
     // as the type itself — `Self`, its own name (optionally `?`), or that name over the TYPE's own generic
     // parameters. A free function's two operands must be the same plain name. Anything else answers nil, which
     // only ever keeps the witness edge (an over-charge at worst, never a silence).
-    static let r1270Off = ProcessInfo.processInfo.environment["CANDOR_R1270_OFF"] != nil
-    static let r1272Off = ProcessInfo.processInfo.environment["CANDOR_R1272_OFF"] != nil
+    static let r1270Off = Env.on("CANDOR_R1270_OFF")
+    static let r1272Off = Env.on("CANDOR_R1272_OFF")
     private func selfOperandType(_ sig: FunctionSignatureSyntax, ownGenerics: Bool, ownWhere: Bool, node: Syntax) -> String? {
         let ps = Array(sig.parameterClause.parameters)
         guard ps.count == 2, !ownGenerics, !ownWhere, ps.allSatisfy({ $0.ellipsis == nil && $0.defaultValue == nil }) else { return nil }
@@ -2543,7 +2543,7 @@ final class DeclCollector: SyntaxVisitor {
                 p = cur.parent
             }
             pendingBodyLocalTypes.append((node: n, conditional: conditional))
-            if ProcessInfo.processInfo.environment["CANDOR_R532_INSTR"] == "1" {
+            if Env.traceValue("CANDOR_R532_INSTR") == "1" {
                 let l = n.startLocation(converter: converter)
                 FileHandle.standardError.write(
                     "R532HIT \(file):\(l.line) \(n.asProtocol(NamedDeclSyntax.self)?.name.text ?? "?")\n".data(using: .utf8)!)

@@ -1,3 +1,4 @@
+import CandorCore
 import Foundation
 
 // CALL-TARGET ROUND 2 — ONE ENTRY POINT FOR "WHICH PLATFORM MEMBER RUNS A USER WITNESS HERE".
@@ -36,7 +37,7 @@ func declLabelsAdmit(_ call: [String?], _ trailing: Int, _ decl: [String]) -> Bo
 
 /// Kill switch: every derived witness site inert (the four call sites below recognise NOTHING — not the release's
 /// lists; the published binary is the before-arm). Diagnosis only.
-let ct2SitesOff = ProcessInfo.processInfo.environment["CANDOR_CT2_SITES_OFF"] != nil
+let ct2SitesOff = Env.on("CANDOR_CT2_SITES_OFF")
 
 /// The witnesses (`==`, `<`, `hash`) the platform member `<kind>.<name>` runs at a call spelled with `labels`
 /// (no closure arguments: the caller has already excluded a closure form), or `[]` when the table names none.

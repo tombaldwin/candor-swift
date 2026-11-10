@@ -10,6 +10,20 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SPEC ⟨0.42⟩ result-moving switches are named in the report, and a gate under one refuses (SOUNDNESS R1634).** An
+  environment variable that selects which logic ran (a kill switch for a closed defect, an opt-in mode: 177 in this engine)
+  used to change report bytes and gate verdicts with nothing recording it. Now the report carries `"switches": [ "<NAME>", … ]`
+  (names only, code-point sorted, OMITTED when empty, so a scan under no switch is byte-identical to before; `spec` is
+  unchanged and such a report is not a conforming report of it). A `scan --policy`/baseline run that consulted a switch, and
+  `gate --report` / `unverified` / `fix-gate` over a report carrying one, exit 2 with the §3.1 refusal document (`ok: false`,
+  `refused: true`, no `violations`, `switches`, a `reason` naming them) whatever `--strict` says; a refused scan still writes its
+  report. `fix` is not bound. A chained dependency report carrying `switches` gets one stderr advisory per package and the
+  verdict gains `switchedDependencies` (ordered by package); the exit is untouched. Every environment read now goes through
+  `CandorCore.Env` (switch / trace / operator reads plus the child environment), read where the logic is reached, never at
+  process start, so `gate --report` in an environment holding a scan-time switch judges as it would without it. There is no
+  list of names: `EnvLintTests` is a SwiftSyntax source gate (shown red on 22 seeded spellings) that fails on any environment
+  read outside `Env.swift`. Conformance PART 109.
+
 - **⚠ SPEC ⟨0.42⟩ co-path units: a name's overload disambiguator is part of its last segment (SOUNDNESS R1551,
   R1549, R1550, R1560).** This engine spells an overload `Box.act(Models.Inner.Rec)`, and the parameter list
   can carry `.` and `::`. Four readers split the whole name on those separators, so `Inner` became a path

@@ -2747,7 +2747,7 @@ public func desugaredType(_ t: TypeSyntax) -> TypeSyntax {
 }
 
 /// SOUNDNESS R976 §1b KILL SWITCH — restores the release's node-kind-only reading of every type spelling.
-public let R976_OFF = ProcessInfo.processInfo.environment["CANDOR_R976_OFF"] != nil
+public let R976_OFF = Env.on("CANDOR_R976_OFF")
 
 /// The stdlib generic containers whose `Swift.`-qualified spelling `desugaredType` strips to the bare name.
 public let STDLIB_GENERIC_CONTAINERS: Set<String> =
@@ -2821,7 +2821,7 @@ public func metatypeBaseName(_ t: TypeSyntax) -> String? {
     return nil
 }
 /// SOUNDNESS R1506 §1b KILL SWITCH (the CandorCore half; `CallCollector.r1506Off` reads the same variable).
-public let r1506OffCore = ProcessInfo.processInfo.environment["CANDOR_R1506_OFF"] != nil
+public let r1506OffCore = Env.on("CANDOR_R1506_OFF")
 
 /// SOUNDNESS R585 — the ELEMENT of an array of metatypes (`[X.Type]`), or nil. The array spellings
 /// `arrayElementName` answers for ordinary types, asked of the metatype question instead.

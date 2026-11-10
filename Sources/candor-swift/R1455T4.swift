@@ -41,7 +41,7 @@ struct ClosureSigIndexT4 {
     var fieldOwnersByLeaf: [String: Set<String>] = [:]
     var isEmpty: Bool { byLeaf.isEmpty }
 
-    static let off = ProcessInfo.processInfo.environment["CANDOR_R1455T4_OFF"] != nil
+    static let off = Env.on("CANDOR_R1455T4_OFF")
 
     /// The well-known associated-type / generic-parameter spellings of the standard library's protocols and types. A
     /// declaration on a type this scan declares may still write one of them when it is a conformer's witness

@@ -16,7 +16,7 @@ import SwiftSyntax
 import CandorCore
 
 enum R1455 {
-    static let probe = ProcessInfo.processInfo.environment["CANDOR_R1455_PROBE"] != nil
+    static let probe = Env.trace("CANDOR_R1455_PROBE")
     private static let roots = ["FileManager", "FileHandle", "URLSession", "URL", "NSURLConnection", "File", "Folder",
         "Storage", "Process", "Logger", "OSLog", "NSPasteboard", "UIPasteboard", "UserDefaults", "Bundle", "Date",
         "ContinuousClock", "DispatchTime", "NWBrowser", "NWConnection", "NSXPCConnection", "NSManagedObjectContext",
@@ -219,7 +219,7 @@ enum R1455 {
 
     /// Gate for the PRICING arm: `CANDOR_R1455_HEDGE_ONLY=T4,T5,T6` makes the X-arm marker (`CANDOR_CT2_FALLBACK=X`)
     /// fire only at those classes, i.e. prices the hedge for the REMAINDER if the other classes were resolved.
-    static let hedgeOnly: Set<String>? = ProcessInfo.processInfo.environment["CANDOR_R1455_HEDGE_ONLY"].map {
+    static let hedgeOnly: Set<String>? = Env.value("CANDOR_R1455_HEDGE_ONLY").map {
         Set($0.split(separator: ",").map(String.init))
     }
 

@@ -434,9 +434,9 @@ final class CallCollector: SyntaxVisitor {
     let paramDeclTypesR996: [String: TypeSyntax]   // SOUNDNESS R996 — each parameter's WRITTEN type
     let genericParamNamesFn: Set<String>            // SOUNDNESS R974 (c) — this function's own generic parameters
     let genericBoundsR951: [String: String]
-    static let r951Off = ProcessInfo.processInfo.environment["CANDOR_R951_OFF"] != nil
+    static let r951Off = Env.on("CANDOR_R951_OFF")
     static let r1176Off = DeclCollector.r1176Off   // SOUNDNESS R1176
-    static let r951Probe = ProcessInfo.processInfo.environment["CANDOR_R951_PROBE"] != nil
+    static let r951Probe = Env.trace("CANDOR_R951_PROBE")
     /// VEIN A(i) — the scope `canonicalTypeRef` resolves a type spelling in. See `AiTypeIndex`.
     let ai: AiTypeIndex
     /// VEIN A(i) / SOUNDNESS R790 — `typealias` declarations written INSIDE this unit's body. DeclCollector
@@ -445,15 +445,15 @@ final class CallCollector: SyntaxVisitor {
     /// R1101 — the spellings `canonicalTypeRef` is resolving on the current stack (cycle guard).
     private var aiResolving: Set<String> = []
     /// VEIN A(i) §1b KILL SWITCH — restores the release's `dealias` and every arm this vein added.
-    static let aiOff = ProcessInfo.processInfo.environment["CANDOR_AI_OFF"] != nil
+    static let aiOff = Env.on("CANDOR_AI_OFF")
     /// The SEEDED C3 (partition calibration ONLY): the plausible half-fix — a STRICTLY scoped alias lookup,
     /// no supertypes and no last-writer floor — which loses an INHERITED member alias. Never set outside
     /// the calibration run and its pinning test.
-    static let aiSeedNoSupers = ProcessInfo.processInfo.environment["CANDOR_AI_SEED_NOSUPERS"] != nil
-    static let aiProbe = ProcessInfo.processInfo.environment["CANDOR_AI_PROBE"] != nil
+    static let aiSeedNoSupers = Env.on("CANDOR_AI_SEED_NOSUPERS")
+    static let aiProbe = Env.trace("CANDOR_AI_PROBE")
     /// N-d §1b — restores the release's GLOBAL alias reading (no generic-parameter guard, last writer wins)
     /// while leaving the rest of the canonicaliser on, so the alias-scope half is separately falsifiable.
-    static let aiNdOff = ProcessInfo.processInfo.environment["CANDOR_AI_ND_OFF"] != nil
+    static let aiNdOff = Env.on("CANDOR_AI_ND_OFF")
     /// The CANDOR_DEPS/--workspace chain, so a bare free-call name can be shadowed by a CHAINED
     /// dependency's REAL declaration exactly as `localFreeFns` shadows a local one — see `depShadows`.
     /// Defaults to empty so every construction site that predates this field (tests, an unchained scan)
@@ -836,18 +836,18 @@ final class CallCollector: SyntaxVisitor {
     /// platform-protocol existential (`DeclCollector` records it as `[]<field>\u{1}<P>`), or nil. A local, parameter or
     /// binder of that name shadows the field (Swift's lookup order). EXECUTED: `for x in xs { x.description }` over a
     /// stored `[any CustomStringConvertible]` ran the conformer's `description` and read ABSENT.
-    static let r1490r5Off = ProcessInfo.processInfo.environment["CANDOR_R1490R5_OFF"] != nil
+    static let r1490r5Off = Env.on("CANDOR_R1490R5_OFF")
     // ── SOUNDNESS R1498 residual — A LOOP OVER AN ARRAY OF TUPLES ──────────────────────────────────────────────────────
     // R1498 typed a tuple's slots for an annotated local, a parameter, a field and a returned tuple, and mapped `for (a, _)
     // in xs` over `xs: [(Loud, Int)]` as not covered: the element is a tuple, which no element index holds, so `a` was
     // cleared and `a.eff()` read ABSENT (executed). Parameters and annotated locals spelled `[(A, B)]` only.
-    static let r1498fOff = ProcessInfo.processInfo.environment["CANDOR_R1498F_OFF"] != nil
-    static let r1504Off = ProcessInfo.processInfo.environment["CANDOR_R1504_OFF"] != nil   // R656's property and ctor halves
-    static let r1505Off = ProcessInfo.processInfo.environment["CANDOR_R1505_OFF"] != nil   // see DeclCollector.uniformCtorElementR1505
+    static let r1498fOff = Env.on("CANDOR_R1498F_OFF")
+    static let r1504Off = Env.on("CANDOR_R1504_OFF")   // R656's property and ctor halves
+    static let r1505Off = Env.on("CANDOR_R1505_OFF")   // see DeclCollector.uniformCtorElementR1505
     /// SOUNDNESS R1492 residual — R1492 (P) keyed a declaration's field TYPES and container ELEMENTS by its full path too, so
     /// a unit in `extension A.B.T` finds them; the field's written GENERIC ARGUMENTS (`var gen: Box<Loud>`, R905) stayed under
     /// the short name, so `gen.v.eff()` there read ABSENT (executed) while the same body in `extension TopT` charged.
-    static let r1492fOff = ProcessInfo.processInfo.environment["CANDOR_R1492F_OFF"] != nil
+    static let r1492fOff = Env.on("CANDOR_R1492F_OFF")
     var arrayTupleLocalsR1498: [String: [String: String]] = [:]
     func arrayTupleSlotsR1498(_ seq: ExprSyntax) -> [String: String]? {
         guard !Self.r1498fOff, let n = Self.peel(seq).as(DeclReferenceExprSyntax.self)?.baseName.text else { return nil }
@@ -890,7 +890,7 @@ final class CallCollector: SyntaxVisitor {
         guard let n = Self.peel(raw).as(DeclReferenceExprSyntax.self)?.baseName.text else { return false }
         return vars[n] == nil && !isBoundLocal(n) && catchBindings[n] != nil
     }
-    static let r1473Off = ProcessInfo.processInfo.environment["CANDOR_R1473_OFF"] != nil
+    static let r1473Off = Env.on("CANDOR_R1473_OFF")
     /// SOUNDNESS R1473 — THE PLATFORM PROTOCOL A RECEIVER IS DECLARED AS, or nil: a parameter, a local or a stored
     /// property of the enclosing type whose written type is `P` / `any P` (optional or not). NOT `self` (inside
     /// `extension Collection` it is the caller's `Self`), NOT `some P` (`monoNames`), and NOT a generic parameter
@@ -957,9 +957,9 @@ final class CallCollector: SyntaxVisitor {
     // argument's own type — a local type's witness unit, a chained type's report row — and nothing else: a site whose
     // argument type is unknown resolves nothing, never a union over the package. The `@` keeps these requirements apart
     // from R951's operator witnesses, which the R1176 owner lists answer by a different rule.
-    static let r1490Off = ProcessInfo.processInfo.environment["CANDOR_R1490_OFF"] != nil
-    static let r1502Off = ProcessInfo.processInfo.environment["CANDOR_R1502_OFF"] != nil   // see the Driver's property-edge loop
-    static let r1490Probe = ProcessInfo.processInfo.environment["CANDOR_R1490_PROBE"] != nil
+    static let r1490Off = Env.on("CANDOR_R1490_OFF")
+    static let r1502Off = Env.on("CANDOR_R1502_OFF")   // see the Driver's property-edge loop
+    static let r1490Probe = Env.trace("CANDOR_R1490_PROBE")
     /// The witness member names requirement `m` of platform protocol `p` (or of a platform protocol `p` refines) is answered
     /// by; empty when `m` is no requirement there. `hashValue`'s default witness calls `hash(into:)` (executed), so either
     /// spelling edges both. Read from the generated `STDLIB_PROTOCOL_REQUIREMENTS` / `STDLIB_DIRECT_CONFORMANCES`.
@@ -1054,9 +1054,9 @@ final class CallCollector: SyntaxVisitor {
     // factories, a value annotated with one of the six container protocols/structs, or the factory call itself as the
     // receiver. The value is then answered exactly as R1490 (d)'s top-level coder answers it (existential, generic,
     // concrete local, concrete chained); an `Int`/`String` or any platform value answers nothing.
-    static let r1490r1Off = ProcessInfo.processInfo.environment["CANDOR_R1490R1_OFF"] != nil
-    static let r1490r2Off = ProcessInfo.processInfo.environment["CANDOR_R1490R2_OFF"] != nil   // see the Driver's synthesized walk
-    static let r1490r6Off = ProcessInfo.processInfo.environment["CANDOR_R1490R6_OFF"] != nil   // see the Driver's `answerWitnessR1490`
+    static let r1490r1Off = Env.on("CANDOR_R1490R1_OFF")
+    static let r1490r2Off = Env.on("CANDOR_R1490R2_OFF")   // see the Driver's synthesized walk
+    static let r1490r6Off = Env.on("CANDOR_R1490R6_OFF")   // see the Driver's `answerWitnessR1490`
     var codingContainerLocalsR1490: Set<String> = []
     static let codingContainerFactoriesR1490: Set<String> = [
         "container", "singleValueContainer", "unkeyedContainer", "nestedContainer", "nestedUnkeyedContainer"]
@@ -1356,7 +1356,7 @@ final class CallCollector: SyntaxVisitor {
     // parameter: the requirement is recorded as `r:@<P>~<w>` and answered at each call site from the RECEIVER's own tracked
     // type (`WitnessOwnersR1176.recvTypeR1490`), forwarded through the caller's own `self` (another extension member) or its
     // generic parameter. A receiver of unknown type resolves nothing — never a union over the package.
-    static let r1490r3Off = ProcessInfo.processInfo.environment["CANDOR_R1490R3_OFF"] != nil
+    static let r1490r3Off = Env.on("CANDOR_R1490R3_OFF")
     /// The PLATFORM protocols whose requirements `self` answers inside the enclosing declaration: the protocol a platform
     /// protocol extension extends, or every platform protocol a LOCAL protocol refines. Empty in a type's own body.
     func selfPlatformProtocolsR1490() -> [String] {
@@ -1402,7 +1402,7 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1415 — candidates whose dependency key may carry an overload suffix the site can name (a
     /// literal's `init(String)`): asked FIRST, the bare key (every overload's union) only when none answers.
     var externalMemberPrecise: [String: Set<String>] = [:]
-    static let r1415Off = ProcessInfo.processInfo.environment["CANDOR_R1415_OFF"] != nil
+    static let r1415Off = Env.on("CANDOR_R1415_OFF")
     /// SOUNDNESS R1415 — a NEW hook kind's external candidate: a confidently-typed operand whose type this scan
     /// does not declare. Kinds that predate round 1 record through their original sites unchanged.
     func noteExternalMember(_ type: String, _ member: String, kind: String, module: String?, precise: [String] = []) {
@@ -3487,7 +3487,7 @@ final class CallCollector: SyntaxVisitor {
         }
         return false
     }
-    static let r1086Off = ProcessInfo.processInfo.environment["CANDOR_R1086_OFF"] != nil
+    static let r1086Off = Env.on("CANDOR_R1086_OFF")
 
     /// `privacy/1` finding 5 — the statically-visible AVFoundation media-type of a capture call. Reads the
     /// leading-dot member name of the `for:` argument on `AVCaptureDevice.default(for:)` / `.devices(for:)`
@@ -3792,56 +3792,56 @@ final class CallCollector: SyntaxVisitor {
 
     /// Hoisted out of the predicate: it is consulted once per locator binder, and an environment lookup
     /// per call is not something to pay for a probe that is off.
-    private static let r419Debug = ProcessInfo.processInfo.environment["CANDOR_R419_DEBUG"] != nil
-    private static let r431Debug = ProcessInfo.processInfo.environment["CANDOR_R431_DEBUG"] != nil
+    private static let r419Debug = Env.trace("CANDOR_R419_DEBUG")
+    private static let r431Debug = Env.trace("CANDOR_R431_DEBUG")
     /// SOUNDNESS R563 REACH PROBE (§E1) — "an unchanged row is not evidence the new code ran". Fires on
     /// the two arms this fix ADDS, so an A/B over a corpus containing none of the shape says so out loud
     /// instead of reporting a flattering zero.
-    static let r563Probe = ProcessInfo.processInfo.environment["CANDOR_R563_PROBE"] != nil
+    static let r563Probe = Env.trace("CANDOR_R563_PROBE")
     /// SOUNDNESS R589 REACH PROBE (§E1) — the ternary arm of an UNFOLDED sequence whose shape the old
     /// `count == 3` guard excluded. Hoisted for the same reason as the others: `rootOf` is the hot path.
-    static let r589Probe = ProcessInfo.processInfo.environment["CANDOR_R589_PROBE"] != nil
+    static let r589Probe = Env.trace("CANDOR_R589_PROBE")
     /// SOUNDNESS R620 REACH PROBE (§E1) + its KILL SWITCH (§1b). The probe fires only where a metatype
     /// binder REALLY shadowed an enclosing `vars` entry, which is the population the fix can move — the
     /// write sites themselves are common and counting those would overstate it.
-    static let r620Probe = ProcessInfo.processInfo.environment["CANDOR_R620_PROBE"] != nil
-    private static let r620Off = ProcessInfo.processInfo.environment["CANDOR_R620_OFF"] != nil
+    static let r620Probe = Env.trace("CANDOR_R620_PROBE")
+    private static let r620Off = Env.on("CANDOR_R620_OFF")
     /// SOUNDNESS R584 REACH PROBE (§E1) — same reason as R563's, and this fix needs it MORE: its shape
     /// could not be found in the corpus at all when the row was filed (199 metatype parameters declared,
     /// 15 call sites dispatching on one, all 15 protocol-typed and already resolving), so a byte-identical
     /// A/B is the EXPECTED outcome and must be reported as SAFETY-ONLY rather than as a cost of zero.
     /// Prints one line per resolution this fix adds, on stderr, and only when the variable is set.
-    static let r584Probe = ProcessInfo.processInfo.environment["CANDOR_R584_PROBE"] != nil
+    static let r584Probe = Env.trace("CANDOR_R584_PROBE")
     /// SOUNDNESS R584 §1b KILL SWITCH — degrades `typeReceiverType` to `nil`, i.e. restores exactly the
     /// pre-fix behaviour (every class-half spelling ABSENT). `R584CalibrationTests` asserts the fixture
     /// resolves; running the suite with `CANDOR_R584_OFF=1` is what proves those assertions can FAIL, so
     /// the calibration does not need a revert to reproduce and cannot rot into a test that passes either
     /// way — the failure mode §A measured four times in one day.
-    private static let r584Off = ProcessInfo.processInfo.environment["CANDOR_R584_OFF"] != nil
+    private static let r584Off = Env.on("CANDOR_R584_OFF")
     /// SOUNDNESS R585 REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". One
     /// stderr line per binder this row resolves that R563/R584 did not, so an A/B over a corpus that
     /// contains none of the shape says so out loud instead of reporting a flattering zero.
-    static let r585Probe = ProcessInfo.processInfo.environment["CANDOR_R585_PROBE"] != nil
+    static let r585Probe = Env.trace("CANDOR_R585_PROBE")
     /// §1b kill switches for vein B (SOUNDNESS R866 and siblings): each restores 113e5b4's answer at its site.
-    static let r866Off = ProcessInfo.processInfo.environment["CANDOR_R866_OFF"] != nil
-    static let r615Off = ProcessInfo.processInfo.environment["CANDOR_R615_OFF"] != nil
-    static let r619Off = ProcessInfo.processInfo.environment["CANDOR_R619_OFF"] != nil
-    static let r738Off = ProcessInfo.processInfo.environment["CANDOR_R738_OFF"] != nil
-    static let r579Off = ProcessInfo.processInfo.environment["CANDOR_R579_OFF"] != nil
-    static let r578Off = ProcessInfo.processInfo.environment["CANDOR_R578_OFF"] != nil
-    static let r256Off = ProcessInfo.processInfo.environment["CANDOR_R256_OFF"] != nil
-    static let r906Off = ProcessInfo.processInfo.environment["CANDOR_R906_OFF"] != nil
-    static let r851Off = ProcessInfo.processInfo.environment["CANDOR_R851_OFF"] != nil
-    static let r618Off = ProcessInfo.processInfo.environment["CANDOR_R618_OFF"] != nil
+    static let r866Off = Env.on("CANDOR_R866_OFF")
+    static let r615Off = Env.on("CANDOR_R615_OFF")
+    static let r619Off = Env.on("CANDOR_R619_OFF")
+    static let r738Off = Env.on("CANDOR_R738_OFF")
+    static let r579Off = Env.on("CANDOR_R579_OFF")
+    static let r578Off = Env.on("CANDOR_R578_OFF")
+    static let r256Off = Env.on("CANDOR_R256_OFF")
+    static let r906Off = Env.on("CANDOR_R906_OFF")
+    static let r851Off = Env.on("CANDOR_R851_OFF")
+    static let r618Off = Env.on("CANDOR_R618_OFF")
     /// SOUNDNESS R912 — the class-typed implicit-`self` base read. ON by default as a CONSISTENCY RESOLUTION
     /// (vein C's R570 precedent): the explicit `self.x.y` spelling already formed these exact accessor edges.
     /// Priced by gate flips against the branch with it off, additions only: function scope `deny Unknown` 565
     /// standalone / 13 chained consumers, module, type-prefix and package scope 0. `CANDOR_R912_OFF=1` reverts.
-    static let r912Off = ProcessInfo.processInfo.environment["CANDOR_R912_OFF"] != nil
+    static let r912Off = Env.on("CANDOR_R912_OFF")
     /// SOUNDNESS R983 §1b KILL SWITCH — restores the release's nested-extension member keys.
-    static let r983Off = ProcessInfo.processInfo.environment["CANDOR_R983_OFF"] != nil
-    static let r904Off = ProcessInfo.processInfo.environment["CANDOR_R904_OFF"] != nil
-    static let r905Off = ProcessInfo.processInfo.environment["CANDOR_R905_OFF"] != nil
+    static let r983Off = Env.on("CANDOR_R983_OFF")
+    static let r904Off = Env.on("CANDOR_R904_OFF")
+    static let r905Off = Env.on("CANDOR_R905_OFF")
     /// SOUNDNESS R866 — the NON-local members of the composition a receiver NAME is typed by, when that
     /// name is still the parameter (no binder has rebound it and nothing typed it). Each is asked as a
     /// dependency OWNER, exactly as `_ t: any PSub` asks `PSub`; a local member is already answered by
@@ -3856,7 +3856,7 @@ final class CallCollector: SyntaxVisitor {
 
     /// VEIN B REACH — the receiver shape of every member call the terminal arm drops with no owner, no
     /// marker and no disclosure. Classification only; never changes an answer.
-    static let veinBProbe = ProcessInfo.processInfo.environment["CANDOR_VEINB_PROBE"] != nil
+    static let veinBProbe = Env.trace("CANDOR_VEINB_PROBE")
     /// VEIN B REACH — one stderr line each time a vein-B arm ANSWERS, so an A/B over a corpus with none of
     /// the shape says so instead of reading as a safely-inert change.
     func vbHit(_ row: String, _ detail: @autoclosure () -> String) {
@@ -3912,35 +3912,35 @@ final class CallCollector: SyntaxVisitor {
     /// `R585CalibrationTests` asserts the fixture resolves; running the suite with `CANDOR_R585_OFF=1`
     /// is what proves those assertions can FAIL, so the calibration cannot rot into a test that passes
     /// either way — the failure mode §A measured four times in one day.
-    private static let r585Off = ProcessInfo.processInfo.environment["CANDOR_R585_OFF"] != nil
+    private static let r585Off = Env.on("CANDOR_R585_OFF")
     /// SOUNDNESS R704 §1b — restores the pre-R704 `localTypes` gate at all five metatype read sites AND
     /// the foreign metatype-parameter seeding, i.e. exactly the answer `709311c` gave.
-    static let r704Off = ProcessInfo.processInfo.environment["CANDOR_R704_OFF"] != nil
-    static let r704Probe = ProcessInfo.processInfo.environment["CANDOR_R704_PROBE"] != nil
+    static let r704Off = Env.on("CANDOR_R704_OFF")
+    static let r704Probe = Env.trace("CANDOR_R704_PROBE")
     /// SOUNDNESS R567(a) REACH PROBE — "CHANGED 0 is not evidence until REACH is measured" (R418's
     /// lesson: 17,944 units said "inert" and the probe said the code never ran). One stderr line per
     /// receiver chain whose last hop this engine could not type and which WOULD have become a §2 owner.
-    static let r567aProbe = ProcessInfo.processInfo.environment["CANDOR_R567A_PROBE"] != nil
+    static let r567aProbe = Env.trace("CANDOR_R567A_PROBE")
     /// SOUNDNESS R567(a) §1b KILL SWITCH — the RELEASE'S owner at the untyped-member site and nothing else:
     /// no type-path resolution beyond it, no floor duplicate, no disclosure of the guess. Since R836 the
     /// fix keeps that owner as a floor and adds a disclosure; running `ReceiverChainOwnerKeyProcessTests`
     /// and `StandaloneProducerChainProcessTests` under `CANDOR_R567A_OFF=1` is what proves they can FAIL.
-    private static let r567aOff = ProcessInfo.processInfo.environment["CANDOR_R567A_OFF"] != nil
+    private static let r567aOff = Env.on("CANDOR_R567A_OFF")
     /// SOUNDNESS R826 §1b KILL SWITCH — no type-path or singleton resolution of an opaque hop: every such hop
     /// is a GUESS (the release's owner as a floor, plus the disclosure). `SingletonConventionAndCoverage-`
     /// and `StandaloneProducerChainProcessTests` go red under it.
-    private static let r826Off = ProcessInfo.processInfo.environment["CANDOR_R826_OFF"] != nil
+    private static let r826Off = Env.on("CANDOR_R826_OFF")
     /// SOUNDNESS R839 §1b KILL SWITCH — an extension-only dependency type's singleton spelling falls
     /// silent again (typed branch with no owner; the let binder clears it as a LOCAL type).
-    static let r839Off = ProcessInfo.processInfo.environment["CANDOR_R839_OFF"] != nil
-    static let r836Probe = ProcessInfo.processInfo.environment["CANDOR_R836_PROBE"] != nil
+    static let r839Off = Env.on("CANDOR_R839_OFF")
+    static let r836Probe = Env.trace("CANDOR_R836_PROBE")
     /// SOUNDNESS R846 / R847 §1b kill switches — see `ownerModule` and the Driver's `bareNameDepEntry`.
-    static let r846Off = ProcessInfo.processInfo.environment["CANDOR_R846_OFF"] != nil
+    static let r846Off = Env.on("CANDOR_R846_OFF")
     /// SOUNDNESS R847 is OPT-IN (`CANDOR_R847_ON=1`), after six review rounds on its removal rules: the
     /// default is the release's bare-name join with no removal at all — monotone against v0.39.2 by
     /// construction, keeping its false charges. `CANDOR_R847_OFF=1` still forces it off.
-    static let r847Off = ProcessInfo.processInfo.environment["CANDOR_R847_ON"] == nil
-        || ProcessInfo.processInfo.environment["CANDOR_R847_OFF"] != nil
+    static let r847Off = Env.read("CANDOR_R847_OFF", isSet: { _ in false }) != nil
+        || !Env.on("CANDOR_R847_ON")
 
     /// SOUNDNESS R846 — the dependency MODULE a receiver's type spelling names, or nil. Two sources, both
     /// the source's own words, never an inference: a module qualifier written IN the expression
@@ -3998,7 +3998,7 @@ final class CallCollector: SyntaxVisitor {
         else { externalCandidateOpen.insert(cand) }
     }
     /// SOUNDNESS R826 REACH PROBE — one stderr line per call site the convention re-keys.
-    static let r826Probe = ProcessInfo.processInfo.environment["CANDOR_R826_PROBE"] != nil
+    static let r826Probe = Env.trace("CANDOR_R826_PROBE")
 
     /// SOUNDNESS R826 — THE SINGLETON CONVENTION, ANSWERED IN ONE PLACE FOR THE DIRECT SPELLING.
     ///
@@ -4083,7 +4083,7 @@ final class CallCollector: SyntaxVisitor {
     /// `SINGLETON_ACCESSORS` and `T` is a type reference (`conventionTypePath`) this scan does not declare
     /// — the same rule the let binder applies to `let s = T.shared` (its "PLATFORM accessor" arm). A
     /// trailing `.self` is identity and is stripped.
-    static let r843Off = ProcessInfo.processInfo.environment["CANDOR_R843_OFF"] != nil
+    static let r843Off = Env.on("CANDOR_R843_OFF")
     /// ⟨0.40⟩ `<Owner>.<member>` for a receiver that is ONE declared-value hop off a type or a typed value:
     /// `Wrong.shared`, `Dep.Client.shared` (module qualifier dropped), `n.parent` with `n: Node`, or a local
     /// bound from one. nil when the owner is a type this package DECLARES — its own declarations already
@@ -4120,64 +4120,64 @@ final class CallCollector: SyntaxVisitor {
     }
     /// SOUNDNESS R610 §1b KILL SWITCH — stops the `opaqueHop` guess flag travelling into `vars`, i.e.
     /// restores the laundered binding, and the if-let arm of `ReceiverChainOwnerKeyProcessTests` reds.
-    private static let r610Off = ProcessInfo.processInfo.environment["CANDOR_R610_OFF"] != nil
+    private static let r610Off = Env.on("CANDOR_R610_OFF")
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
-    static let r1491Off = ProcessInfo.processInfo.environment["CANDOR_R1491_OFF"] != nil
+    static let r1491Off = Env.on("CANDOR_R1491_OFF")
     /// SOUNDNESS R1513 KILL SWITCH — a nested type's facts are read under its SIMPLE name again (last writer wins
     /// across same-named types). Per-mechanism switches, each also off under `CANDOR_R1513_OFF`: S an in-body unit
     /// of a shared name reads its own type's facts by path, L any other shared name a scope of the unit nests does too
     /// (both: the Driver's `r1513Lexical` overlay), R closure fields and member returns are also keyed by path, I a
     /// path-keyed type climbs its path-keyed supertypes.
-    static let r1513Off = ProcessInfo.processInfo.environment["CANDOR_R1513_OFF"] != nil
-    static let r1513SOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513S_OFF"] != nil
-    static let r1513LOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513L_OFF"] != nil
-    static let r1513ROff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513R_OFF"] != nil
-    static let r1513IOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513I_OFF"] != nil
+    static let r1513Off = Env.on("CANDOR_R1513_OFF")
+    static let r1513SOff = r1513Off || Env.on("CANDOR_R1513S_OFF")
+    static let r1513LOff = r1513Off || Env.on("CANDOR_R1513L_OFF")
+    static let r1513ROff = r1513Off || Env.on("CANDOR_R1513R_OFF")
+    static let r1513IOff = r1513Off || Env.on("CANDOR_R1513I_OFF")
     /// R1513 (A): a shared owner name's member alias is read from this unit's own path only (`memberAliasScoped`).
-    static let r1513AOff = r1513Off || ProcessInfo.processInfo.environment["CANDOR_R1513A_OFF"] != nil
+    static let r1513AOff = r1513Off || Env.on("CANDOR_R1513A_OFF")
     /// SOUNDNESS R1497 §1b KILL SWITCH — `CANDOR_R1497_OFF=1` restores the module-wide last-writer file alias table.
-    static let r1497Off = ProcessInfo.processInfo.environment["CANDOR_R1497_OFF"] != nil
+    static let r1497Off = Env.on("CANDOR_R1497_OFF")
     /// SOUNDNESS R1498 §1b KILL SWITCH — `CANDOR_R1498_OFF=1`: a tuple-valued expression other than an annotated local or
     /// parameter, or a destructured tuple literal, types nothing again (the release reading).
-    static let r1498Off = ProcessInfo.processInfo.environment["CANDOR_R1498_OFF"] != nil
+    static let r1498Off = Env.on("CANDOR_R1498_OFF")
     /// SOUNDNESS R1499 §1b KILL SWITCH — `CANDOR_R1499_OFF=1`: a member call through an unexplained hop on a local subclass
     /// of a platform class keeps the release's floor edge to the local class's own same-named member.
-    static let r1499Off = ProcessInfo.processInfo.environment["CANDOR_R1499_OFF"] != nil
+    static let r1499Off = Env.on("CANDOR_R1499_OFF")
     /// SOUNDNESS R1499 — local DECLARED classes whose superclass chain leaves the scan at a platform (Objective-C) class
     /// and that spell no other foreign supertype (Driver `platformRootedClassesR1499`). Set once before collection.
     nonisolated(unsafe) static var platformRootedClassesR1499: Set<String> = []
     /// SOUNDNESS R1499 — every property name a local type or extension declares (stored or computed).
     nonisolated(unsafe) static var localPropertyNamesR1499: Set<String> = []
     /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
-    static let selfCtorOff = ProcessInfo.processInfo.environment["CANDOR_SELFCTOR_OFF"] != nil
+    static let selfCtorOff = Env.on("CANDOR_SELFCTOR_OFF")
     /// SOUNDNESS R1492 KILL SWITCH — no full-path field index for `extension A.B.T`, no associated-type field typing.
-    static let r1492Off = ProcessInfo.processInfo.environment["CANDOR_R1492_OFF"] != nil
+    static let r1492Off = Env.on("CANDOR_R1492_OFF")
     /// SOUNDNESS R1506 §1b KILL SWITCH — `CANDOR_R1506_OFF=1`: `<metatype value>.init(…)`, `Self.init(…)` and a
     /// `-> Self` member on a typed receiver type nothing again, and `any P.Type` is not a metatype annotation (the
     /// release reading).
-    static let r1506Off = ProcessInfo.processInfo.environment["CANDOR_R1506_OFF"] != nil
+    static let r1506Off = Env.on("CANDOR_R1506_OFF")
     /// SOUNDNESS R1506 — `Owner.member` keys whose every declaration returns exactly `Self` (Driver). Set once before collection.
     nonisolated(unsafe) static var selfReturnKeysR1506: Set<String> = []
     /// R1492 per-mechanism switches (each also off under `CANDOR_R1492_OFF`): P the full-path field index, A the
     /// associated-type field typing, I the protocol context for an implicit `.init`, M the path-scoped member alias.
-    static let r1492POff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492P_OFF"] != nil
-    static let r1492AOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492A_OFF"] != nil
-    static let r1492IOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492I_OFF"] != nil
-    static let r1492MOff = r1492Off || ProcessInfo.processInfo.environment["CANDOR_R1492M_OFF"] != nil
+    static let r1492POff = r1492Off || Env.on("CANDOR_R1492P_OFF")
+    static let r1492AOff = r1492Off || Env.on("CANDOR_R1492A_OFF")
+    static let r1492IOff = r1492Off || Env.on("CANDOR_R1492I_OFF")
+    static let r1492MOff = r1492Off || Env.on("CANDOR_R1492M_OFF")
     /// SOUNDNESS R651 §1b KILL SWITCH — stops the typed-local-receiver branch marking an EXTENSION-ONLY
     /// owner, i.e. restores the silencing exactly, so `ExtensionOnDependencyTypeProcessTests` can be
     /// SHOWN to fail rather than asserted to.
-    static let r651Off = ProcessInfo.processInfo.environment["CANDOR_R651_OFF"] != nil
+    static let r651Off = Env.on("CANDOR_R651_OFF")
     /// SOUNDNESS R651 REACH PROBE — one stderr line per member call whose receiver type this package only
     /// EXTENDS. "CHANGED 0 is not evidence until REACH is measured" (§E1): these are exactly the sites the
     /// Driver's two R651 arms may now answer, so a corpus diff can be read against a hit count.
-    static let r651Probe = ProcessInfo.processInfo.environment["CANDOR_R651_PROBE"] != nil
-    private static let r349Debug = ProcessInfo.processInfo.environment["CANDOR_R349_DEBUG"] != nil
+    static let r651Probe = Env.trace("CANDOR_R651_PROBE")
+    private static let r349Debug = Env.trace("CANDOR_R349_DEBUG")
     /// SOUNDNESS R725 — REACH. Printed at each of the three CHANGED decision sites, because an unchanged
     /// row is not evidence the new code ran (§E1): `nested` = a nested func's fn-typed parameter now
     /// indexed, `invoke` = the invocation-site arm that reads `isCallableTypeName(vars[name])`, `varhedge`
     /// = an unannotated `var` over a visible closure literal keeping the hedge.
-    static let r725Probe = ProcessInfo.processInfo.environment["CANDOR_R725_PROBE"] != nil
+    static let r725Probe = Env.trace("CANDOR_R725_PROBE")
 
     private func locatorNameIsStable(_ name: String, inert: Set<String>,
                                      inertCalls: Set<String>? = Set()) -> Bool {
@@ -4427,7 +4427,7 @@ final class CallCollector: SyntaxVisitor {
     /// which is what located the mechanism (the row named the qualified FREE FUNCTION; the classifier answered
     /// it fine once the qualifier was recognised). Only the platform C modules, and only behind a Foundation
     /// re-exporter this file really imports.
-    static let r773Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R773_OFF"] != nil
+    static let r773Off = DeclCollector.vtOff || Env.on("CANDOR_R773_OFF")
     static let FOUNDATION_REEXPORTED: Set<String> = ["Darwin", "Glibc", "Musl", "ucrt", "WASILibc", "Android"]
     static let FOUNDATION_REEXPORTERS: Set<String> = ["Foundation", "UIKit", "AppKit", "Cocoa", "SwiftUI", "WatchKit"]
     private func reexportedModule(_ name: String) -> Bool {
@@ -5385,10 +5385,10 @@ final class CallCollector: SyntaxVisitor {
     //                           beside a benign literal used to publish `0.0.0.0:8080` and fail only because that
     //                           fabricated host was off the allowlist).
     // `CANDOR_R817_OFF=1` restores the establishing reading.
-    static let r817Off = ProcessInfo.processInfo.environment["CANDOR_R817_OFF"] != nil
+    static let r817Off = Env.on("CANDOR_R817_OFF")
     static let NIO_BIND_ROOTS: Set<String> = ["ClientBootstrap", "ServerBootstrap", "DatagramBootstrap",
                                               "NIOTSConnectionBootstrap"]
-    static let r817Probe = ProcessInfo.processInfo.environment["CANDOR_R817_PROBE"] != nil
+    static let r817Probe = Env.trace("CANDOR_R817_PROBE")
     private func recordNIOBind(root: String, args: LabeledExprListSyntax) {
         if Self.r817Probe {
             FileHandle.standardError.write("R817HIT \(root).bind \(args.map { $0.label?.text ?? "_" })\n".data(using: .utf8)!)
@@ -5929,9 +5929,9 @@ final class CallCollector: SyntaxVisitor {
     private var r1492InitAsk = false
 
     /// SOUNDNESS R1480 kill switch — restores R999's position set (no chains, operands, defaults, literals).
-    static let r1480Off = ProcessInfo.processInfo.environment["CANDOR_R1480_OFF"] != nil
+    static let r1480Off = Env.on("CANDOR_R1480_OFF")
     /// SOUNDNESS R1481 kill switch — restores the type-wide (merged) typing of a generic-parameter-typed field.
-    static let r1481Off = ProcessInfo.processInfo.environment["CANDOR_R1481_OFF"] != nil
+    static let r1481Off = Env.on("CANDOR_R1481_OFF")
 
     /// The contextual type of the expression POSITION `start` occupies. `chain` is true only when `start` is the root of
     /// an implicit member expression: SE-0287 looks the root up in the contextual type of the WHOLE chain
@@ -6606,7 +6606,7 @@ final class CallCollector: SyntaxVisitor {
     /// and EDGED to any unit sharing the name (`for line in …; print(line)` → swift-nio's unit `line`). Swift
     /// resolves a name to the innermost binding, so `binderShadow` — the scoped set every binder writes through
     /// `shadowName` — is exact here; `$N` is never a function; a parameter name is this unit's own value.
-    static let r1011Off = ProcessInfo.processInfo.environment["CANDOR_R1011_OFF"] != nil
+    static let r1011Off = Env.on("CANDOR_R1011_OFF")
     private func namesAFreeFunctionReference(_ name: String) -> Bool {
         vars[name] == nil && !fnTyped.contains(name) && !isBoundLocal(name)
             && (Self.r1011Off || (!binderShadow.contains(name) && !name.hasPrefix("$")
@@ -7717,8 +7717,8 @@ final class CallCollector: SyntaxVisitor {
     // (`STDLIB_ELEMENT_CLOSURE_*`, CandorCore) is unioned in by `isElementIterator` and the call site.
     private static let ELEMENT_ITERATORS: Set<String> = r791Off ? ELEMENT_ITERATORS_RELEASE
         : ELEMENT_ITERATORS_RELEASE.union(STDLIB_ELEMENT_CLOSURE_FIRST)
-    static let r791Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R791_OFF"] != nil
-    static let r792Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R792_OFF"] != nil
+    static let r791Off = DeclCollector.vtOff || Env.on("CANDOR_R791_OFF")
+    static let r792Off = DeclCollector.vtOff || Env.on("CANDOR_R792_OFF")
     private static let ELEMENT_ITERATORS_RELEASE: Set<String> =
         ["forEach", "map", "filter", "compactMap", "flatMap", "first", "contains", "allSatisfy",
          // single-element-param predicate HOFs (closure is `(Element) -> Bool`): an effectful
@@ -7810,7 +7810,7 @@ final class CallCollector: SyntaxVisitor {
     // Names a closure binds: explicit `{ (a, b) in … }`/`{ a, b in … }` → those names; shorthand
     // `{ $0.… }` with no signature → `$0`/`$1`/`$2` (we can't tell arity, so clear the common few).
     /// SOUNDNESS R1455 (T1) §1b kill switch — restores clearing the closure parameters BEFORE the receiver resolves.
-    static let r1455ShadowOff = ProcessInfo.processInfo.environment["CANDOR_R1455_SHADOW_OFF"] != nil
+    static let r1455ShadowOff = Env.on("CANDOR_R1455_SHADOW_OFF")
     /// SOUNDNESS R1455 (T1) — A CLOSURE PARAMETER THAT SHARES THE RECEIVER'S NAME DOES NOT SCOPE OVER THE RECEIVER.
     ///
     /// `coder.appendConstructedNode(identifier: id) { coder in … }` — the swift-asn1 serialising idiom, and the
@@ -8280,7 +8280,7 @@ final class CallCollector: SyntaxVisitor {
         }
         return answer
     }
-    static let t4Debug = ProcessInfo.processInfo.environment["CANDOR_R1455T4_DEBUG"] != nil
+    static let t4Debug = Env.trace("CANDOR_R1455T4_DEBUG")
     private func t4why(_ k: Int) -> [String?]? {
         if Self.t4Debug { FileHandle.standardError.write("T4WHY\t\(k)\t\(r1455Qual)\n".data(using: .utf8)!) }
         return nil
@@ -8443,7 +8443,7 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1065 — `recv.member(…)` where `recv` is a VALUE whose type is not this scan's (neither declared
     /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
     /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
-    static let r1065Off = ProcessInfo.processInfo.environment["CANDOR_R1065_OFF"] != nil
+    static let r1065Off = Env.on("CANDOR_R1065_OFF")
     func depInstanceMemberCallee(_ expr: ExprSyntax) -> String? {
         guard !Self.r1065Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
               let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
@@ -8503,8 +8503,8 @@ final class CallCollector: SyntaxVisitor {
     }
     /// SOUNDNESS R832 §1b KILL SWITCH — no static-factory marker: the release's silence on
     /// `Client.make().fetch()`, so `StaticDepFactoryProcessTests` can be SHOWN to fail without a revert.
-    static let r832Off = ProcessInfo.processInfo.environment["CANDOR_R832_OFF"] != nil
-    static let r905POff = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R905P_OFF"] != nil
+    static let r832Off = Env.on("CANDOR_R832_OFF")
+    static let r905POff = DeclCollector.vtOff || Env.on("CANDOR_R905P_OFF")
     /// SOUNDNESS R905 — a receiver whose PLATFORM generic type and written generic arguments are recorded: an
     /// implicit-`self` or `self.`-qualified stored field of the enclosing type, or a field of a typed receiver.
     private func platformGenericReceiver(_ base: ExprSyntax) -> (String, [String])? {
@@ -8531,13 +8531,13 @@ final class CallCollector: SyntaxVisitor {
     }
 
     /// SOUNDNESS R1045 — §1b kill switch.
-    static let r1045Off = ProcessInfo.processInfo.environment["CANDOR_R1045_OFF"] != nil
+    static let r1045Off = Env.on("CANDOR_R1045_OFF")
     /// SOUNDNESS R1046 — §1b kill switch.
-    static let r1046Off = ProcessInfo.processInfo.environment["CANDOR_R1046_OFF"] != nil
+    static let r1046Off = Env.on("CANDOR_R1046_OFF")
     /// SOUNDNESS R1048 — §1b kill switch.
-    static let r1048Off = ProcessInfo.processInfo.environment["CANDOR_R1048_OFF"] != nil
+    static let r1048Off = Env.on("CANDOR_R1048_OFF")
     /// SOUNDNESS R1048 residual — §1b kill switch for the LABEL-aligned caller-witness arguments.
-    static let r1048LabelOff = ProcessInfo.processInfo.environment["CANDOR_R1048L_OFF"] != nil
+    static let r1048LabelOff = Env.on("CANDOR_R1048L_OFF")
     /// SOUNDNESS R1048 — the implicit calls iterating a LOCAL iterable makes: its own `makeIterator`/`next`/
     /// `makeAsyncIterator`, and the `next` of the iterator type its `makeIterator` is declared to return
     /// (`struct Coll: Sequence { func makeIterator() -> Loud }` iterates `Loud.next`, which the release missed).
@@ -8577,13 +8577,13 @@ final class CallCollector: SyntaxVisitor {
     }
     /// SOUNDNESS R1526 — §1b kill switches: (C) the collection's own witnesses; (I) its Index's comparison witnesses;
     /// (M) an explicit `makeIterator()` on a collection that declares none; (G) the Driver's `#iter` answer.
-    static let r1526Off = ProcessInfo.processInfo.environment["CANDOR_R1526_OFF"] != nil
-    static let r1526COff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526C_OFF"] != nil
-    static let r1526IOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526I_OFF"] != nil
-    static let r1526MOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526M_OFF"] != nil
-    static let r1526GOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526G_OFF"] != nil
-    static let r1526POff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526P_OFF"] != nil
-    static let r1526SOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526S_OFF"] != nil
+    static let r1526Off = Env.on("CANDOR_R1526_OFF")
+    static let r1526COff = r1526Off || Env.on("CANDOR_R1526C_OFF")
+    static let r1526IOff = r1526Off || Env.on("CANDOR_R1526I_OFF")
+    static let r1526MOff = r1526Off || Env.on("CANDOR_R1526M_OFF")
+    static let r1526GOff = r1526Off || Env.on("CANDOR_R1526G_OFF")
+    static let r1526POff = r1526Off || Env.on("CANDOR_R1526P_OFF")
+    static let r1526SOff = r1526Off || Env.on("CANDOR_R1526S_OFF")
     /// R1526 (S) — `member` is a requirement of a stdlib collection protocol, `t` declares no unit of that name itself, and
     /// only a LOCAL extension of a stdlib collection protocol does (so `receiverDeclaresOwnMember` answered by name).
     func stdlibNamesakeR1526(_ t: String, _ member: String) -> Bool {
@@ -8595,7 +8595,7 @@ final class CallCollector: SyntaxVisitor {
         guard !sups.contains(where: { !protos.contains($0) && memberUnitKeys.contains("\($0).\(member)") }) else { return false }
         return protos.contains { sups.contains($0) && memberUnitKeys.contains("\($0).\(member)") }
     }
-    static let r1526WOff = r1526Off || ProcessInfo.processInfo.environment["CANDOR_R1526W_OFF"] != nil
+    static let r1526WOff = r1526Off || Env.on("CANDOR_R1526W_OFF")
     /// R1526 (P) — the stdlib `Sequence`/`Collection`/`BidirectionalCollection` PROPERTIES whose implementation runs
     /// the receiver's witnesses (or hands it to a wrapper that does: `lazy`).
     static let collPropsR1526: Set<String> = ["count", "first", "last", "isEmpty", "indices", "underestimatedCount", "lazy"]
@@ -8636,10 +8636,10 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
     /// SOUNDNESS R1515 — §1b kill switches: (A) the nested iterator path; (B) the associated-type field requirement.
-    static let r1515Off = ProcessInfo.processInfo.environment["CANDOR_R1515_OFF"] != nil
-    static let r1515AOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515A_OFF"] != nil
-    static let r1515BOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515B_OFF"] != nil
-    static let r1515TOff = r1515Off || ProcessInfo.processInfo.environment["CANDOR_R1515T_OFF"] != nil
+    static let r1515Off = Env.on("CANDOR_R1515_OFF")
+    static let r1515AOff = r1515Off || Env.on("CANDOR_R1515A_OFF")
+    static let r1515BOff = r1515Off || Env.on("CANDOR_R1515B_OFF")
+    static let r1515TOff = r1515Off || Env.on("CANDOR_R1515T_OFF")
     /// SOUNDNESS R1048 — a PARAMETER whose type is not a local concrete type is iterated with the CALLER's
     /// instantiation: recorded as R951's caller-witness requirement `<idx>:#iter`, which the Driver answers at
     /// every call site whose argument is a local iterable type.
@@ -8677,10 +8677,10 @@ final class CallCollector: SyntaxVisitor {
     // it to foreign code iterates each local iterable argument through its own declared iterator. A RESOLUTION: the
     // effect charged is the argument's own body, never an `Unknown`. Element-generic platform types (`[L]`, `Set<L>`,
     // `AnySequence<L>`) are a denylist; a generic the scan DECLARES is R1515's precise per-call-site answer, not this.
-    static let r1523Off = ProcessInfo.processInfo.environment["CANDOR_R1523_OFF"] != nil
-    static let r1523TOff = r1523Off || ProcessInfo.processInfo.environment["CANDOR_R1523T_OFF"] != nil
-    static let r1523POff = r1523Off || ProcessInfo.processInfo.environment["CANDOR_R1523P_OFF"] != nil
-    static let r1523SOff = r1523Off || ProcessInfo.processInfo.environment["CANDOR_R1523S_OFF"] != nil
+    static let r1523Off = Env.on("CANDOR_R1523_OFF")
+    static let r1523TOff = r1523Off || Env.on("CANDOR_R1523T_OFF")
+    static let r1523POff = r1523Off || Env.on("CANDOR_R1523P_OFF")
+    static let r1523SOff = r1523Off || Env.on("CANDOR_R1523S_OFF")
     /// The written type of a receiver/operand: a parameter's declared type, a local's one annotation, or a field.
     func writtenTypeArgsR1523(_ raw: ExprSyntax) -> (head: String, args: [String])? {
         var e = Self.peel(raw)
@@ -8725,7 +8725,7 @@ final class CallCollector: SyntaxVisitor {
     }
 
     /// SOUNDNESS R1463 / R1455 (classes T0 and T1) — §1b kill switch: restores the release's untyped receiver.
-    static let r1463Off = ProcessInfo.processInfo.environment["CANDOR_R1463_OFF"] != nil
+    static let r1463Off = Env.on("CANDOR_R1463_OFF")
     /// SOUNDNESS R1463 / R1455 T0-T1 — THE RECEIVER'S TYPE AS ITS OWN SPELLING STATES IT, where `rootOf` gave none.
     ///
     /// `"/path".wipe()` over a project `extension String { func wipe() }` that deletes the file was ABSENT from
@@ -8795,11 +8795,11 @@ final class CallCollector: SyntaxVisitor {
         return nil
     }
     /// SOUNDNESS R1009 — §1b kill switch.
-    static let r1009Off = ProcessInfo.processInfo.environment["CANDOR_R1009_OFF"] != nil
+    static let r1009Off = Env.on("CANDOR_R1009_OFF")
     /// SOUNDNESS R1032 — §1b kill switch.
-    static let r1032Off = ProcessInfo.processInfo.environment["CANDOR_R1032_OFF"] != nil
+    static let r1032Off = Env.on("CANDOR_R1032_OFF")
     /// SOUNDNESS R1071 residual — the `<platext>.` marker (see the member-call visitor).
-    static let r1071Off = ProcessInfo.processInfo.environment["CANDOR_R1071P_OFF"] != nil
+    static let r1071Off = Env.on("CANDOR_R1071P_OFF")
     /// SOUNDNESS R1071 — the receiver's type AS THE SOURCE STATES IT, for the `<platext>.` marker: a literal's own
     /// type, a binding recorded as an array / dictionary, or `rootOf`'s root where that is a resolution (not a
     /// guess through an unexplained hop). nil = the source does not say, which the Driver answers with a disclosure.
@@ -8846,17 +8846,17 @@ final class CallCollector: SyntaxVisitor {
     // position can only READ: it is the conservative direction throughout — any position that may store through
     // the reference (an assignment or compound-assignment target, `&`, a tuple target, or a METHOD called through
     // the chain that may be `mutating`) keeps the union edge, and so does anything the walk does not recognise.
-    static let r1105Off = ProcessInfo.processInfo.environment["CANDOR_R1105_OFF"] != nil
+    static let r1105Off = Env.on("CANDOR_R1105_OFF")
     /// R1105 (c) kill switches: a bare FIELD name read as a same-named global (`c`), and the synthesized-witness walk
     /// into an extension-only type or a computed property (`w`).
-    static let r1105cOff = ProcessInfo.processInfo.environment["CANDOR_R1105C_OFF"] != nil
-    static let r1105wOff = ProcessInfo.processInfo.environment["CANDOR_R1105W_OFF"] != nil
+    static let r1105cOff = Env.on("CANDOR_R1105C_OFF")
+    static let r1105wOff = Env.on("CANDOR_R1105W_OFF")
     /// R1105 audit kill switch: the getter view built per BINDING only (a static sharing the qual is dropped).
-    static let r1105qOff = ProcessInfo.processInfo.environment["CANDOR_R1105Q_OFF"] != nil
+    static let r1105qOff = Env.on("CANDOR_R1105Q_OFF")
     /// R1105 audit kill switch: an implicit-`self` call edges the caller's own resolution only (no subclass overrides).
-    static let r1105dOff = ProcessInfo.processInfo.environment["CANDOR_R1105D_OFF"] != nil
+    static let r1105dOff = Env.on("CANDOR_R1105D_OFF")
     /// R1105 audit kill switch: a projected binding `$model.flag` edges nothing (the 0.40.4 / R1105 behaviour).
-    static let r1105bOff = ProcessInfo.processInfo.environment["CANDOR_R1105B_OFF"] != nil
+    static let r1105bOff = Env.on("CANDOR_R1105B_OFF")
     /// Every method name the scan declares `mutating` (set once by the Driver before any body is walked).
     nonisolated(unsafe) static var localMutatingNames: Set<String> = []
     /// SOUNDNESS R1105 (c) — Type -> its computed properties (set once by the Driver; see DeclCollector).
@@ -8875,7 +8875,7 @@ final class CallCollector: SyntaxVisitor {
     }
     /// SEEDED DEFECT for calibrating the A/B partition only: every method run through a chain is taken as
     /// non-mutating, so a write through a mutating call is misread as a read. Never set outside a calibration.
-    static let r1105Seed = ProcessInfo.processInfo.environment["CANDOR_R1105_SEED"] != nil
+    static let r1105Seed = Env.on("CANDOR_R1105_SEED")
     /// The platform's binary operators that take NO `inout` operand. Any other operator — an assignment form, or a
     /// custom operator, whose `inout` operand Swift passes WITHOUT `&` — may store through the reference.
     private static let VALUE_BINARY_OPERATORS: Set<String> = [
@@ -8974,9 +8974,9 @@ final class CallCollector: SyntaxVisitor {
     }
 
     /// SOUNDNESS R1000/R999 §1b KILL SWITCHES (also off under `CANDOR_VT_OFF`).
-    static let r1000Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R1000_OFF"] != nil
-    static let r999Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R999_OFF"] != nil
-    static let r832Probe = ProcessInfo.processInfo.environment["CANDOR_R832_PROBE"] != nil
+    static let r1000Off = DeclCollector.vtOff || Env.on("CANDOR_R1000_OFF")
+    static let r999Off = DeclCollector.vtOff || Env.on("CANDOR_R999_OFF")
+    static let r832Probe = Env.trace("CANDOR_R832_PROBE")
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         let callsBefore = calls.count
@@ -9756,7 +9756,7 @@ final class CallCollector: SyntaxVisitor {
                 // this line is the most flattering measurement available and reads exactly like a
                 // safely-inert change — the standing bar, and the reason R438's rust number meant
                 // something. REACH is the arm set being seen; GAIN is an edge or a charge coming out.
-                if ProcessInfo.processInfo.environment["CANDOR_R429_PROBE"] != nil {
+                if Env.trace("CANDOR_R429_PROBE") {
                     FileHandle.standardError.write(
                         "R429 REACH \(raw) :: \(arms.sorted().joined(separator: " | ")) :: \(member)\n"
                             .data(using: .utf8)!)
@@ -10969,10 +10969,10 @@ final class CallCollector: SyntaxVisitor {
     /// is the SCOPED set every binder writes and every scope restores (R847), so a read of the global AFTER an inner
     /// block, loop, closure or `catch` that bound the name still edges (`gAfterFor`, `gAfterBlock`, `gAfterCatch`),
     /// and a closure inside the body that reads a DIFFERENT global keeps its edge. Kill switch `CANDOR_R1514_OFF`.
-    static let r1514Off = ProcessInfo.processInfo.environment["CANDOR_R1514_OFF"] != nil
+    static let r1514Off = Env.on("CANDOR_R1514_OFF")
     /// R1514 (exposed): `for e in dict` types `e.value`. Off under `CANDOR_R1514D_OFF` (not under `CANDOR_R1514_OFF`, so
     /// the global-edge removal can be measured with the uncovered silence closed or not).
-    static let r1514DOff = ProcessInfo.processInfo.environment["CANDOR_R1514D_OFF"] != nil
+    static let r1514DOff = Env.on("CANDOR_R1514D_OFF")
     /// R1514 — the bare reads made where NO parameter or binder held the name. The Driver's LOCAL global-read arms
     /// edge only these. The chained-dependency arm keeps reading `globalReads`/`depGlobalReads` unchanged: its binder
     /// proof is R847's, which is held out by default (`CANDOR_R847_ON`), and a closure parameter is R1472's (it keeps
@@ -10986,10 +10986,10 @@ final class CallCollector: SyntaxVisitor {
     }
     /// SOUNDNESS R1472 §1b kill switch (`CANDOR_R1472_OFF=1` restores v0.41.3's reading) and reach probe
     /// (`CANDOR_R1472_PROBE=1`: the Driver prints `R1472EDGE` for every global edge the skip withheld).
-    static let r1472Off = ProcessInfo.processInfo.environment["CANDOR_R1472_OFF"] != nil
+    static let r1472Off = Env.on("CANDOR_R1472_OFF")
     /// SOUNDNESS R1472 defect C §1b kill switch: keep the implicit-`self` member edges for a closure-parameter name.
-    static let r1472cOff = ProcessInfo.processInfo.environment["CANDOR_R1472C_OFF"] != nil
-    static let r1472Probe = ProcessInfo.processInfo.environment["CANDOR_R1472_PROBE"] != nil
+    static let r1472cOff = Env.on("CANDOR_R1472C_OFF")
+    static let r1472Probe = Env.trace("CANDOR_R1472_PROBE")
     /// SOUNDNESS R1472 — the bare names the closure-parameter skip withheld in this unit (read once by the Driver).
     var r1472Withheld: Set<String> = []
     /// SOUNDNESS R1472 — every explicit member call this unit DROPPED (R1455's `droppedMember`: no edge, no `Unknown`).
@@ -11178,7 +11178,7 @@ final class CallCollector: SyntaxVisitor {
     // `x`'s `hash(into:)`. `spelled` is the operator as written; `directEdge` says the caller's own edge reaches
     // `t.w`. A type with an operator OF ITS OWN by the spelled name runs that (Swift prefers it to the default), so
     // it is still skipped — the over-charge control.
-    static let r1251Off = ProcessInfo.processInfo.environment["CANDOR_R1251_OFF"] != nil
+    static let r1251Off = Env.on("CANDOR_R1251_OFF")
     private func ownsSpelledOpR1251(_ t: String, _ op: String) -> Bool {
         guard let owners = opWitnessTypes[op] else { return false }
         // SOUNDNESS R1271 (the half this check owns) — the LEAF answers only when it names one type: `Box.KeyT` must
@@ -11403,7 +11403,7 @@ final class CallCollector: SyntaxVisitor {
     /// `dispatchesOn` spelling exists for a stdlib-owned requirement), so the Driver DISCLOSES where one of them
     /// can do anything. The seeds are what the source states about each argument: its tracked type, the written
     /// generic arguments of a parameter / annotated local, and an array or dictionary literal's elements.
-    static let r974aOff = r974Off || ProcessInfo.processInfo.environment["CANDOR_R974A_OFF"] != nil
+    static let r974aOff = r974Off || Env.on("CANDOR_R974A_OFF")
     fileprivate func argumentWitnesses(_ args: LabeledExprListSyntax) -> [String] {
         guard !Self.r974aOff else { return [] }
         var seeds: [String] = []
@@ -11583,7 +11583,7 @@ final class CallCollector: SyntaxVisitor {
     // DERIVED from the SDK's interfaces, matched on the spelled labels — see WitnessSites.swift; the release's three
     // hand lists of 6, 17 and 3 names are deleted). A predicate form (`contains(where:)`) runs the closure instead
     // and is excluded by the closure check.
-    static let r974Off = DeclCollector.vtOff || ProcessInfo.processInfo.environment["CANDOR_R974_OFF"] != nil
+    static let r974Off = DeclCollector.vtOff || Env.on("CANDOR_R974_OFF")
     private enum ContainerKind { case set, dictionary, array }
     /// What stdlib container a receiver is, read from its WRITTEN type (a parameter's or annotated local's).
     private func containerKind(_ base: ExprSyntax) -> ContainerKind? {
@@ -12035,8 +12035,8 @@ final class CallCollector: SyntaxVisitor {
     // convert / deferred / drop only — formatting, equality, hashing stay under §4's MAY), `X` = the EXPLICIT
     // untyped member call the collector drops (the `VBDROP` site, R1073), which is neither option's: §1.1 says an
     // unresolved explicit call already discloses, and here it does not. OFF (unset) by default; nothing ships on it.
-    static let ct2Fallback: String? = ProcessInfo.processInfo.environment["CANDOR_CT2_FALLBACK"]
-    static let ct2FallbackProbe = ProcessInfo.processInfo.environment["CANDOR_CT2_FALLBACK_PROBE"] != nil
+    static let ct2Fallback: String? = Env.value("CANDOR_CT2_FALLBACK")
+    static let ct2FallbackProbe = Env.trace("CANDOR_CT2_FALLBACK_PROBE")
     private func siteFallback(_ cls: String, _ member: String) {
         guard let opt = Self.ct2Fallback else { return }
         let optionAOnly = cls == "format" || cls == "eq"

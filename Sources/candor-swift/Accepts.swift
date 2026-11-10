@@ -114,7 +114,7 @@ private func acceptsItem(_ line: Int, _ fn: String, _ rule: String, _ because: S
 /// own wording stays for a locator that matches nothing), and so does a recorded REFUSAL over the discovered prefix (the gate
 /// says that one). Otherwise the discovered prefix must name at least one report.
 private func acceptsReportDiscoverable() -> Bool {
-    if let env = ProcessInfo.processInfo.environment["CANDOR_REPORT"], !env.isEmpty { return true }
+    if let env = Env.operatorValue("CANDOR_REPORT"), !env.isEmpty { return true }
     guard let prefix = discoverReportPrefix() else { return false }
     return refusalMarkerFor(prefix) != nil || looksLikeReport(prefix)
 }
@@ -124,7 +124,7 @@ private func acceptsReportDiscoverable() -> Bool {
 /// it would delete the entries of code written since and adopt only what the baseline held — a proposal the CI gate, which judges
 /// the CURRENT scan, would then contradict. The policy is discovered as the gate discovers it, so it is not the missing piece.
 private func acceptsNoReportMessage() -> String {
-    var base = ProcessInfo.processInfo.environment["CANDOR_BASELINE"].flatMap { $0.isEmpty ? nil : $0 }
+    var base = Env.operatorValue("CANDOR_BASELINE").flatMap { $0.isEmpty ? nil : $0 }
     if base == nil, let b = loadCandorConfig(targetPath: ".", lenient: true)["baseline"], !b.isEmpty { base = b }
     let cur = ".candor/report"
     var m = "candor-swift accepts: no report to judge — no report files found (and no --report / CANDOR_REPORT).\n"

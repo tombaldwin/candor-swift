@@ -796,8 +796,8 @@ public func parsePolicy(_ text: String, aliases: [String: Set<String>] = [:]) ->
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// §1b KILL SWITCHES, one per reader, so each fix can be SHOWN to fail without a revert.
-public let r1549Off = ProcessInfo.processInfo.environment["CANDOR_R1549_OFF"] != nil
-public let r1550Off = ProcessInfo.processInfo.environment["CANDOR_R1550_OFF"] != nil
+public let r1549Off = Env.on("CANDOR_R1549_OFF")
+public let r1550Off = Env.on("CANDOR_R1550_OFF")
 
 /// The pre-⟨0.42⟩ segmentation: every `.` and `:` is a separator, empty parts dropped.
 public func legacySegments(_ name: String) -> [String] {
