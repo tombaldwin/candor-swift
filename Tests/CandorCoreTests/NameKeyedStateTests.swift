@@ -296,6 +296,7 @@ final class NameKeyedStateTests: XCTestCase {
         "fieldDictValue": .immutableIndex,
         "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
         "existentialFieldsR1473": .immutableIndex,   // SOUNDNESS R1473 — keyed by TYPE, then field name
+        "fieldBoundSpecR1677": .immutableIndex, "paramExtraProtosR1677": .immutableIndex, "genericBoundExtrasR1677": .immutableIndex,   // SOUNDNESS R1677 — keyed by TYPE/field and by PARAMETER/generic NAME; the hook re-checks `isBoundLocal`/`binderShadow` at the read
         "protocolSupersR1490": .immutableIndex,      // SOUNDNESS R1490 residual (3) — keyed by PROTOCOL name
         "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,

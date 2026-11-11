@@ -427,6 +427,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var optionalContainerFieldsR1463: [String: Set<String>] = [:]                       // SOUNDNESS R1463
     var enumPayloadsR1272Raw: [(enumName: String, payload: String, scopes: [String])] = []   // SOUNDNESS R1272
     var opaqueFields: [String: Set<String>] = [:]
+    var fieldBoundSpecR1677: [String: [String: (generic: String?, extras: [String])]] = [:]   // SOUNDNESS R1677
     var existentialFieldsR1473: [String: Set<String>] = [:]   // SOUNDNESS R1473
     var storedFieldsR1490: [String: [String]] = [:]           // SOUNDNESS R1490 residual (2)
     var codingKeysR1490: [String: Set<String>] = [:]          // SOUNDNESS R1490 residual (2)
@@ -1072,6 +1073,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.optionalContainerFieldsR1463 { optionalContainerFieldsR1463[t, default: []].formUnion(fs) }   // R1463
         enumPayloadsR1272Raw.append(contentsOf: c.enumPayloadsR1272)   // R1272
         for (t, fs) in c.opaqueFields { opaqueFields[t, default: []].formUnion(fs) }
+        for (t, fs) in c.fieldBoundSpecR1677 { for (n, v) in fs { fieldBoundSpecR1677[t, default: [:]][n] = v } }   // R1677
         for (t, fs) in c.existentialFieldsR1473 { existentialFieldsR1473[t, default: []].formUnion(fs) }   // R1473
         for (t, fs) in c.storedFieldsR1490 where storedFieldsR1490[t] == nil { storedFieldsR1490[t] = fs }   // R1490 residual (2)
         for (t, ks) in c.codingKeysR1490 { codingKeysR1490[t, default: []].formUnion(ks) }                 // R1490 residual (2)
@@ -4645,6 +4647,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                tupleFactsR1498: r1513Facts.tupleFacts,                                // R1498
                                fieldTypeArgs: r1513Facts.fieldTypeArgs,                                // R905
                                opaqueFields: opaqueFields,
+                               fieldBoundSpecR1677: fieldBoundSpecR1677,   // R1677
                                existentialFieldsR1473: existentialFieldsR1473,   // R1473
                                protocolSupersR1490: protocolSupers,                // R1490 residual (3)
                                enumCaseValueType: enumCaseValueType,
@@ -6835,7 +6838,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
 
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
         // method; resolve ≤12 conformers, otherwise honest Unknown.
-        for d in cc.protoDispatches {
+        // SOUNDNESS R1677 — A BOUND IS A SET: the receiver the call collector typed by ONE protocol of it (the first member of a
+        // composition, the last `where` requirement) may call a member that protocol does not declare and ANOTHER required
+        // protocol does. Where that happens in a unit whose parameters/fields carry a bound set, the call is also dispatched over each
+        // other required protocol that declares the member. This is the CATCH-ALL under CallCollector's per-receiver arm
+        // (`extraBoundProtosR1677`, which answers a parameter, `self`'s field and a composition-typed value directly): it reaches the
+        // spellings that arm cannot name — a local copy (`let x = d`), an element of `[D]`, a static member through `D.Type`. It fires
+        // only for a dispatch the primary protocol does NOT declare, which today resolves to nothing at all.
+        var dispatchesR1677 = cc.protoDispatches
+        if !r1677Off {
+            var rest = Set(f.genericBoundExtras.values.joined()).union(f.paramExtraProtos.values.joined())
+            if let et = f.enclosingType {
+                for spec in (fieldBoundSpecR1677[et] ?? [:]).values { rest.formUnion(spec.extras) }
+            }
+            if !rest.isEmpty {
+                for d in cc.protoDispatches where !protoOrSuperDeclares(d.proto, d.member) {
+                    for e in rest.sorted() where e != d.proto && protoOrSuperDeclares(e, d.member) {
+                        if CallCollector.veinBProbe { FileHandle.standardError.write("VBHIT\tR1677\tcatchall \(f.qual) \(d.proto).\(d.member) -> \(e)  rest=\(rest.sorted())\n".data(using: .utf8)!) }
+                        dispatchesR1677.append(CallCollector.ProtoDispatch(proto: e, member: d.member, argc: d.argc, argTypes: d.argTypes, args: d.args))
+                    }
+                }
+            }
+        }
+        for d in dispatchesR1677 {
             // THE MEMBER SPACE OF A PROTOCOL HAS TWO HALVES and a dispatch must consult BOTH. A member is
             // either a REQUIREMENT (no body — the witness that runs belongs to a conformer, resolved by the
             // CHA below) or EXTENSION-PROVIDED (`extension P { func provided() {…} }` — a real `P.provided`

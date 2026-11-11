@@ -389,6 +389,9 @@ final class CallCollector: SyntaxVisitor {
     let tupleFactsR1498: TupleFactsR1498            // SOUNDNESS R1498 — tuple-typed fields and returns
     let fieldTypeArgs: [String: [String: [String]]]  // SOUNDNESS R905 — Type -> field -> direct generic args
     let opaqueFields: [String: Set<String>]         // Type -> fields whose type is monomorphized
+    let fieldBoundSpecR1677: [String: [String: (generic: String?, extras: [String])]]   // SOUNDNESS R1677 — see DeclCollector
+    let paramExtraProtosR1677: [String: [String]]
+    let genericBoundExtrasR1677: [String: [String]]
     let existentialFieldsR1473: [String: Set<String>]   // SOUNDNESS R1473 — see DeclCollector
     let protocolSupersR1490: [String: Set<String>]      // SOUNDNESS R1490 residual (3) — local protocol -> protocols it refines
     let localTypes: Set<String>
@@ -1562,6 +1565,7 @@ final class CallCollector: SyntaxVisitor {
          tupleFactsR1498: TupleFactsR1498 = TupleFactsR1498(),
          fieldTypeArgs: [String: [String: [String]]] = [:],
          opaqueFields: [String: Set<String>] = [:],
+         fieldBoundSpecR1677: [String: [String: (generic: String?, extras: [String])]] = [:],
          existentialFieldsR1473: [String: Set<String>] = [:],
          protocolSupersR1490: [String: Set<String>] = [:],
          enumCaseValueType: [String: String],
@@ -1668,6 +1672,9 @@ final class CallCollector: SyntaxVisitor {
         self.tupleFactsR1498 = tupleFactsR1498
         self.fieldTypeArgs = fieldTypeArgs          // R905
         self.opaqueFields = opaqueFields
+        self.fieldBoundSpecR1677 = r1677Off ? [:] : fieldBoundSpecR1677
+        self.paramExtraProtosR1677 = r1677Off ? [:] : info.paramExtraProtos
+        self.genericBoundExtrasR1677 = r1677Off ? [:] : info.genericBoundExtras
         self.existentialFieldsR1473 = existentialFieldsR1473
         self.protocolSupersR1490 = protocolSupersR1490
         self.localTypes = localTypes
@@ -2022,6 +2029,8 @@ final class CallCollector: SyntaxVisitor {
             if let p = e.as(TupleExprSyntax.self), p.elements.count == 1, let only = p.elements.first {
                 e = only.expression; continue
             }
+            // SOUNDNESS R1677 — `(each d).m()`: an element of the pack `d` has the pack's element type, so the receiver IS `d`.
+            if !r1677Off, let pe = e.as(PackElementExprSyntax.self) { e = pe.pack; continue }
             return e
         }
     }
@@ -3824,6 +3833,7 @@ final class CallCollector: SyntaxVisitor {
     static let r585Probe = Env.trace("CANDOR_R585_PROBE")
     /// §1b kill switches for vein B (SOUNDNESS R866 and siblings): each restores 113e5b4's answer at its site.
     static let r866Off = Env.on("CANDOR_R866_OFF")
+    static let r1686Off = Env.on("CANDOR_R1686_OFF")
     static let r615Off = Env.on("CANDOR_R615_OFF")
     static let r619Off = Env.on("CANDOR_R619_OFF")
     static let r738Off = Env.on("CANDOR_R738_OFF")
@@ -3852,6 +3862,33 @@ final class CallCollector: SyntaxVisitor {
         let out = comps.filter { !localProtocols.contains($0) && !localTypes.contains($0) }
         if !out.isEmpty { vbHit("R866", "\(n): \(out)") }
         return out
+    }
+
+    /// SOUNDNESS R1677 — THE REST OF A RECEIVER'S BOUND SET. A generic parameter (or a composition-typed value) may require several
+    /// protocols; `genericBounds`/`typeName` name ONE, so a call to a member only another required protocol declares joined no
+    /// conformer (executed: `func f<D: P & Q>(_ d: D) { d.qm() }`, `where D: P, D: Q`, `<each D: P>` + `repeat (each d).m()`).
+    /// Answers the OTHER protocols for a receiver that is still the parameter (or `self`'s field) whose declared type carries them;
+    /// each is asked as a dispatch owner beside the primary, exactly as `foreignCompositionMembers` asks a dependency's.
+    private func extraBoundProtosR1677(_ base: ExprSyntax?) -> [String] {
+        guard !r1677Off, let b = base else { return [] }
+        let e = Self.peel(b)
+        func fieldExtras(_ n: String) -> [String] {
+            guard let et = enclosingType else { return [] }
+            guard let spec = fieldBoundSpecR1677[et]?[n] ?? fieldBoundSpecR1677[Self.leafR1176(et)]?[n] else { return [] }
+            if let g = spec.generic { return genericBoundExtrasR1677[g] ?? [] }
+            return spec.extras
+        }
+        if let dr = e.as(DeclReferenceExprSyntax.self) {
+            let n = dr.baseName.text
+            if isBoundLocal(n) || binderShadow.contains(n) { return [] }
+            if paramIndexR951[n] != nil { return paramExtraProtosR1677[n] ?? [] }
+            return n == "self" ? [] : fieldExtras(n)
+        }
+        if let ma = e.as(MemberAccessExprSyntax.self),
+           let sb = ma.base.map({ Self.peel($0) })?.as(DeclReferenceExprSyntax.self), sb.baseName.text == "self" {
+            return fieldExtras(ma.declName.baseName.text)
+        }
+        return []
     }
 
     /// VEIN B REACH — the receiver shape of every member call the terminal arm drops with no owner, no
@@ -9675,6 +9712,16 @@ final class CallCollector: SyntaxVisitor {
                 protoDispatches.append(ProtoDispatch(proto: p, member: member, argc: node.arguments.count,
                                                      argTypes: argTypesOf(node), args: argKinds(node)))
             }
+            for p in extraBoundProtosR1677(ma.base) {
+                vbHit("R1677", "\(p).\(member)")
+                if localProtocols.contains(p) {
+                    protoDispatches.append(ProtoDispatch(proto: p, member: member, argc: node.arguments.count,
+                                                         argTypes: argTypesOf(node), args: argKinds(node)))
+                } else if !localTypes.contains(p) {
+                    calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node),
+                                      argTypes: argTypesOf(node), extOwner: p))
+                }
+            }
             for c in foreignCompositionMembers(ma.base) {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node),
                                   argTypes: argTypesOf(node), extOwner: c))
@@ -13072,7 +13119,13 @@ final class CallCollector: SyntaxVisitor {
                         opaqueFnLocals.insert(name)
                     }
                 }
-                else if let tn = t.name { vars[name] = tn }
+                else if let tn = t.name {
+                    // SOUNDNESS R1686 — `let x: D = d` under `<D: P>`: the annotation names the GENERIC PARAMETER, which resolves to nothing,
+                    // so `x.m()` dropped (executed: ABSENT over a conformer that writes a file; the unannotated copy `let x = d` and the
+                    // parameter itself dispatched over the bound). A parameter typed `D` already resolves through `genericBounds`.
+                    if !Self.r1686Off, genericParamNamesFn.contains(tn), let b = genericBoundsR951[tn], localProtocols.contains(b) { vars[name] = b }
+                    else { vars[name] = tn }
+                }
                 // SOUNDNESS R585 (b2/b3) — `let t: CBase.Type = CSub.self` / the `var` twin. `typeName`
                 // answers nil for a metatype, so this binder recorded NOTHING and `t.validate()` read
                 // silent-pure. The annotation is WRITTEN IN THE SOURCE; nothing is inferred. Placed

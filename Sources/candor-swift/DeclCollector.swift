@@ -100,6 +100,14 @@ struct FnInfo {
     /// because no producer can publish under a key spelled from the CONSUMER's type-parameter name.
     var genericBounds: [String: String] = [:]
     var protoParams: [String: String] = [:]  // param name -> local protocol name
+    /// SOUNDNESS R1677 — A BOUND IS A SET. `genericBounds` is single-valued (one protocol per generic parameter: the first member of a
+    /// composition, the LAST `where` requirement), so a call to any OTHER required protocol's member was dropped. These carry the REST:
+    /// `genericBoundExtras[D]` is every non-marker protocol `D` requires except the one `genericBounds[D]` names (the enclosing type's
+    /// declaration/extension requirements included), and `paramExtraProtos[p]` is the same set for a PARAMETER's own declared type
+    /// (`d: D`, `repeat each D`, `d: some P & Q`, `d: any P & Q`). CallCollector asks each one as an ADDITIONAL dispatch owner beside the
+    /// primary: the Driver's `protoOrSuperDeclares` guard skips a protocol that does not declare the member.
+    var genericBoundExtras: [String: [String]] = [:]
+    var paramExtraProtos: [String: [String]] = [:]
     /// SOUNDNESS R866 — a parameter spelled as a protocol COMPOSITION (`_ t: any PSub & Sendable`) -> EVERY
     /// member the composition names, local or not. `typeName` answers nil for a composition, and
     /// `protoParams` keeps only the LOCALLY-declared members, so a composition whose callee lives on a
@@ -371,6 +379,8 @@ final class DeclCollector: SyntaxVisitor {
     /// constrained extensions (`where Inner == AnyDisposable` / `where Inner == CompositeDisposable`) would type each
     /// other's members. Read for a stored element type and, with the method's OWN extension clause, for a parameter.
     var typeDeclGenericBounds: [String: [String: String]] = [:]
+    /// SOUNDNESS R1677 — `typeDeclGenericBounds`' ALL-protocols twin: every non-marker protocol the DECLARATION requires of a parameter, in order.
+    var typeDeclGenericBoundsAllR1677: [String: [String: [String]]] = [:]
     // Type -> the RAW generic parameter names its own declaration introduces (`struct Box<T>` -> {"Box":
     // {"T"}}), recorded regardless of whether a bound is known yet. A conditional-conformance extension
     // (`extension Box: Greeter2 where T: Greeter2`) supplies the BOUND for a param the type declaration
@@ -406,6 +416,8 @@ final class DeclCollector: SyntaxVisitor {
     /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
     /// visible here are not this field's candidate witnesses. Consumed only by the Driver's CHA arm.
     var opaqueFields: [String: Set<String>] = [:]         // Type -> field names
+    /// SOUNDNESS R1677 — Type -> field -> (the generic parameter the field is typed by, the rest of a COMPOSITION-typed field's protocols).
+    var fieldBoundSpecR1677: [String: [String: (generic: String?, extras: [String])]] = [:]
     /// SOUNDNESS R1473 — Type -> stored properties whose ANNOTATION spells a platform protocol as an existential
     /// (`let c: any Collection`, `var d: CustomStringConvertible?`). Not a generic parameter resolved to its bound, not
     /// `some P`, and not a type INFERRED from an initializer — only the spelling is evidence of an existential.
@@ -1183,6 +1195,7 @@ final class DeclCollector: SyntaxVisitor {
             if let it = gp.inheritedType, let b = typeName(it).name {
                 typeGenericBounds[name, default: [:]][gp.name.text] = b
                 typeDeclGenericBounds[name, default: [:]][gp.name.text] = b   // R1463
+                typeDeclGenericBoundsAllR1677[name, default: [:]][gp.name.text, default: []] += requiredProtocolNames(it)   // R1677
             }
         }
         if clause != nil, !memberLevel {   // R1463 — the declaration's own `where T: P`
@@ -1191,6 +1204,7 @@ final class DeclCollector: SyntaxVisitor {
                    let l = typeName(c.leftType).name, let r = typeName(c.rightType).name,
                    typeGenericParamNames[name]?.contains(l) == true {
                     typeDeclGenericBounds[name, default: [:]][l] = r
+                    typeDeclGenericBoundsAllR1677[name, default: [:]][l, default: []] += requiredProtocolNames(c.rightType)   // R1677
                 }
             }
         }
@@ -1406,6 +1420,8 @@ final class DeclCollector: SyntaxVisitor {
             if let pname = typeName(inh.type).name {
                 protocolSupers[node.name.text, default: []].insert(pname)
             }
+            // SOUNDNESS R1677 — `protocol Y: P & Q` inherits EVERY member of the composition, not just the first R1676 named.
+            if !r1677Off { for n in requiredProtocolNames(inh.type) { protocolSupers[node.name.text, default: []].insert(n) } }
         }
         return .skipChildren
     }
@@ -1638,6 +1654,14 @@ final class DeclCollector: SyntaxVisitor {
                         if let mt = x.as(MemberTypeSyntax.self), mt.genericArgumentClause == nil,
                            let gid = mt.baseType.as(IdentifierTypeSyntax.self), gid.genericArgumentClause == nil {
                             assocFieldsR1515.append((ty, tyPath, name, gid.name.text, mt.name.text, wrap))
+                        }
+                    }
+                    if !r1677Off, !isStatic {   // SOUNDNESS R1677 — the rest of this field's bound SET (see `FnInfo.genericBoundExtras`)
+                        let all = requiredProtocolNames(ann.type)
+                        if all.count > 1, let first = typeName(ann.type).name {
+                            fieldBoundSpecR1677[ty, default: [:]][name] = (nil, all.filter { $0 != first })
+                        } else if all.count == 1, typeGenericParamNames[ty]?.contains(all[0]) == true {
+                            fieldBoundSpecR1677[ty, default: [:]][name] = (all[0], [])
                         }
                     }
                     if let tn = info.name, let bound = typeGenericBounds[ty]?[tn] {
@@ -2160,8 +2184,10 @@ final class DeclCollector: SyntaxVisitor {
         var genericBounds: [String: String] = [:]
         let genClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericParameterClause
             ?? Syntax(node).as(InitializerDeclSyntax.self)?.genericParameterClause
+        var allBoundsR1677: [String: [String]] = [:]
         for gp in genClause?.parameters ?? [] {
             if let it = gp.inheritedType, let bound = typeName(it).name { genericBounds[gp.name.text] = bound }
+            if let it = gp.inheritedType { allBoundsR1677[gp.name.text, default: []] += requiredProtocolNames(it) }
             info.genericParamNames.insert(gp.name.text)   // R999
         }
         let whereClause = Syntax(node).as(FunctionDeclSyntax.self)?.genericWhereClause
@@ -2170,6 +2196,7 @@ final class DeclCollector: SyntaxVisitor {
             guard case .conformanceRequirement(let conf) = req.requirement,
                   let lhs = typeName(conf.leftType).name, let rhs = typeName(conf.rightType).name else { continue }
             genericBounds[lhs] = rhs   // `where T: P` — same binding as `<T: P>`
+            allBoundsR1677[lhs, default: []] += requiredProtocolNames(conf.rightType)   // R1677 — a SECOND requirement does not replace the first
         }
         // SOUNDNESS R1463 (exposed) — …AND THE ENCLOSING TYPE'S GENERIC PARAMETERS, which a method's parameter may be
         // typed by: `class Pool<Element: PE> { func put(_ e: Element) { e.ev() } }` was ABSENT over a conformer whose
@@ -2181,6 +2208,7 @@ final class DeclCollector: SyntaxVisitor {
         // T == X` / `where T: P`) — never another extension's (see `typeDeclGenericBounds`).
         if !CallCollector.r1463Off, let owner = typeStack.last {
             var tb = typeDeclGenericBounds[owner] ?? [:]
+            var tbAllR1677 = typeDeclGenericBoundsAllR1677[owner] ?? [:]
             var anc: Syntax? = Syntax(node).parent
             while let a = anc, !a.is(ExtensionDeclSyntax.self), !a.is(StructDeclSyntax.self), !a.is(ClassDeclSyntax.self),
                   !a.is(EnumDeclSyntax.self), !a.is(ActorDeclSyntax.self) { anc = a.parent }
@@ -2189,19 +2217,34 @@ final class DeclCollector: SyntaxVisitor {
                     switch req.requirement {
                     case .conformanceRequirement(let c):
                         if let l = typeName(c.leftType).name, let r = typeName(c.rightType).name,
-                           typeGenericParamNames[owner]?.contains(l) == true { tb[l] = r }
+                           typeGenericParamNames[owner]?.contains(l) == true {
+                            tb[l] = r
+                            tbAllR1677[l, default: []] += requiredProtocolNames(c.rightType)   // R1677
+                        }
                     case .sameTypeRequirement(let st):
                         if let lt = typeSyntax(st.leftType), let rt = typeSyntax(st.rightType),
                            let l = typeName(lt).name, let r = typeName(rt).name, !typeName(rt).isFunction,
                            desugaredType(rt).is(IdentifierTypeSyntax.self),
                            typeGenericParamNames[owner]?.contains(l) == true, typeGenericParamNames[owner]?.contains(r) != true {
                             tb[l] = r
+                            tbAllR1677[l] = nil   // an EXACT type replaces the protocol requirements
                         }
                     default: continue
                     }
                 }
             }
-            for (gp, b) in tb where genericBounds[gp] == nil && !info.genericParamNames.contains(gp) { genericBounds[gp] = b }
+            for (gp, b) in tb where genericBounds[gp] == nil && !info.genericParamNames.contains(gp) {
+                genericBounds[gp] = b
+                if let all = tbAllR1677[gp] { allBoundsR1677[gp] = all }   // R1677
+            }
+        }
+        // SOUNDNESS R1677 — the REST of each parameter's bound set (everything but the protocol `genericBounds` names).
+        if !r1677Off {
+            for (gp, all) in allBoundsR1677 {
+                var rest: [String] = []
+                for n in all where n != genericBounds[gp] && !rest.contains(n) { rest.append(n) }
+                if !rest.isEmpty { info.genericBoundExtras[gp] = rest }
+            }
         }
         // R532 — published, so the Driver can tell a TYPE NAME from a TYPE-PARAMETER NAME at the one
         // place ⟨0.39⟩ spells one onto the wire. Set here rather than recomputed there: both spellings
@@ -2255,6 +2298,14 @@ final class DeclCollector: SyntaxVisitor {
             let targs = genericArgumentNames(p.type)
             if !targs.isEmpty { info.paramTypeArgs[pname] = targs }       // R951
             if let comps = compositionTypeNames(p.type) { info.compositionParams[pname] = comps }   // R866
+            if !r1677Off {   // SOUNDNESS R1677 — the REST of this parameter's declared bound set, asked beside the primary
+                let all = requiredProtocolNames(p.type)
+                if let only = all.first, all.count == 1, let rest = info.genericBoundExtras[only], !rest.isEmpty {
+                    info.paramExtraProtos[pname] = rest                      // `d: D` / `repeat each D` / `d: D?`
+                } else if all.count > 1, let first = typeName(p.type).name {
+                    info.paramExtraProtos[pname] = all.filter { $0 != first }   // `d: some P & Q` / `any P & Q` / `P & Q`
+                }
+            }
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
             info.paramSig.append((typeNameForSignature(p.type).name, p.defaultValue != nil, p.ellipsis != nil))

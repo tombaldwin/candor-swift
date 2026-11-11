@@ -2787,6 +2787,14 @@ private func typeName(_ t: TypeSyntax, desugar: Bool, composition: Bool) -> (nam
         return typeName(only.type, desugar: true, composition: composition)
     }
     if let some = t.as(SomeOrAnyTypeSyntax.self) { return typeName(some.constraint, desugar: true, composition: composition) } // `some P` / `any P`
+    // SOUNDNESS R1677 — A PARAMETER PACK TYPE (`repeat each D`): the element type of the pack IS `D`, so `d: repeat each D` types
+    // `d` as `D` and `(each d).m()` dispatches over `D`'s bound. `typeName` named nothing for either wrapper, so even a SINGLE
+    // `<each D: P>` pack was ABSENT over a conformer that writes a file (executed). Read only by the NAME reading, never by the
+    // parameter SIGNATURE (`composition: false`), which keeps the nameless spelling so no overload's qual/hash moves.
+    if composition, !r1677Off {
+        if let rep = t.as(PackExpansionTypeSyntax.self) { return typeName(rep.repetitionPattern, desugar: true, composition: composition) }
+        if let each = t.as(PackElementTypeSyntax.self) { return typeName(each.pack, desugar: true, composition: composition) }
+    }
     // SOUNDNESS R1676 — A COMPOSITION `P & ~Copyable` / `~Copyable & P` / `P & Sendable` / `P & Q`. `typeName` named NO type
     // for any composition, so `D: Decoder & ~Copyable` bound nothing: a call through `D` joined no conformer and
     // `Handler.handlerRemoved` was ABSENT over a conformer that writes a file (executed; the bare `D: Decoder` dispatched).
@@ -2806,6 +2814,36 @@ private func typeName(_ t: TypeSyntax, desugar: Bool, composition: Bool) -> (nam
         if named.count > 1, !r1676bOff, let first = named.first { return typeName(first.type, desugar: true, composition: true) }
     }
     return (nil, false)
+}
+/// SOUNDNESS R1677 KILL SWITCH — restores the R1676 reading: a bound is ONE protocol (the first non-marker member of a
+/// composition, the last `where` requirement), a parameter pack names nothing, and `protocol X: A & B` inherits only `A`.
+public let r1677Off = Env.on("CANDOR_R1677_OFF")
+/// SOUNDNESS R1677 — EVERY protocol a bound/existential spelling requires, in order: the non-suppressed, non-marker members of a
+/// composition (`P & Q & Sendable` -> [P, Q]), or the single named protocol. `typeName` names ONE (the first); a bound is a
+/// SET, and every member's conformers join a dispatch through the value.
+public func requiredProtocolNames(_ t: TypeSyntax) -> [String] {
+    var t = desugaredType(t)
+    while true {
+        if let some = t.as(SomeOrAnyTypeSyntax.self) { t = desugaredType(some.constraint); continue }
+        if let opt = t.as(OptionalTypeSyntax.self) { t = desugaredType(opt.wrappedType); continue }
+        if let att = t.as(AttributedTypeSyntax.self) { t = desugaredType(att.baseType); continue }
+        if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first { t = desugaredType(only.type); continue }
+        if let rep = t.as(PackExpansionTypeSyntax.self) { t = desugaredType(rep.repetitionPattern); continue }
+        if let each = t.as(PackElementTypeSyntax.self) { t = desugaredType(each.pack); continue }
+        break
+    }
+    if let comp = t.as(CompositionTypeSyntax.self) {
+        var out: [String] = []
+        for e in comp.elements {
+            if e.type.is(SuppressedTypeSyntax.self) { continue }
+            if let n = e.type.as(IdentifierTypeSyntax.self)?.name.text, R1676_MARKERS.contains(n) { continue }
+            for n in requiredProtocolNames(e.type) where !out.contains(n) { out.append(n) }
+        }
+        return out
+    }
+    if t.is(SuppressedTypeSyntax.self) { return [] }
+    if let n = typeName(t).name { return R1676_MARKERS.contains(n) ? [] : [n] }
+    return []
 }
 /// Protocols that add no requirement a conformer must implement (R1676).
 public let R1676_MARKERS: Set<String> = ["Sendable", "Copyable", "Escapable", "BitwiseCopyable", "AnyObject", "Any", "SendableMetatype"]
