@@ -293,7 +293,7 @@ public func callElseGuard851() -> String? { S851().elseGuard851(nil) }
     func testChainedCompositionResolvesAndGuessedElementDiscloses() throws {
         XCTAssertEqual(try chained(dep: Self.depLib, app: Self.depApp, policy: "deny Env compo866"), 1, "R866 resolved")
         XCTAssertNotEqual(try chained(dep: Self.depLib, app: Self.depApp, policy: "deny Env compo866",
-                                      env: ["CANDOR_R866_OFF": "1"]), 1, "R866 under its switch is 113e5b4")
+                                      env: ["CANDOR_R866_OFF": "1", "CANDOR_R1676_OFF": "1"]), 1, "R866 under its switch is 113e5b4 (R1676 now also names `any P & Sendable`, so both are off)")
         XCTAssertEqual(try chained(dep: Self.depLib, app: Self.depApp, policy: "deny Env plain866"), 1, "control")
         XCTAssertEqual(try chained(dep: Self.depLib, app: Self.depApp, policy: "deny Env Unknown depGuessSub618"), 1,
                        "R618 disclosed: the element type was read off a guessed root")

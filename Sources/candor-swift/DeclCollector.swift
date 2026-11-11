@@ -2257,7 +2257,7 @@ final class DeclCollector: SyntaxVisitor {
             if let comps = compositionTypeNames(p.type) { info.compositionParams[pname] = comps }   // R866
             // ordered signature for overload resolution: the param's simple type name (nil if unresolvable)
             // and whether it has a default (so a call may legitimately omit it).
-            info.paramSig.append((t.name, p.defaultValue != nil, p.ellipsis != nil))
+            info.paramSig.append((typeNameForSignature(p.type).name, p.defaultValue != nil, p.ellipsis != nil))
             info.paramLabels.append(p.firstName.text)   // SOUNDNESS R999 — the argument LABEL at this position
             if t.isFunction { info.fnTypedParams.insert(pname); info.fnTypedParamIndex[pname] = idx }
             if isAutoclosureType(p.type) { info.autoclosureParams.insert(pname) }   // R1009

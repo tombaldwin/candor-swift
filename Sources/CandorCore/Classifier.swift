@@ -2755,33 +2755,63 @@ public let STDLIB_GENERIC_CONTAINERS: Set<String> =
      "AsyncStream", "AsyncThrowingStream", "TaskGroup", "ThrowingTaskGroup"]
 
 public func typeName(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
-    typeName(t, desugar: true)
+    typeName(t, desugar: true, composition: true)
+}
+
+/// R1676 — `typeName` as the RELEASE read it: a composition names nothing. ONLY the parameter SIGNATURE (`FnInfo.paramSig`) asks
+/// this, because the signature is spelled into the unit's qual (`addHandler(_,String,Position)#1`) and its `hash`, which a policy
+/// and a chained consumer's join key on: naming the composition there would rename every overload that takes one.
+public func typeNameForSignature(_ t: TypeSyntax) -> (name: String?, isFunction: Bool) {
+    typeName(t, desugar: true, composition: false)
 }
 
 /// `desugar: false` is asked ONLY for the BASE of a member type path. `Dictionary<K, V>.Keys` names the nested
 /// type `Dictionary.Keys` — a nested type is named by its declaring type's NAME, not by the shape of a value of
 /// it — so the base is not rewritten to `[K: V]` (which has no name, and would have collapsed the path to the
 /// bare leaf `Keys`; measured on swift-collections' `OrderedSet.init(Dictionary.Keys)` key).
-private func typeName(_ t: TypeSyntax, desugar: Bool) -> (name: String?, isFunction: Bool) {
+private func typeName(_ t: TypeSyntax, desugar: Bool, composition: Bool) -> (name: String?, isFunction: Bool) {
     let t = desugar ? desugaredType(t) : t
     if let id = t.as(IdentifierTypeSyntax.self) { return (id.name.text, false) }
-    if let opt = t.as(OptionalTypeSyntax.self) { return typeName(opt.wrappedType) }
-    if let att = t.as(AttributedTypeSyntax.self) { return typeName(att.baseType) }
+    if let opt = t.as(OptionalTypeSyntax.self) { return typeName(opt.wrappedType, desugar: true, composition: composition) }
+    if let att = t.as(AttributedTypeSyntax.self) { return typeName(att.baseType, desugar: true, composition: composition) }
     if t.is(FunctionTypeSyntax.self) { return (nil, true) }
     // A QUALIFIED/NESTED type path `Outer.Inner` (MemberTypeSyntax): produce the dotted spelling so a
     // receiver typed `Outer.Inner` matches the nested type's unit key `Outer.Inner.method` (DeclCollector
     // keys an `extension Outer.Inner` under that same trimmed dotted name). A module-qualified stdlib type
     // (`Foundation.Date`) also yields a dotted name the κ table doesn't know → under-report, never a guess.
     if let mem = t.as(MemberTypeSyntax.self) {
-        let head = typeName(mem.baseType, desugar: false).name   // R976 — see `typeName(_:desugar:)`
+        let head = typeName(mem.baseType, desugar: false, composition: composition).name   // R976 — see `typeName(_:desugar:)`
         return (head.map { "\($0).\(mem.name.text)" } ?? mem.name.text, false)
     }
     if let tup = t.as(TupleTypeSyntax.self), tup.elements.count == 1, let only = tup.elements.first {
-        return typeName(only.type)
+        return typeName(only.type, desugar: true, composition: composition)
     }
-    if let some = t.as(SomeOrAnyTypeSyntax.self) { return typeName(some.constraint) } // `some P` / `any P`
+    if let some = t.as(SomeOrAnyTypeSyntax.self) { return typeName(some.constraint, desugar: true, composition: composition) } // `some P` / `any P`
+    // SOUNDNESS R1676 — A COMPOSITION `P & ~Copyable` / `~Copyable & P` / `P & Sendable` / `P & Q`. `typeName` named NO type
+    // for any composition, so `D: Decoder & ~Copyable` bound nothing: a call through `D` joined no conformer and
+    // `Handler.handlerRemoved` was ABSENT over a conformer that writes a file (executed; the bare `D: Decoder` dispatched).
+    // (a) A SUPPRESSION (`~Copyable`, `~Escapable`) and a MARKER protocol (`Sendable`, `Copyable`, ...) constrain nothing a
+    //     conformer must provide, so they are not members here: a composition left with ONE named member IS that member.
+    // (b) TWO OR MORE named protocols: one name cannot carry both. The FIRST is taken — the same coarser conformer sweep a
+    //     single `D: P` already gets (every type that conforms to `P & Q` conforms to `P`, so no real instantiation is
+    //     missed for `P`'s own members), at the cost of `Q`'s members, which stay unresolved exactly as before. Switch
+    //     `CANDOR_R1676B_OFF` restores the nameless reading for this arm alone; `CANDOR_R1676_OFF` for both.
+    if composition, !r1676Off, let comp = t.as(CompositionTypeSyntax.self) {
+        let named = comp.elements.filter {
+            if $0.type.is(SuppressedTypeSyntax.self) { return false }
+            if let n = $0.type.as(IdentifierTypeSyntax.self)?.name.text, R1676_MARKERS.contains(n) { return false }
+            return true
+        }
+        if named.count == 1, let only = named.first { return typeName(only.type, desugar: true, composition: true) }
+        if named.count > 1, !r1676bOff, let first = named.first { return typeName(first.type, desugar: true, composition: true) }
+    }
     return (nil, false)
 }
+/// Protocols that add no requirement a conformer must implement (R1676).
+public let R1676_MARKERS: Set<String> = ["Sendable", "Copyable", "Escapable", "BitwiseCopyable", "AnyObject", "Any", "SendableMetatype"]
+public let r1676bOff = Env.on("CANDOR_R1676B_OFF")
+/// SOUNDNESS R1676 KILL SWITCH — restores the release's reading of a composition type as nameless.
+public let r1676Off = Env.on("CANDOR_R1676_OFF")
 
 /// SOUNDNESS R585 — THE TYPE A `X.Type` SPELLING IS THE METATYPE OF, or nil.
 ///

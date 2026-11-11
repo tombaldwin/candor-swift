@@ -78,7 +78,9 @@ gAfterFor(); gAfterBlock(true); gAfterClosureParam(); gAfterLocalFunc(); gAfterC
         for fn in Self.reads {
             XCTAssertTrue(ProcessHarness.inferred(by, fn)?.contains("Fs") == true, "\(fn) forces a global's initializer (executed) — \(by[fn] ?? [:])")
         }
-        let off = try scan(root, env: ["CANDOR_R1514_OFF": "1"])
+        // R1676: `sParamComp`'s composition-typed parameter now names a type, which independently stops the fabrication, so the
+        // release's reading needs BOTH switches.
+        let off = try scan(root, env: ["CANDOR_R1514_OFF": "1", "CANDOR_R1676_OFF": "1"])
         for fn in Self.shadows {
             XCTAssertEqual(ProcessHarness.inferred(off, fn), ["Fs"], "the release fabricated the global onto \(fn)")
         }
