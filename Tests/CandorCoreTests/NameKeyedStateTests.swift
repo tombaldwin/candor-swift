@@ -376,6 +376,8 @@ final class NameKeyedStateTests: XCTestCase {
         // ⟨0.33.1⟩ the TYPE analogue of the row directly above, same reasoning: bare type names shadowed
         // only by a `#if`-gated declaration, scan-wide/per-Driver, never per-binding.
         "conditionallyShadowedTypes": .immutableIndex,
+        "mixedArmNamesR1714": .immutableIndex,   // R1714 — scan-wide, TYPE names; no binding keys it
+
         "returns": .immutableIndex, "enumCaseValueType": .immutableIndex,
         // SOUNDNESS R585 — the METATYPE twins of `returns`, `enumCaseValueType`, `globalTypes`/
         // `globalArrayElem` and `fields`/`fieldArrayElem`. Same disposition as each twin, for the twin's
