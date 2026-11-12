@@ -86,6 +86,9 @@ final class ConditionalMixedArmSetTests: XCTestCase {
                        "both arms pure: the union adds nothing")
         // the declaration is UNCONDITIONAL and the alias lives in another scope: not an arm set
         XCTAssertEqual(try probeEffects("enum Scope { typealias Impl = PureImpl\n static func go() { Impl.act() } }\n#if !os(macOS)\n#if os(Linux)\ntypealias Other = EnvImpl\n#endif\n#endif\npublic func probe() { Scope.go() }", name: "R1714U"), [])
+        // the RxSwift shape: a `#if` class beside a `#if` alias to a framework type no κ entry answers. The lone
+        // spelling is no effect and no disclosure, so the mixed set is neither (resolution, not a hedge).
+        XCTAssertEqual(try probeEffects("#if os(Linux)\nfinal class Lk: NSRecursiveLock {}\n#else\ntypealias Lk = NSRecursiveLock\n#endif\npublic func probe() { let l = Lk(); l.lock(); l.unlock() }", name: "R1714L"), [])
         // an unconditional alias, one arm, is unchanged
         XCTAssertEqual(try probeEffects("typealias Impl = EnvImpl\npublic func probe() { Impl.act() }", name: "R1714S"), ["Env"])
     }

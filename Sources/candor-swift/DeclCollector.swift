@@ -616,8 +616,14 @@ final class DeclCollector: SyntaxVisitor {
     /// is not in `declaredTypes` (it does not go through `pushType`), so it could not be an arm of a mixed
     /// `#if typealias X = T #else protocol X {…} #endif` set. The Driver keeps only names declared
     /// CONDITIONALLY AND NEVER UNCONDITIONALLY, the same rule `conditionallyShadowedTypeNames` applies.
-    var protocolNamesConditionalR1714: Set<String> = []
-    var protocolNamesUnconditionalR1714: Set<String> = []
+    /// SOUNDNESS R1714 — SCOPE-QUALIFIED PATHS (`Owner.Name`, or bare `Name` at file level) of every `#if`-gated
+    /// typealias, and of every type/protocol DECLARATION split by whether it sits in a `#if`. A mixed arm set is
+    /// a binding and a declaration of the SAME path, never of the same bare name: the first cut keyed on the bare
+    /// name and the corpus A/B read `extension KFAnimatedImage { typealias Context = KFImage.Context }` beside
+    /// `KFImage.Context` (a different type, the alias's own target) as one arm set and fabricated `Unknown`.
+    var aliasCondPathsR1714: Set<String> = []
+    var declCondPathsR1714: Set<String> = []
+    var declUncondPathsR1714: Set<String> = []
     // Types declared `@propertyWrapper`, and the wrapped stored properties per type
     // (`wrappedProps["S"]["count"] = "Logged"`). A `@Logged var count` desugars `s.count` to
     // `s._count.wrappedValue`; CallCollector edges the access to `Logged.wrappedValue` so an effectful
@@ -1066,6 +1072,8 @@ final class DeclCollector: SyntaxVisitor {
             // elsewhere) and conditionally still ends up in this set (Driver unions per-file), which is
             // right: a real, in-tree declaration exists, so winner-take-all still applies.
             if ifConfigDepth == 0 { declaredTypesUnconditional.insert(name) }
+            if ifConfigDepth == 0 { declUncondPathsR1714.insert(typeStack.joined(separator: ".")) }
+            else { declCondPathsR1714.insert(typeStack.joined(separator: ".")) }
         }
         let selfPath = typeStack.joined(separator: ".")
         for inh in inheritance?.inheritedTypes ?? [] {
@@ -1177,7 +1185,10 @@ final class DeclCollector: SyntaxVisitor {
             // A conditional-compilation arm is the only thing R429 is about: `ifConfigDepth > 0` means
             // this declaration sits in a `#if`/`#else` clause, so a second declaration of the same name
             // is the alternative build's, not an unrelated scope's.
-            if ifConfigDepth > 0 { typeAliasArms[node.name.text, default: []].insert(underlying) }
+            if ifConfigDepth > 0 {
+                typeAliasArms[node.name.text, default: []].insert(underlying)
+                aliasCondPathsR1714.insert((typeStack + [node.name.text]).joined(separator: "."))
+            }
         }
         // R178 — …and the branch the `if` above cannot take: a FUNCTION-typed alias has no name at all.
         // See `fnTypeAliases` for what read the dropped flag and what it cost.
@@ -1356,9 +1367,9 @@ final class DeclCollector: SyntaxVisitor {
         // body, and is answered only by an `interfaceUnion` entry the producer emits under
         // CANDOR_WORKSPACE_CHAIN. Without one the lookup misses and falls to half 1's disclosure, so the
         // two mechanisms are LAYERED, never redundant, and the unanswerable key is never silence.
-        if ifConfigDepth > 0 { protocolNamesConditionalR1714.insert(node.name.text) } else { protocolNamesUnconditionalR1714.insert(node.name.text) }
         let protoPath = typeStack.isEmpty ? node.name.text
                                           : typeStack.joined(separator: ".") + "." + node.name.text
+        if ifConfigDepth > 0 { declCondPathsR1714.insert(protoPath) } else { declUncondPathsR1714.insert(protoPath) }
         localTypePaths.insert(protoPath)
         protocolPaths.insert(protoPath)       // ⟨0.39⟩ the wire spelling — see `protocolPaths`
         var methods = Set<String>()

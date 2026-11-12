@@ -503,8 +503,10 @@ final class CallCollector: SyntaxVisitor {
     /// materially different shape from a Windows-only STUB beside a real cross-platform declaration. A
     /// bare CONSTRUCTOR call has no such internal-self-dispatch risk, so the narrowing is confined here.
     let conditionallyShadowedTypes: Set<String>
-    /// SOUNDNESS R1714 — protocols declared ONLY inside a `#if` (see `DeclCollector.protocolNamesConditionalR1714`).
-    let conditionalProtocolsR1714: Set<String>
+    /// SOUNDNESS R1714 — bare names for which a `#if` typealias and a `#if`-only declaration (type OR protocol)
+    /// share ONE scope-qualified path (see `DeclCollector.aliasCondPathsR1714`). The only names that get the
+    /// declaration as an arm.
+    let mixedArmNamesR1714: Set<String>
     /// Swift stdlib free functions carved OUT of the half-1 provenance trigger, which cannot otherwise
     /// tell a bare `max(a, b)` from a bare imported `build()` — Swift spells both without a module root.
     ///
@@ -1593,7 +1595,7 @@ final class CallCollector: SyntaxVisitor {
          dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
-         conditionallyShadowedTypes: Set<String> = [], conditionalProtocolsR1714: Set<String> = [], typeAliases: [String: String],
+         conditionallyShadowedTypes: Set<String> = [], mixedArmNamesR1714: Set<String> = [], typeAliases: [String: String],
          typeAliasArms: [String: Set<String>] = [:],
          fnTypeAliases: Set<String> = [],
          enclosingMembers: Set<String> = [],
@@ -1636,7 +1638,7 @@ final class CallCollector: SyntaxVisitor {
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
         self.conditionallyShadowedTypes = conditionallyShadowedTypes
-        self.conditionalProtocolsR1714 = conditionalProtocolsR1714
+        self.mixedArmNamesR1714 = mixedArmNamesR1714
         self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
@@ -2265,14 +2267,11 @@ final class CallCollector: SyntaxVisitor {
     /// unrelated unconditional type never manufactures an arm. Nil when the name has no `#if` alias arm at all.
     private func r1714ArmSet(_ raw: String) -> Set<String>? {
         guard var a = typeAliasArms[raw], !a.isEmpty else { return nil }
-        if !Self.r1714Off,
-           (declaredTypes.contains(raw) && conditionallyShadowedTypes.contains(raw)) || conditionalProtocolsR1714.contains(raw) {
-            a.insert(raw)
-        }
+        if !Self.r1714Off, mixedArmNamesR1714.contains(raw) { a.insert(raw) }
         return a
     }
     private func r1714IsProtocolArm(_ arm: String) -> Bool {
-        !Self.r1714Off && conditionalProtocolsR1714.contains(arm) && !declaredTypes.contains(arm)
+        !Self.r1714Off && mixedArmNamesR1714.contains(arm) && !declaredTypes.contains(arm)
     }
     /// A set with a PROJECT arm: a declared type, or (R1714) a conditionally-declared protocol. An ALL-FRAMEWORK
     /// set (`NSColor`/`UIColor`) stays on whatever κ gives the picked arm — see the note at the member-call site.
@@ -9715,6 +9714,8 @@ final class CallCollector: SyntaxVisitor {
                         } else if let eff = kappaFree(name: arm, argCount: node.arguments.count) {
                             directEffects.insert(eff)
                             incompleteSurfaces.insert(eff)
+                        } else if !Self.r1714HedgeOn {
+                            continue   // the lone spelling of a non-κ framework arm is no effect and no disclosure — see the member-call site
                         } else {
                             unresolved = true
                             why.insert("dispatch:\(arm).init")
@@ -9956,6 +9957,14 @@ final class CallCollector: SyntaxVisitor {
                     } else if let eff = kappaMember(root: arm, member: member) {
                         directEffects.insert(eff)
                         incompleteSurfaces.insert(eff)   // a different arm is a different destination
+                    } else if !Self.r1714HedgeOn, mixedArmNamesR1714.contains(raw), !Self.r1714Off {
+                        // R1714 — a MIXED (binding + declaration) set, and an alias arm no κ entry answers. The
+                        // engine reads that same framework type spelled ALONE (`typealias L = NSRecursiveLock`,
+                        // unconditional) as no effect and does not disclose, so hedging it here would charge the
+                        // set more than the sum of its arms read one at a time: a resolution (the arm gets the
+                        // answer the lone spelling gets) is preferred to a hedge. Priced against the hedge on
+                        // the corpus A/B; `CANDOR_R1714_HEDGE` restores it.
+                        continue
                     } else {
                         unresolved = true
                         why.insert("dispatch:\(arm).\(member)")
@@ -11160,6 +11169,7 @@ final class CallCollector: SyntaxVisitor {
     static let r1514Off = Env.on("CANDOR_R1514_OFF")
     static let r1714Off = Env.on("CANDOR_R1714_OFF")
     static let r1729Off = Env.on("CANDOR_R1729_OFF")
+    static let r1714HedgeOn = Env.on("CANDOR_R1714_HEDGE")
     /// R1514 (exposed): `for e in dict` types `e.value`. Off under `CANDOR_R1514D_OFF` (not under `CANDOR_R1514_OFF`, so
     /// the global-edge removal can be measured with the uncovered silence closed or not).
     static let r1514DOff = Env.on("CANDOR_R1514D_OFF")
