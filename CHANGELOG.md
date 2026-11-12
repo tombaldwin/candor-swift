@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.42.0] — 2026-11-12
+
 - **⚠ SPEC ⟨0.42⟩ a `#if` typealias beside a `#if` declaration of the same name is ONE arm set, resolved as the union
   (SOUNDNESS R1714, R1729).** `#if os(macOS) typealias Impl = EnvImpl #else struct Impl { … } #endif` recorded only the
   binding arm, so the union that already covered two typealias arms never ran and a call through `Impl` answered from the
