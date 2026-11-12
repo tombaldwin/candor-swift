@@ -2818,6 +2818,8 @@ private func typeName(_ t: TypeSyntax, desugar: Bool, composition: Bool) -> (nam
 /// SOUNDNESS R1677 KILL SWITCH — restores the R1676 reading: a bound is ONE protocol (the first non-marker member of a
 /// composition, the last `where` requirement), a parameter pack names nothing, and `protocol X: A & B` inherits only `A`.
 public let r1677Off = Env.on("CANDOR_R1677_OFF")
+/// SOUNDNESS R1706 KILL SWITCH — `where Self: Q` of an extension / method is not a bound of `self` (the release's reading).
+public let r1706Off = Env.on("CANDOR_R1706_OFF")
 /// SOUNDNESS R1677 — EVERY protocol a bound/existential spelling requires, in order: the non-suppressed, non-marker members of a
 /// composition (`P & Q & Sendable` -> [P, Q]), or the single named protocol. `typeName` names ONE (the first); a bound is a
 /// SET, and every member's conformers join a dispatch through the value.

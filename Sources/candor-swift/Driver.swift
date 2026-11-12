@@ -6846,6 +6846,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // spellings that arm cannot name — a local copy (`let x = d`), an element of `[D]`, a static member through `D.Type`. It fires
         // only for a dispatch the primary protocol does NOT declare, which today resolves to nothing at all.
         var dispatchesR1677 = cc.protoDispatches
+        // SOUNDNESS R1706 — `extension P where Self: Q`: a `self`/`Self` call to a member only `Q` declares dispatches over `Q`.
+        if !r1706Off, !f.selfExtrasR1706.isEmpty, let et = f.enclosingType {
+            for d in cc.protoDispatches where d.proto == et && !protoOrSuperDeclares(d.proto, d.member) {
+                for q in f.selfExtrasR1706 where q != et && protoOrSuperDeclares(q, d.member) {
+                    if CallCollector.veinBProbe { FileHandle.standardError.write("VBHIT\tR1706\t\(f.qual) \(d.proto).\(d.member) -> \(q)\n".data(using: .utf8)!) }
+                    dispatchesR1677.append(CallCollector.ProtoDispatch(proto: q, member: d.member, argc: d.argc, argTypes: d.argTypes, args: d.args))
+                }
+            }
+        }
         if !r1677Off {
             var rest = Set(f.genericBoundExtras.values.joined()).union(f.paramExtraProtos.values.joined())
             if let et = f.enclosingType {
@@ -7053,7 +7062,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         var stringifyViaRead: [(proto: String, member: String)] = []
         // SOUNDNESS R1473 — the property half of the platform-protocol requirement dispatch (see its definition).
         for d in cc.stdReqReads { stdlibRequirementDispatchR1473(d.proto, d.member, f, site: "prop") }
-        for d in cc.protoPropReads {
+        var propReadsR1706 = cc.protoPropReads
+        if !r1706Off, !f.selfExtrasR1706.isEmpty, let et = f.enclosingType {   // SOUNDNESS R1706 — see the method loop
+            for d in cc.protoPropReads where d.proto == et && !protoOrSuperDeclares(d.proto, d.member) {
+                for q in f.selfExtrasR1706 where q != et && protoOrSuperDeclares(q, d.member) {
+                    if CallCollector.veinBProbe { FileHandle.standardError.write("VBHIT\tR1706\t\(f.qual) prop \(d.proto).\(d.member) -> \(q)\n".data(using: .utf8)!) }
+                    propReadsR1706.append((proto: q, member: d.member))
+                }
+            }
+        }
+        for d in propReadsR1706 {
             // Same two-halved member space as the method loop above: an extension-provided COMPUTED property
             // (or `subscript`) is a real `P.<member>` accessor unit whose body runs, and no conformer
             // declares it, so the conformer CHA below can never find it. Edged first, on the protocol and on

@@ -712,6 +712,11 @@ final class CallCollector: SyntaxVisitor {
     var lgBindings: [String: (type: TypeSyntax?, initializer: ExprSyntax?)] = [:]
     /// SOUNDNESS R1523 — each local name's ONE binding's written type annotation (same rule as `lgBindings`).
     var annotatedLocalsR1523: [String: TypeSyntax] = [:]
+    /// SOUNDNESS R1706 — a name's ONE binding when it is an UNTYPED copy of another name (`var j = i`): its initializer. A binding has the
+    /// static type of what it copies, so `j` is written exactly as `i` is — see `writtenTypeArgsR1523`.
+    var untypedCopiesR1706: [String: ExprSyntax] = [:]
+    var binderCountsR1706: [String: Int] = [:]
+    var paramsR1706: Set<String> = []
     let globalMetatypes: [String: String]
     let globalMetatypeArrayElem: [String: String]
     let fieldMetatypes: [String: [String: String]]
@@ -2658,6 +2663,13 @@ final class CallCollector: SyntaxVisitor {
         if lg { lgBindings = single }
         // SOUNDNESS R1523 — the same one-binding rule, kept for the WRITTEN annotation alone (no local generics needed)
         if !Self.r1523TOff { annotatedLocalsR1523 = single.compactMapValues { $0.type } }
+        if !r1706Off, !Self.r1523TOff {
+            untypedCopiesR1706 = single.compactMapValues { b in
+                guard b.type == nil, let ini = b.initializer,
+                      Self.peel(ini).is(DeclReferenceExprSyntax.self) || Self.peel(ini).is(MemberAccessExprSyntax.self) else { return nil }
+                return Self.peel(ini)
+            }
+        }
     }
 
     /// SOUNDNESS R1044 — `pick(E())` where every declaration of `pick` is `func pick<T>(_ x: T) -> T`: the value is
@@ -4253,6 +4265,8 @@ final class CallCollector: SyntaxVisitor {
         propWrites = s.propWrites
         callsOnName = s.callsOn
         multiplyBoundNames = Set(s.binderCounts.filter { $0.value + (params.contains($0.key) ? 1 : 0) > 1 }.keys)
+        binderCountsR1706 = s.binderCounts
+        paramsR1706 = params
     }
 
     // ── PROCESS COMMAND PROVENANCE ──────────────────────────────────────────────────────────────────
@@ -8719,7 +8733,7 @@ final class CallCollector: SyntaxVisitor {
     static let r1523POff = r1523Off || Env.on("CANDOR_R1523P_OFF")
     static let r1523SOff = r1523Off || Env.on("CANDOR_R1523S_OFF")
     /// The written type of a receiver/operand: a parameter's declared type, a local's one annotation, or a field.
-    func writtenTypeArgsR1523(_ raw: ExprSyntax) -> (head: String, args: [String])? {
+    func writtenTypeArgsR1523(_ raw: ExprSyntax, copyDepth: Int = 0) -> (head: String, args: [String])? {
         var e = Self.peel(raw)
         if let io = e.as(InOutExprSyntax.self) { e = Self.peel(io.expression) }
         func field(_ owner: String, _ f: String) -> (head: String, args: [String])? {
@@ -8730,6 +8744,25 @@ final class CallCollector: SyntaxVisitor {
         }
         if let dr = e.as(DeclReferenceExprSyntax.self) {
             let n = dr.baseName.text
+            // SOUNDNESS R1706 — AN UNTYPED COPY HAS THE TYPE OF WHAT IT COPIES. `func f(_ i: G<L>.Iterator) { var j = i; _ = j.next() }`
+            // (and the shadow `var i = i`) wrote `j` with no annotation, so `j.next()` joined nothing: the chained dependency's
+            // `Iterator.next` runs the caller's `Base.Iterator.next` and the call read `[]` over a `next` that reads the environment
+            // (executed). The release covered it only with a wrong-reason same-name `Unknown` that R1513 rightly removed. A
+            // binding's static type is its initializer's, so `j` is written exactly as `i` is: a RESOLUTION, answered by the same
+            // reader. Only a bare name is followed, one binding of the copy, bounded depth; the shadow copy is the one binder
+            // beside the parameter it shadows.
+            if !r1706Off, copyDepth < 4, let src = untypedCopiesR1706[n], annotatedLocalsR1523[n] == nil {
+                let srcName = src.as(DeclReferenceExprSyntax.self)?.baseName.text ?? "<field>"   // `var j = h.it`: a field read
+                if srcName == n {
+                    guard paramsR1706.contains(n), (binderCountsR1706[n] ?? 0) == 1,
+                          let t = paramDeclTypesR996[n] else { return nil }
+                    vbHit("R1706", "shadow \(n)")
+                    return typePositionArgsR1523(t)
+                }
+                guard !multiplyBoundNames.contains(n) else { return nil }
+                if let r = writtenTypeArgsR1523(src, copyDepth: copyDepth + 1) { vbHit("R1706", "copy \(n) = \(srcName)"); return r }
+                return nil
+            }
             guard !multiplyBoundNames.contains(n) else { return nil }
             // the unit's ONE binding of `n` (a closure parameter of that name poisons it in the prescan)
             if let t = annotatedLocalsR1523[n] { return typePositionArgsR1523(t) }

@@ -356,6 +356,12 @@ final class NameKeyedStateTests: XCTestCase {
         "annotatedLocalsR1523": .deliberatelyKept(
             "R1523: `lgBindings`' own prescan (a name bound twice or by a closure/pattern binder is DROPPED), kept for the "
             + "written annotation only, and read only where `multiplyBoundNames` says the name has one binder in the unit"),
+        "untypedCopiesR1706": .deliberatelyKept(
+            "R1706: `lgBindings`' own prescan (a name bound twice or by a closure/pattern binder is DROPPED), kept for the "
+            + "initializer of an UNTYPED copy (`var j = i`) alone; a copy has its source's static type for the binding's whole life, and "
+            + "the source is read by the same one-binding rules as an annotated local"),
+        "binderCountsR1706": .deliberatelyKept("R1706: `LocatorMoveScanner.binderCounts`, computed before the walk beside `multiplyBoundNames`; read only to tell the one shadow copy of a parameter (`var i = i`) from a second binder"),
+        "paramsR1706": .immutableIndex,   // R1706 — the unit's parameter names, set before the walk
         "localPlatformGenerics": .deliberatelyKept(
             "R905: built flow-insensitively by a prescan that DROPS any name bound twice, by a closure parameter, "
             + "or by a non-`let` binder, so no rebind can leave a stale entry behind"),

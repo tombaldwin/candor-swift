@@ -108,6 +108,10 @@ struct FnInfo {
     /// primary: the Driver's `protoOrSuperDeclares` guard skips a protocol that does not declare the member.
     var genericBoundExtras: [String: [String]] = [:]
     var paramExtraProtos: [String: [String]] = [:]
+    /// SOUNDNESS R1706 — `extension P where Self: Q` (or a method's own `where Self: Q`): inside it `self` / `Self` IS a `Q` too, so a
+    /// member only `Q` declares (`Self.nameMap`, `self.q()`) is a requirement dispatch on `Q`. `Self`'s only name is the enclosing type
+    /// `P`, so the Driver's dispatch gate (`protoOrSuperDeclares(P, member)`) dropped it with no edge and no `Unknown`.
+    var selfExtrasR1706: [String] = []
     /// SOUNDNESS R866 — a parameter spelled as a protocol COMPOSITION (`_ t: any PSub & Sendable`) -> EVERY
     /// member the composition names, local or not. `typeName` answers nil for a composition, and
     /// `protoParams` keeps only the LOCALLY-declared members, so a composition whose callee lives on a
@@ -1588,6 +1592,7 @@ final class DeclCollector: SyntaxVisitor {
                 if node.modifiers.contains(where: { $0.name.text == "open" }) { openMemberQuals.insert(qual) }   // R1416
                 for (b, setterParam) in accessorBodies {
                     var info = FnInfo(qual: qual, loc: loc(binding))
+                    info.selfExtrasR1706 = selfBoundsR1706(of: Syntax(node))   // SOUNDNESS R1706
                     info.simpleQual = simpleQual
                     info.enclosingType = ty
                     info.enclosingTypePath = tyPath
@@ -2092,6 +2097,24 @@ final class DeclCollector: SyntaxVisitor {
     // only ever keeps the witness edge (an over-charge at worst, never a silence).
     static let r1270Off = Env.on("CANDOR_R1270_OFF")
     static let r1272Off = Env.on("CANDOR_R1272_OFF")
+    /// SOUNDNESS R1706 — `Self: Q` in the enclosing extension's (or this member's own) `where` clause, as `FnInfo.selfExtrasR1706`.
+    func selfBoundsR1706(of node: Syntax, ownWhere: GenericWhereClauseSyntax? = nil) -> [String] {
+        guard !r1706Off else { return [] }
+        var out: [String] = []
+        func take(_ clause: GenericWhereClauseSyntax?) {
+            for req in clause?.requirements ?? [] {
+                guard case .conformanceRequirement(let c) = req.requirement, c.leftType.trimmedDescription == "Self" else { continue }
+                for n in requiredProtocolNames(c.rightType) where !out.contains(n) { out.append(n) }
+            }
+        }
+        var anc: Syntax? = node.parent
+        while let a = anc, !a.is(ExtensionDeclSyntax.self), !a.is(StructDeclSyntax.self), !a.is(ClassDeclSyntax.self),
+              !a.is(EnumDeclSyntax.self), !a.is(ActorDeclSyntax.self), !a.is(ProtocolDeclSyntax.self) { anc = a.parent }
+        take(anc?.as(ExtensionDeclSyntax.self)?.genericWhereClause)
+        take(ownWhere)
+        return out
+    }
+
     private func selfOperandType(_ sig: FunctionSignatureSyntax, ownGenerics: Bool, ownWhere: Bool, node: Syntax) -> String? {
         let ps = Array(sig.parameterClause.parameters)
         guard ps.count == 2, !ownGenerics, !ownWhere, ps.allSatisfy({ $0.ellipsis == nil && $0.defaultValue == nil }) else { return nil }
@@ -2246,6 +2269,7 @@ final class DeclCollector: SyntaxVisitor {
                 if !rest.isEmpty { info.genericBoundExtras[gp] = rest }
             }
         }
+        info.selfExtrasR1706 = selfBoundsR1706(of: Syntax(node), ownWhere: whereClause)   // SOUNDNESS R1706
         // R532 — published, so the Driver can tell a TYPE NAME from a TYPE-PARAMETER NAME at the one
         // place ⟨0.39⟩ spells one onto the wire. Set here rather than recomputed there: both spellings
         // are already unioned above, and a second reader of the generic clause is the two-copies-of-one-
@@ -2543,6 +2567,7 @@ final class DeclCollector: SyntaxVisitor {
         if node.modifiers.contains(where: { $0.name.text == "open" }) { openMemberQuals.insert("\(tyPath).subscript") }   // R1416
         for (b, setterParam) in bodies {
             var info = FnInfo(qual: "\(tyPath).subscript", loc: loc(node))
+            info.selfExtrasR1706 = selfBoundsR1706(of: Syntax(node), ownWhere: node.genericWhereClause)   // SOUNDNESS R1706
             info.simpleQual = "\(ty).subscript"
             info.enclosingType = ty
             info.enclosingTypePath = tyPath
