@@ -716,6 +716,8 @@ final class CallCollector: SyntaxVisitor {
     /// static type of what it copies, so `j` is written exactly as `i` is — see `writtenTypeArgsR1523`.
     var untypedCopiesR1706: [String: ExprSyntax] = [:]
     var binderCountsR1706: [String: Int] = [:]
+    /// SOUNDNESS R1706 — `for var it in a`: the binder's source is the SEQUENCE `a`, and `it` has its ELEMENT type.
+    var elementCopiesR1706: [String: ExprSyntax] = [:]
     var paramsR1706: Set<String> = []
     let globalMetatypes: [String: String]
     let globalMetatypeArrayElem: [String: String]
@@ -2669,6 +2671,33 @@ final class CallCollector: SyntaxVisitor {
                       Self.peel(ini).is(DeclReferenceExprSyntax.self) || Self.peel(ini).is(MemberAccessExprSyntax.self) else { return nil }
                 return Self.peel(ini)
             }
+            // the PATTERN binders `PatternBinding` does not see: `if var j = o` / `guard let j = o` / `if let o` (the unwrapped value of the
+            // SAME written type) and `for var it in a` (an element of `a`). Collected apart from `single`/`lgBindings`, whose readers
+            // (R1044) never asked these, and read only where the name has exactly one binder in the unit.
+            final class Q: SyntaxVisitor {
+                var same: [String: ExprSyntax] = [:], elem: [String: ExprSyntax] = [:]
+                static func simple(_ e: ExprSyntax) -> ExprSyntax? {
+                    let p = CallCollector.peel(e)
+                    return p.is(DeclReferenceExprSyntax.self) || p.is(MemberAccessExprSyntax.self) ? p : nil
+                }
+                override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+                    guard node.typeAnnotation == nil, let n = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text else { return .visitChildren }
+                    if let ini = node.initializer?.value { if let src = Self.simple(ini) { same[n] = src } }
+                    else { same[n] = ExprSyntax(DeclReferenceExprSyntax(baseName: .identifier(n))) }   // the shorthand `if let o`
+                    return .visitChildren
+                }
+                override func visit(_ node: ForStmtSyntax) -> SyntaxVisitorContinueKind {
+                    var pat = node.pattern
+                    if let vb = pat.as(ValueBindingPatternSyntax.self) { pat = vb.pattern }
+                    if node.typeAnnotation == nil, let n = pat.as(IdentifierPatternSyntax.self)?.identifier.text,
+                       let src = Self.simple(node.sequence) { elem[n] = src }
+                    return .visitChildren
+                }
+            }
+            let q = Q(viewMode: .sourceAccurate)
+            q.walk(body)
+            for (n, e) in q.same where untypedCopiesR1706[n] == nil { untypedCopiesR1706[n] = e }
+            elementCopiesR1706 = q.elem
         }
     }
 
@@ -8763,6 +8792,12 @@ final class CallCollector: SyntaxVisitor {
                 if let r = writtenTypeArgsR1523(src, copyDepth: copyDepth + 1) { vbHit("R1706", "copy \(n) = \(srcName)"); return r }
                 return nil
             }
+            if !r1706Off, copyDepth < 4, let seq = elementCopiesR1706[n], !multiplyBoundNames.contains(n), annotatedLocalsR1523[n] == nil {
+                // `for var it in a` with `a: [G<L>.Iterator]` — `it` is an element of `a`, written as `a`'s element type is
+                guard let et = elementTypeR1706(seq), let r = typePositionArgsR1523(et) else { return nil }
+                vbHit("R1706", "element \(n) of \(seq.trimmedDescription)")
+                return r
+            }
             guard !multiplyBoundNames.contains(n) else { return nil }
             // the unit's ONE binding of `n` (a closure parameter of that name poisons it in the prescan)
             if let t = annotatedLocalsR1523[n] { return typePositionArgsR1523(t) }
@@ -8778,6 +8813,21 @@ final class CallCollector: SyntaxVisitor {
             guard r.isVar || Self.peel(base).as(DeclReferenceExprSyntax.self)?.baseName.text == "self", let owner = r.root else { return nil }
             return field(owner, ma.declName.baseName.text)
         }
+        return nil
+    }
+    /// SOUNDNESS R1706 — the written ELEMENT type of a sequence that is a one-binding parameter or an annotated local written as an
+    /// array (`[T]`, `Array<T>`, `ContiguousArray<T>`); nil otherwise.
+    func elementTypeR1706(_ seq: ExprSyntax) -> TypeSyntax? {
+        guard let n = seq.as(DeclReferenceExprSyntax.self)?.baseName.text, !multiplyBoundNames.contains(n) else { return nil }
+        var t: TypeSyntax
+        if let a = annotatedLocalsR1523[n] { t = a }
+        else if paramNamesR851.contains(n) || paramIndexR951[n] != nil, !isBoundLocal(n), let d = paramDeclTypesR996[n] { t = d }
+        else { return nil }
+        t = desugaredType(t)
+        if let a = t.as(AttributedTypeSyntax.self) { t = desugaredType(a.baseType) }
+        if let arr = t.as(ArrayTypeSyntax.self) { return arr.element }
+        if let id = t.as(IdentifierTypeSyntax.self), ["ContiguousArray", "ArraySlice"].contains(id.name.text),
+           let c = id.genericArgumentClause, c.arguments.count == 1 { return c.arguments.first?.argument.as(TypeSyntax.self) }
         return nil
     }
     /// Iterates every local iterable argument of `raw`'s written type when its head is a generic this scan does not declare.

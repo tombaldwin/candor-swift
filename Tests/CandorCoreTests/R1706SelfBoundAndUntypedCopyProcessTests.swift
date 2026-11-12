@@ -139,6 +139,11 @@ final class R1706SelfBoundAndUntypedCopyProcessTests: XCTestCase {
     func shadowP(_ i: Ws<PureSq>.Iterator) { var i = i; _ = i.next() }
     func copyFieldP(_ h: HoldP) { var j = h.it; _ = j.next() }
     func chainP(_ i: Ws<PureSq>.Iterator) { let a = i; var b = a; _ = b.next() }
+    func optBindP(_ o: Ws<PureSq>.Iterator?) { if var j = o { _ = j.next() } }
+    func guardBindP(_ o: Ws<PureSq>.Iterator?) { guard var j = o else { return }; _ = j.next() }
+    func arrElemP(_ a: [Ws<PureSq>.Iterator]) { for var it in a { _ = it.next() } }
+    func parenCopyP(_ i: Ws<PureSq>.Iterator) { var j = (i); _ = j.next() }
+    func forceUnwrapP(_ o: Ws<PureSq>.Iterator?) { var j = o!; _ = j.next() }
     public struct QuietMsg: Msg, NameProv { public init() {}; public static var nameMap: [Int: String] { [1: "q"] } }
     func gen<M: Msg & NameProv>(_ t: M.Type) throws -> MaskBox { try MaskBox(numbers: [1], of: t) }
     func mGenCallQ() throws { _ = try gen(QuietMsg.self) }
@@ -154,6 +159,11 @@ final class R1706SelfBoundAndUntypedCopyProcessTests: XCTestCase {
     func copyFieldL(_ h: HoldL) { var j = h.it; _ = j.next() }
     func chainL(_ i: Ws<LoudSq>.Iterator) { let a = i; var b = a; _ = b.next() }
     func annotL(_ i: Ws<LoudSq>.Iterator) { var j: Ws<LoudSq>.Iterator = i; _ = j.next() }
+    func optBindL(_ o: Ws<LoudSq>.Iterator?) { if var j = o { _ = j.next() } }
+    func guardBindL(_ o: Ws<LoudSq>.Iterator?) { guard var j = o else { return }; _ = j.next() }
+    func arrElemL(_ a: [Ws<LoudSq>.Iterator]) { for var it in a { _ = it.next() } }
+    func parenCopyL(_ i: Ws<LoudSq>.Iterator) { var j = (i); _ = j.next() }
+    func forceUnwrapL(_ o: Ws<LoudSq>.Iterator?) { var j = o!; _ = j.next() }
     public struct LoudMsg: Msg, NameProv { public init() {}; public static var nameMap: [Int: String] { mark("nm"); return [1: "l"] } }
     func mGenCallL() throws { _ = try gen(LoudMsg.self) }
     func mParamL(_ t: LoudMsg.Type) throws { _ = try MaskBox(numbers: [1], of: t) }
@@ -206,15 +216,15 @@ final class R1706SelfBoundAndUntypedCopyProcessTests: XCTestCase {
         return rows
     }
 
-    static let untypedCopyL = ["typePosL", "shadowL", "copyFieldL", "chainL", "annotL"]
-    static let untypedCopyP = ["typePosP", "shadowP", "copyFieldP", "chainP"]
+    static let untypedCopyL = ["typePosL", "shadowL", "copyFieldL", "chainL", "annotL", "optBindL", "guardBindL", "arrElemL", "parenCopyL", "forceUnwrapL"]
+    static let untypedCopyP = ["typePosP", "shadowP", "copyFieldP", "chainP", "optBindP", "guardBindP", "arrElemP", "parenCopyP", "forceUnwrapP"]
     static let selfBoundL = ["gen", "mGenCallL", "mParamL", "mVarL"]
 
     func testChainedUntypedCopyOfATypedParameterIsWrittenAsItsSource() throws {
         let on = try chained(Self.loudApp)
         for fn in Self.untypedCopyL { XCTAssertTrue(on[fn]?.contains("Fs") == true, "\(fn) runs LoudIt.next (executed) — \(on[fn] ?? [])") }
         let off = try chained(Self.loudApp, env: ["CANDOR_R1706_OFF": "1"])
-        for fn in ["typePosL", "shadowL", "copyFieldL", "chainL"] {
+        for fn in ["typePosL", "shadowL", "copyFieldL", "chainL", "optBindL", "guardBindL", "arrElemL", "parenCopyL"] {
             XCTAssertFalse(off[fn]?.contains("Fs") == true, "\(fn) under R1706_OFF reads as the release did — \(off[fn] ?? [])")
         }
         XCTAssertTrue(off["annotL"]?.contains("Fs") == true, "the annotated copy always charged")
