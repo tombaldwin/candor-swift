@@ -9714,12 +9714,8 @@ final class CallCollector: SyntaxVisitor {
                         } else if let eff = kappaFree(name: arm, argCount: node.arguments.count) {
                             directEffects.insert(eff)
                             incompleteSurfaces.insert(eff)
-                        } else if !Self.r1714HedgeOn {
-                            continue   // the lone spelling of a non-κ framework arm is no effect and no disclosure — see the member-call site
                         } else {
-                            unresolved = true
-                            why.insert("dispatch:\(arm).init")
-                            unreadableAliasArm = true
+                            continue   // the lone spelling of a non-κ framework arm is no effect and no disclosure — see the member-call site
                         }
                     }
                 }
@@ -9957,7 +9953,7 @@ final class CallCollector: SyntaxVisitor {
                     } else if let eff = kappaMember(root: arm, member: member) {
                         directEffects.insert(eff)
                         incompleteSurfaces.insert(eff)   // a different arm is a different destination
-                    } else if !Self.r1714HedgeOn, mixedArmNamesR1714.contains(raw), !Self.r1714Off {
+                    } else if mixedArmNamesR1714.contains(raw), !Self.r1714Off {
                         // R1714 — a MIXED (binding + declaration) set, and an alias arm no κ entry answers. The
                         // engine reads that same framework type spelled ALONE (`typealias L = NSRecursiveLock`,
                         // unconditional) as no effect and does not disclose, so hedging it here would charge the
@@ -11169,7 +11165,6 @@ final class CallCollector: SyntaxVisitor {
     static let r1514Off = Env.on("CANDOR_R1514_OFF")
     static let r1714Off = Env.on("CANDOR_R1714_OFF")
     static let r1729Off = Env.on("CANDOR_R1729_OFF")
-    static let r1714HedgeOn = Env.on("CANDOR_R1714_HEDGE")
     /// R1514 (exposed): `for e in dict` types `e.value`. Off under `CANDOR_R1514D_OFF` (not under `CANDOR_R1514_OFF`, so
     /// the global-edge removal can be measured with the uncovered silence closed or not).
     static let r1514DOff = Env.on("CANDOR_R1514D_OFF")

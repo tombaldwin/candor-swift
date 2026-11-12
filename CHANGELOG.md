@@ -10,6 +10,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SPEC ⟨0.42⟩ a `#if` typealias beside a `#if` declaration of the same name is ONE arm set, resolved as the union
+  (SOUNDNESS R1714, R1729).** `#if os(macOS) typealias Impl = EnvImpl #else struct Impl { … } #endif` recorded only the
+  binding arm, so the union that already covered two typealias arms never ran and a call through `Impl` answered from the
+  declaration alone: the aliased arm's effects were a silent under-report, in either written order (executed on macOS: the
+  program set an environment variable and wrote no file; the report charged `Fs` only, so `deny Env` exited 0). A mixed
+  set is now a conditional alias plus a conditional-only declaration (struct, enum, class or protocol) of the same
+  scope-qualified path, never the bare name; a framework alias arm that no κ entry answers contributes what its lone
+  spelling does (no effect, no disclosure). R1729, found beside it: a bare constructor `Impl()` over a conditional arm set
+  took one arm's `init` (two plain typealias arms included), so the other arm's constructor effects were dropped; it now
+  gets one edge per project arm. Kill switches `CANDOR_R1714_OFF`, `CANDOR_R1729_OFF`. Corpus A/B over 39 entries: ADDED 0,
+  REMOVED 0, CHANGED 1 (one added call edge, effects unchanged). Conformance PART 89 b10cfglocal / b11cfglocalrev.
+
 - **⚠ SPEC ⟨0.42⟩ result-moving switches are named in the report, and a gate under one refuses (SOUNDNESS R1634).** An
   environment variable that selects which logic ran (a kill switch for a closed defect, an opt-in mode: 177 in this engine)
   used to change report bytes and gate verdicts with nothing recording it. Now the report carries `"switches": [ "<NAME>", … ]`
