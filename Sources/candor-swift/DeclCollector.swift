@@ -612,6 +612,12 @@ final class DeclCollector: SyntaxVisitor {
     // branch) does not permanently shadow the heuristic the way an unconditional declaration must. See
     // `pushType`'s use of `ifConfigDepth`, and the getenv/free-function fix this mirrors (098a035).
     var declaredTypesUnconditional: Set<String> = []
+    /// SOUNDNESS R1714 — the bare names of PROTOCOLS declared inside a `#if` / outside any `#if`. A protocol
+    /// is not in `declaredTypes` (it does not go through `pushType`), so it could not be an arm of a mixed
+    /// `#if typealias X = T #else protocol X {…} #endif` set. The Driver keeps only names declared
+    /// CONDITIONALLY AND NEVER UNCONDITIONALLY, the same rule `conditionallyShadowedTypeNames` applies.
+    var protocolNamesConditionalR1714: Set<String> = []
+    var protocolNamesUnconditionalR1714: Set<String> = []
     // Types declared `@propertyWrapper`, and the wrapped stored properties per type
     // (`wrappedProps["S"]["count"] = "Logged"`). A `@Logged var count` desugars `s.count` to
     // `s._count.wrappedValue`; CallCollector edges the access to `Logged.wrappedValue` so an effectful
@@ -1350,6 +1356,7 @@ final class DeclCollector: SyntaxVisitor {
         // body, and is answered only by an `interfaceUnion` entry the producer emits under
         // CANDOR_WORKSPACE_CHAIN. Without one the lookup misses and falls to half 1's disclosure, so the
         // two mechanisms are LAYERED, never redundant, and the unanswerable key is never silence.
+        if ifConfigDepth > 0 { protocolNamesConditionalR1714.insert(node.name.text) } else { protocolNamesUnconditionalR1714.insert(node.name.text) }
         let protoPath = typeStack.isEmpty ? node.name.text
                                           : typeStack.joined(separator: ".") + "." + node.name.text
         localTypePaths.insert(protoPath)

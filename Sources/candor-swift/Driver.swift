@@ -503,6 +503,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var protocolPropTypesAll: [String: [String: String]] = [:]   // SOUNDNESS R578 — see DeclCollector
     var protocolPropNamesAll: [String: Set<String>] = [:]          // SOUNDNESS R904 — see DeclCollector
     var protocolPaths: Set<String> = []           // ⟨0.39⟩ see DeclCollector.protocolPaths
+    var protoCondR1714: Set<String> = [], protoUncondR1714: Set<String> = []   // R1714 — see DeclCollector
     var protocolSupers: [String: Set<String>] = [:]
     var conformers: [String: [String]] = [:]
     /// R266 — `DeclCollector.pathSupers`, unioned: SUBTYPE FULL PATH -> supertype names.
@@ -1084,6 +1085,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (pn, ps) in c.protocolPropTypes { protocolPropTypesAll[pn, default: [:]].merge(ps) { a, _ in a } }   // R578
         for (pn, ps) in c.protocolPropNames { protocolPropNamesAll[pn, default: []].formUnion(ps) }   // R904
         protocolPaths.formUnion(c.protocolPaths)   // ⟨0.39⟩
+        protoCondR1714.formUnion(c.protocolNamesConditionalR1714); protoUncondR1714.formUnion(c.protocolNamesUnconditionalR1714)
         for (pn, ss) in c.protocolSupers { protocolSupers[pn, default: []].formUnion(ss) }
         for (pn, ts) in c.conformers {
             conformers[pn, default: []].append(contentsOf: ts)
@@ -4658,6 +4660,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
+                               conditionalProtocolsR1714: protoCondR1714.subtracting(protoUncondR1714),
                                typeAliases: typeAliases, typeAliasArms: typeAliasArms,
                                fnTypeAliases: fnTypeAliases,
                                enclosingMembers: f.enclosingType.map { t in

@@ -503,6 +503,8 @@ final class CallCollector: SyntaxVisitor {
     /// materially different shape from a Windows-only STUB beside a real cross-platform declaration. A
     /// bare CONSTRUCTOR call has no such internal-self-dispatch risk, so the narrowing is confined here.
     let conditionallyShadowedTypes: Set<String>
+    /// SOUNDNESS R1714 — protocols declared ONLY inside a `#if` (see `DeclCollector.protocolNamesConditionalR1714`).
+    let conditionalProtocolsR1714: Set<String>
     /// Swift stdlib free functions carved OUT of the half-1 provenance trigger, which cannot otherwise
     /// tell a bare `max(a, b)` from a bare imported `build()` — Swift spells both without a module root.
     ///
@@ -1591,7 +1593,7 @@ final class CallCollector: SyntaxVisitor {
          dynamicMemberTypes: Set<String>,
          propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
-         conditionallyShadowedTypes: Set<String> = [], typeAliases: [String: String],
+         conditionallyShadowedTypes: Set<String> = [], conditionalProtocolsR1714: Set<String> = [], typeAliases: [String: String],
          typeAliasArms: [String: Set<String>] = [:],
          fnTypeAliases: Set<String> = [],
          enclosingMembers: Set<String> = [],
@@ -1634,6 +1636,7 @@ final class CallCollector: SyntaxVisitor {
         self.localFreeFns = localFreeFns
         self.conditionallyShadowedFreeFns = conditionallyShadowedFreeFns
         self.conditionallyShadowedTypes = conditionallyShadowedTypes
+        self.conditionalProtocolsR1714 = conditionalProtocolsR1714
         self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
@@ -2255,6 +2258,27 @@ final class CallCollector: SyntaxVisitor {
     /// is declared here. A project's own `class Process` aliased `Proc` is that project's type.
     /// VEIN A(i) — emit the constructor call a canonical LOCAL type spelling stands for, exactly as the bare
     /// `Boom()` is emitted, when the spelling differs from the canonical one (else the release's call is it).
+    /// SOUNDNESS R1714 — the ARM SET of a conditionally-compiled type NAME: every `#if` TYPEALIAS arm
+    /// (`typeAliasArms`) PLUS the name itself when it is ALSO declared (struct/enum/class, or protocol) and every
+    /// declaration of it sits in a `#if` (SPEC ⟨0.42⟩: a binding arm and a declaration arm of one name are ONE arm
+    /// set, resolved as the UNION). Conditional-only on the declaration side, so a bare-name coincidence with an
+    /// unrelated unconditional type never manufactures an arm. Nil when the name has no `#if` alias arm at all.
+    private func r1714ArmSet(_ raw: String) -> Set<String>? {
+        guard var a = typeAliasArms[raw], !a.isEmpty else { return nil }
+        if !Self.r1714Off,
+           (declaredTypes.contains(raw) && conditionallyShadowedTypes.contains(raw)) || conditionalProtocolsR1714.contains(raw) {
+            a.insert(raw)
+        }
+        return a
+    }
+    private func r1714IsProtocolArm(_ arm: String) -> Bool {
+        !Self.r1714Off && conditionalProtocolsR1714.contains(arm) && !declaredTypes.contains(arm)
+    }
+    /// A set with a PROJECT arm: a declared type, or (R1714) a conditionally-declared protocol. An ALL-FRAMEWORK
+    /// set (`NSColor`/`UIColor`) stays on whatever κ gives the picked arm — see the note at the member-call site.
+    private func r1714HasProjectArm(_ arms: Set<String>) -> Bool {
+        arms.contains(where: { declaredTypes.contains($0) || r1714IsProtocolArm($0) })
+    }
     private func aiCtorCall(_ spelled: String, _ node: FunctionCallExprSyntax, lit: String?) {
         guard !Self.aiOff, ai.enabled else { return }
         let c = canonicalTypeRef(spelled)
@@ -9675,6 +9699,29 @@ final class CallCollector: SyntaxVisitor {
                 // VEIN A(i) N-b — `FT_Boom()` where `typealias FT_Boom = TopBoom`: the Driver's ctor edge
                 // tests the RAW name, so the init never ran. ADDED beside the release's call, the type's own.
                 aiCtorCall(name, node, lit: lit)
+                // SOUNDNESS R1729 / R1714 — THE CONSTRUCTOR SPELLING OF AN ARM SET. `Impl()` over
+                // `#if os(macOS) typealias Impl = EnvInit #else typealias Impl = FsInit #endif` (or beside a
+                // `#else struct Impl { init() }` declaration) took the call edge of ONE arm — the member-call
+                // union above is keyed on a `Impl.member` receiver and a bare constructor has none — so the
+                // other arm's `init` effects were dropped (EXECUTED on macOS: `env: true file: false`, report
+                // `Fs` only). Same rule, same arm set, same project-arm bound as the member-call site.
+                if !Self.r1729Off, Self.typeLikeName(name), let arms = r1714ArmSet(name), arms.count > 1,
+                   r1714HasProjectArm(arms) {
+                    for arm in arms.sorted() where arm != name && !r1714IsProtocolArm(arm) {
+                        if declaredTypes.contains(arm) {
+                            calls.append(Call(path: arm, leaf: arm, strArg: lit, typed: false, args: argKinds(node),
+                                              argTypes: argTypesOf(node), unqualified: true,
+                                              argLabelled: node.arguments.contains { $0.label != nil }))
+                        } else if let eff = kappaFree(name: arm, argCount: node.arguments.count) {
+                            directEffects.insert(eff)
+                            incompleteSurfaces.insert(eff)
+                        } else {
+                            unresolved = true
+                            why.insert("dispatch:\(arm).init")
+                            unreadableAliasArm = true
+                        }
+                    }
+                }
             }
         } else if let ma = node.calledExpression.as(MemberAccessExprSyntax.self) {
             let member = ma.declName.baseName.text
@@ -9871,8 +9918,18 @@ final class CallCollector: SyntaxVisitor {
             // whatever κ already gives the picked arm, unchanged — it has its own question and its own
             // (pre-existing) answer, and widening into it here would be a fix drawn around a mechanism
             // rather than around a defect.
-            if let raw = rawBaseRoot, let arms = typeAliasArms[raw], arms.count > 1,
-               arms.contains(where: { declaredTypes.contains($0) }) {
+            // SOUNDNESS R1714 — THE MIXED ARM SET. `typeAliasArms` holds only the BINDING arms, so
+            // `#if os(macOS) typealias Impl = EnvImpl #else enum Impl { … } #endif` has ONE recorded arm
+            // (`EnvImpl`) and `arms.count > 1` never held: the call answered through the DECLARATION
+            // alone and the aliased arm's effects were dropped, in either written order (PART 89
+            // b10cfglocal/b11cfglocalrev; EXECUTED on macOS the built arm is the alias, which sets an
+            // environment variable and writes no file, yet the report charged `Fs` only). SPEC ⟨0.42⟩:
+            // a binding arm and a declaration arm of one name are ONE arm set, resolved as the UNION.
+            // The declaration is an arm exactly when it sits in a `#if` too (`conditionallyShadowedTypes`
+            // is declared-only-inside-`#if`): a name with an UNCONDITIONAL declaration is a real
+            // resolution, and a bare-name coincidence with an unrelated conditional alias elsewhere must
+            // not manufacture an arm (the bare-name merge hazard `typeAliasArms`' own note records).
+            if let raw = rawBaseRoot, let arms = r1714ArmSet(raw), arms.count > 1, r1714HasProjectArm(arms) {
                 // EVERY ARM, INCLUDING THE ONE `dealias` PICKED — and that is not belt-and-braces, it
                 // is a third order-dependence. Skipping the picked arm assumes the chain below handles
                 // it, and for an UNRESOLVABLE arm the chain does nothing at all: no branch matches
@@ -9892,6 +9949,7 @@ final class CallCollector: SyntaxVisitor {
                             .data(using: .utf8)!)
                 }
                 for arm in arms.sorted() {
+                    if r1714IsProtocolArm(arm) { continue }   // R1714 — a protocol arm is answered by the protocol dispatch below
                     if declaredTypes.contains(arm) {
                         calls.append(Call(path: "\(arm).\(member)", leaf: member, strArg: nil,
                                           typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
@@ -11100,6 +11158,8 @@ final class CallCollector: SyntaxVisitor {
     /// block, loop, closure or `catch` that bound the name still edges (`gAfterFor`, `gAfterBlock`, `gAfterCatch`),
     /// and a closure inside the body that reads a DIFFERENT global keeps its edge. Kill switch `CANDOR_R1514_OFF`.
     static let r1514Off = Env.on("CANDOR_R1514_OFF")
+    static let r1714Off = Env.on("CANDOR_R1714_OFF")
+    static let r1729Off = Env.on("CANDOR_R1729_OFF")
     /// R1514 (exposed): `for e in dict` types `e.value`. Off under `CANDOR_R1514D_OFF` (not under `CANDOR_R1514_OFF`, so
     /// the global-edge removal can be measured with the uncovered silence closed or not).
     static let r1514DOff = Env.on("CANDOR_R1514D_OFF")
