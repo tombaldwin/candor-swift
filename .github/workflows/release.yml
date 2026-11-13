@@ -22,8 +22,12 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
-    # Same budget as CI: a healthy run is ~3 min; past 20 is a hung runner (observed live, twice).
-    timeout-minutes: 20
+    # Measured 2026-11-13 (0.42.0 cut): this job runs everything ci.yml's `test` job runs (build, unit tests,
+    # smoke — 13.5 to 17.3 min over the last five runs, `swift test` alone ~11) PLUS a release build and the
+    # upload, so a healthy run is ~20+ min. At the old 20 it was cancelled twice on a healthy runner and the
+    # binary never attached (uploaded by hand). The earlier "~3 min" figure predated the test suite's growth.
+    # The budget is a hung-runner backstop, so it sits at ~2x a healthy run: tighten only after re-measuring.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - name: Tag must equal the engineVersion constant

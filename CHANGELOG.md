@@ -10,6 +10,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- release tooling: `release.yml`'s job timeout 20 to 45 min and ci.yml's `test` job 20 to 30. Unit tests now take ~11 min, so
+  the release job (the same steps plus a release build and upload) exceeded 20 on a healthy runner and was cancelled twice on
+  the 0.42.0 cut, leaving the binary to be attached by hand. The "~3 min" comments are corrected to the measured figures.
+
 ## [0.42.0] — 2026-11-12
 
 - **⚠ SPEC ⟨0.42⟩ a `#if` typealias beside a `#if` declaration of the same name is ONE arm set, resolved as the union

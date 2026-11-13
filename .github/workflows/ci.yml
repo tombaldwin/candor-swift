@@ -141,9 +141,11 @@ jobs:
   test:
     if: github.event_name != 'schedule'
     runs-on: macos-15
-    # A healthy run is ~3 min (SwiftSyntax ships prebuilt binaries); anything past 20 is a hung runner
-    # — kill it rather than burn 6h of 10x-billed macOS minutes (observed live, twice, 2026-07-02).
-    timeout-minutes: 20
+    # A healthy run was ~3 min on 2026-07-02 (SwiftSyntax ships prebuilt binaries); measured 2026-11-13 it is
+    # 13.5 to 17.3 min (`swift test` ~11), so the old 20 left under 3 min of headroom and release.yml, which
+    # runs the same steps plus a release build, was cancelled on it twice. 30 matches `release-build` below;
+    # the point stays the same — kill a hung runner rather than burn 6h of 10x-billed macOS minutes.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - name: Build
