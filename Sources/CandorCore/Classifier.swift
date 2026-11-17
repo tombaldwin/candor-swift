@@ -2645,6 +2645,12 @@ public let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationEs
     "ucrt", "wasi_pthread", "string_h", "zlibng", "SwiftShims"]
 public let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData",
     "NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL", "NIOTransportServices", "AsyncHTTPClient"]
+/// SOUNDNESS R1866 — the κ modules that are DEPENDENCY PACKAGES (SwiftPM, not an OS framework). κ's coverage of
+/// them is a curated verb table keyed on a TYPED receiver, so a value whose type this engine could not form (a
+/// dependency factory's result, `let r = makeClient()`) is answered by nothing: the module is not blind (no
+/// `invisible`), the classifier cannot key the call, and no report is chained. The Driver discloses that call.
+public let KAPPA_DEPENDENCY_MODULES: Set<String> = ["NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL",
+    "NIOTransportServices", "AsyncHTTPClient"]
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // SQL tables — the SPEC §2 pinned extraction, token-for-token with the other three engines

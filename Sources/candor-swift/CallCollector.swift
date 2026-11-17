@@ -8547,6 +8547,8 @@ final class CallCollector: SyntaxVisitor {
     /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
     /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
     static let r1065Off = Env.on("CANDOR_R1065_OFF")
+    /// SOUNDNESS R1865 §1b KILL SWITCH — the `<curated>.` join marker is not emitted (curated-wins restored).
+    static let r1865Off = Env.on("CANDOR_R1865_OFF")
     func depInstanceMemberCallee(_ expr: ExprSyntax) -> String? {
         guard !Self.r1065Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
               let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
@@ -10426,6 +10428,19 @@ final class CallCollector: SyntaxVisitor {
                 // ratchet in `ExecCapabilityProcessTests`, with the reason the fix belongs one level up.
             } else if let rt = base.root, let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
                 directEffects.insert(eff)
+                // SOUNDNESS R1865 — SPEC §2 ⟨0.43⟩: A CHAINED ROW AND A CURATED ENTRY THAT ANSWER ONE CALL ARE
+                // UNIONED. This branch charged the classifier's verb and emitted NO call, so the Driver's §2 join
+                // never saw `r.get(p)` on an `r: HTTPClient` — the curated `Net` WON, and a chained report's
+                // `[Fs]` (or its `Unknown`, or a §2.1-downgraded entry's `Unknown`) for the same member was never
+                // read: `deny Fs` and `deny Fs Unknown` exit 0 over an executed write (PART 110 `ch_c_param`).
+                // The marker asks ONLY that join and is answered ADDITIVELY in the Driver: a hit is unioned with
+                // the charge above, a miss adds nothing (the call is answered — by the classifier), and an
+                // unchained scan never reads it. Not for a type this package DECLARES: that shadow is the GRDB
+                // `bind` lesson, and the branch above already takes it.
+                if !Self.r1865Off, !declaredTypes.contains(rt) {
+                    calls.append(Call(path: "<curated>.\(member)", leaf: member, strArg: nil, typed: false,
+                                      args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), extOwner: rt))
+                }
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { let ks = fsKind(root: rt, member: member)

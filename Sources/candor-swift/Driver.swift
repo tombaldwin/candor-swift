@@ -3246,6 +3246,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinUnionOff = Env.on("CANDOR_JOIN_UNION_OFF")
     let joinUnionProbe = Env.trace("CANDOR_JOIN_UNION_PROBE")
     let joinDebug = Env.trace("CANDOR_JOIN_DEBUG")
+    /// SOUNDNESS R1865 reach probe — one line per `<curated>.` marker a chained entry answered.
+    let r1865Probe = Env.trace("CANDOR_R1865_PROBE")
+    /// SOUNDNESS R1866 §1b kill switch and reach probe — see `r1866Standalone`.
+    let r1866Off = Env.on("CANDOR_R1866_OFF")
+    let r1866Probe = Env.trace("CANDOR_R1866_PROBE")
     /// SOUNDNESS R910 §1b KILL SWITCH and reach probe — see `askOwnKey`.
     let r910Off = Env.on("CANDOR_R910_OFF")
     let r910Probe = Env.trace("CANDOR_R910_PROBE")
@@ -5047,6 +5052,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     continue
                 }
             }
+            // SOUNDNESS R1865 — the `<curated>.` marker: a member call the curated classifier CHARGED (the
+            // collector's κ-member branch) on a receiver of a type this package does not declare. SPEC §2 ⟨0.43⟩
+            // makes the answer the UNION of that charge and any chained row for the same member, so the §2 key
+            // `<pkg>#<Type>.<member>` is asked here exactly as the ordinary member join asks it (the file's own
+            // chained imports, preferring the package the source spells — R846), and EVERY entry the first
+            // answering tier holds is applied (⟨0.25⟩: an ambiguous key is unioned, never picked from). A hit
+            // ADDS (the row's concrete effects, its `Unknown` and reason, a §2.1-downgraded entry's `Unknown`);
+            // a miss adds nothing — the classifier answered the call, so there is no silence to disclose — and
+            // `resolved`, the publish arms and every hedge downstream are never reached by this marker.
+            if call.path.hasPrefix("<curated>.") {
+                guard let owner = call.extOwner, !deps.isEmpty else { continue }
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                for tier in joinTiers(file, module: call.ownerModule) {
+                    let hits = tier.compactMap { deps.lookup("\($0.p)#\(owner).\(call.leaf)") }
+                    if hits.isEmpty { continue }
+                    if joinDebug || r1865Probe {
+                        FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) n=\(hits.count)\n".data(using: .utf8)!)
+                    }
+                    for de in hits { applyDepEntry(de, to: f.qual) }
+                    break
+                }
+                continue
+            }
             // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
             // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
             if call.path.hasPrefix("<site>.") {
@@ -6450,7 +6478,24 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if r1066Standalone, r1066Probe {
                     FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
                 }
-                if chainedHere || r836Standalone || r1066Standalone {
+                // SOUNDNESS R1866 — …AND A STANDALONE SCAN WHERE THE FACTORY'S MODULE IS ONE THE CURATED CLASSIFIER
+                // "COVERS". The comment above this block rests on "for an UNCHAINED package the κ ledger already
+                // discloses `invisible: [M]`", and for a κ module it does not: `blindModules` excludes
+                // `KAPPA_MODULES`, so `let r = makeClient(); r.get(p)` (and `makeClient().get(p)`) with
+                // `import AsyncHTTPClient` read `['Env']`, `unresolved: false`, no `invisible` anywhere — `deny Fs`
+                // and `deny Fs Unknown` exit 0 over an executed write, while the SAME call chained discloses here.
+                // κ keys its verbs on a TYPED receiver, so a receiver it cannot type is not covered by it. Bounded
+                // to the κ modules that are dependency packages (not an OS framework) and to a file that imports
+                // one no chained report covers; the token is the chained arm's, so the two arms say one thing.
+                let r1866Standalone: Bool = {
+                    guard !chainedHere, !r1866Off, call.depCallee != nil else { return false }
+                    return effectiveImports(file).contains {
+                        KAPPA_DEPENDENCY_MODULES.contains($0) && !deps.coversModule($0) }
+                }()
+                if r1866Standalone, r1866Probe {
+                    FileHandle.standardError.write("R1866HIT \(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                }
+                if chainedHere || r836Standalone || r1066Standalone || r1866Standalone {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
                 }
