@@ -52,7 +52,8 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         var appDir: URL { root.appendingPathComponent("app") }
     }
 
-    private func make(_ label: String) throws -> Fixture {
+    private func make(_ label: String, dep: String = ChainedCuratedUnionProcessTests.dep,
+                      app: String = ChainedCuratedUnionProcessTests.app) throws -> Fixture {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-r1865-\(label)-\(UUID().uuidString)")
@@ -68,7 +69,7 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
             products: [.library(name: "AsyncHTTPClient", targets: ["AsyncHTTPClient"])],
             targets: [.target(name: "AsyncHTTPClient")])
         """)
-        try write("AsyncHTTPClient/Sources/AsyncHTTPClient/lib.swift", Self.dep)
+        try write("AsyncHTTPClient/Sources/AsyncHTTPClient/lib.swift", dep)
         try write("app/Package.swift", """
         // swift-tools-version:5.9
         import PackageDescription
@@ -76,7 +77,7 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
             dependencies: [.package(path: "../AsyncHTTPClient")],
             targets: [.target(name: "App", dependencies: [.product(name: "AsyncHTTPClient", package: "AsyncHTTPClient")])])
         """)
-        try write("app/Sources/App/app.swift", Self.app)
+        try write("app/Sources/App/app.swift", app)
         let fx = Fixture(root: root, bin: bin)
         try FileManager.default.createDirectory(at: fx.depDir, withIntermediateDirectories: true)
         let rd = try ProcessHarness.run(bin, [root.appendingPathComponent("AsyncHTTPClient").path,
@@ -159,5 +160,93 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         XCTAssertEqual(nc["typedGet"]?.inferred, ["Net"], "BOUND — a TYPED call is answered by the classifier, not hedged")
         let off = try scan(fx, chained: false, env: ["CANDOR_R1866_OFF": "1"], "off")
         XCTAssertNil(off["untypedGet"], "§1b — the silence, reproduced with the fix switched off")
+    }
+
+    // ── R1865, the spellings PART 110 does not measure (Fable R1865 merge review) ──
+    //
+    // The κ verb reached three more ways, each with a non-κ TWIN that the ordinary member join already answered. Before
+    // the rework each κ spelling read ['Net'] chained over an executed write (`deny Fs` and `deny Fs Unknown` exit 0)
+    // while its twin read ['Env', 'Fs']: (a) a verb INHERITED from a dependency base class and (b) a PROTOCOL-EXTENSION
+    // default — the marker asked only the owner's own key, the ordinary join walks on a miss; (c) implicit self inside the
+    // consumer's `extension HTTPClient` — a second κ arm that charged and emitted no call. Plus (d) a conditional typealias
+    // whose arms are the κ type and a local declaration: the alias arm charged κ the same way.
+
+    private static let depShapes = """
+    import Foundation
+    open class HTTPClientBase {
+        public init() {}
+        public func get(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        public func tallyA(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+    }
+    public protocol Fetching {}
+    extension Fetching {
+        public func post(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        public func tallyB(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+    }
+    public final class HTTPClient: HTTPClientBase, Fetching {
+        public override init() { super.init() }
+        public func put(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        public func delete(_ p: String) -> Int { return p.count }
+    }
+    """
+
+    private static let appShapes = """
+    import Foundation
+    import AsyncHTTPClient
+    public func inhGet(_ r: HTTPClient, _ p: String) -> Int { return r.get(p) }
+    public func inhTwin(_ r: HTTPClient, _ p: String) -> Int { return r.tallyA(p) }
+    public func protoPost(_ r: HTTPClient, _ p: String) -> Int { return r.post(p) }
+    public func protoTwin(_ r: HTTPClient, _ p: String) -> Int { return r.tallyB(p) }
+    public func pureDelete(_ r: HTTPClient, _ p: String) -> Int { return r.delete(p) }
+    extension HTTPClient {
+        public func extImplicit(_ p: String) -> Int { return put(p) }
+        public func extImplicitInh(_ p: String) -> Int { return get(p) }
+    }
+    public struct LocalClient { public init() {}; public func get(_ p: String) -> Int { return p.count } }
+    #if os(macOS)
+    public typealias Either = HTTPClient
+    #else
+    public typealias Either = LocalClient
+    #endif
+    public func aliasGet(_ r: Either, _ p: String) -> Int { return r.get(p) }
+    """
+
+    func testTheMarkerReachesInheritedProtocolDefaultImplicitSelfAndAliasSpellings() throws {
+        let fx = try make("shapes", dep: Self.depShapes, app: Self.appShapes)
+        defer { try? FileManager.default.removeItem(at: fx.root) }
+        let ch = try scan(fx, chained: true, "ch")
+        XCTAssertEqual(ch["inhTwin"]?.inferred, ["Fs"], "PREMISE: the ordinary join walks to the inherited body")
+        XCTAssertEqual(ch["protoTwin"]?.inferred, ["Fs"], "PREMISE: …and to the protocol-extension default")
+        for fn in ["inhGet", "protoPost", "HTTPClient.extImplicit", "HTTPClient.extImplicitInh"] {
+            XCTAssertEqual(ch[fn]?.inferred, ["Fs", "Net"],
+                           "\(fn): the curated Net AND the body that runs. Before the rework this read ['Net']")
+        }
+        XCTAssertEqual(ch["aliasGet"]?.inferred.contains("Fs"), true,
+                       "the conditional-typealias κ arm joins the chained row too")
+        XCTAssertEqual(ch["pureDelete"]?.inferred, ["Net"],
+                       "a κ verb whose body is pure: the walk reaches no body, and a miss adds NOTHING (no Unknown)")
+        for fn in ["inhGet", "protoPost", "HTTPClient.extImplicit"] {
+            XCTAssertEqual(try gate(fx, chained: true, "deny Fs \(fn)"), 1, "GATE LEVEL — \(fn). Was exit 0")
+        }
+        let off = try scan(fx, chained: true, env: ["CANDOR_R1865_OFF": "1"], "off")
+        XCTAssertEqual(off["inhGet"]?.inferred, ["Net"], "§1b — the defect, with the fix switched off")
+        XCTAssertEqual(off["HTTPClient.extImplicit"]?.inferred, ["Net"], "§1b — the implicit-self arm")
+    }
+
+    // ── R1866: the list the disclosure keys on must not drift from the one that silences ──
+
+    /// The silence exists because `blindModules()` treats every `KAPPA_MODULES` member as covered. A module added there and
+    /// not to `KAPPA_DEPENDENCY_MODULES` re-opens R1866 for it; this pins the partition: every κ module is either a
+    /// dependency module (disclosed) or one of the named OS frameworks, which have no dependency factory to untype a
+    /// receiver. Adding a κ module forces a decision here.
+    func testKappaDependencyModulesPartitionKappaModules() {
+        let osFrameworks: Set<String> = ["Network", "SQLite3", "CoreData"]
+        XCTAssertTrue(KAPPA_DEPENDENCY_MODULES.isSubset(of: KAPPA_MODULES),
+                      "a disclosure keyed on a module κ does not cover discloses nothing new — and misleads the reader")
+        XCTAssertEqual(KAPPA_MODULES.subtracting(KAPPA_DEPENDENCY_MODULES), osFrameworks,
+                       "R1866 DRIFT: a κ module that is neither a dependency module nor a named OS framework is "
+                       + "treated as covered by `blindModules()` and NOT disclosed by R1866 — an untyped receiver into "
+                       + "it reads pure. Add it to KAPPA_DEPENDENCY_MODULES, or name it here as an OS framework")
+        XCTAssertTrue(KAPPA_DEPENDENCY_MODULES.isDisjoint(with: PLATFORM_MODULES))
     }
 }

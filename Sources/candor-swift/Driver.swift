@@ -3687,8 +3687,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         else { return false }
         return sups.allSatisfy { $0.hasPrefix("\(pkg)#") && isPlatformTypeName(String($0.dropFirst(pkg.count + 1))) }
     }
+    /// `hedgeMiss: false` — SOUNDNESS R1865's `<curated>.` marker: the classifier already answered the call, so a walk
+    /// that reaches no body adds nothing (SPEC §2 ⟨0.43⟩ "a call that joins no entry adds nothing beyond the classifier's
+    /// charge"); what it DOES reach is applied exactly as for the ordinary member join.
     func sourceTypedWalk(_ key: String, _ leaf: String, tiers: [[(p: String, mods: [String])]],
-                         to qual: String, guessed: Bool) {
+                         to qual: String, guessed: Bool, hedgeMiss: Bool = true) {
         var starts: [String] = []
         for tier in tiers where starts.isEmpty {
             for (p, _) in tier where deps.surface.typeKeysSeen.contains("\(p)#\(key)")
@@ -3712,7 +3715,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 FileHandle.standardError.write("R843WALK \(qual) \(st).\(leaf) hits=\(a.hits) answered=\(a.answered) structural=\(a.structural)\n".data(using: .utf8)!)
             }
         }
-        if walkMiss, !guessed {
+        if walkMiss, !guessed, hedgeMiss {
             direct[qual, default: []].insert("Unknown")
             whyMap[qual, default: []].insert("dispatch:\(key).\(leaf)")
         }
@@ -5064,14 +5067,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if call.path.hasPrefix("<curated>.") {
                 guard let owner = call.extOwner, !deps.isEmpty else { continue }
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                for tier in joinTiers(file, module: call.ownerModule) {
+                // The SAME answer the ordinary member join gives the non-κ twin of this call, tier by tier: the
+                // owner's own key first; on a miss, the ⟨0.40⟩ walk (a member the dependency type INHERITS, a
+                // protocol-extension default, a conformance another package adds — R858/R859/R865), so a κ verb
+                // the type does not declare itself still reads the body that runs (Fable R1865 merge review: an
+                // inherited `get` and a protocol-default `post` read ['Net'] over an executed write). The walk
+                // is asked per tier, so the package the source SPELLS answers before another package's
+                // same-named type (R846); a walk that reaches nothing adds nothing (`hedgeMiss: false`).
+                let tiers = joinTiers(file, module: call.ownerModule)
+                for (ti, tier) in tiers.enumerated() {
                     let hits = tier.compactMap { deps.lookup("\($0.p)#\(owner).\(call.leaf)") }
-                    if hits.isEmpty { continue }
-                    if joinDebug || r1865Probe {
-                        FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) n=\(hits.count)\n".data(using: .utf8)!)
+                    if !hits.isEmpty {
+                        if joinDebug || r1865Probe {
+                            FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) n=\(hits.count)\n".data(using: .utf8)!)
+                        }
+                        for de in hits { applyDepEntry(de, to: f.qual) }
+                        // R849, as the ordinary join runs it: the SPELLED package answered and another chained
+                        // package answers the same key — an overload the source may be calling; disclosed.
+                        if ti == 0 { discloseOtherAnswers("\(owner).\(call.leaf)", tiers: tiers, why: "dispatch:\(owner).\(call.leaf)", f.qual) }
+                        break
                     }
-                    for de in hits { applyDepEntry(de, to: f.qual) }
-                    break
+                    if r843Off { continue }
+                    let before = depApplyTick
+                    sourceTypedWalk(owner, call.leaf, tiers: [tier], to: f.qual, guessed: false, hedgeMiss: false)
+                    if depApplyTick != before {
+                        if joinDebug || r1865Probe {
+                            FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) walk\n".data(using: .utf8)!)
+                        }
+                        break
+                    }
                 }
                 continue
             }

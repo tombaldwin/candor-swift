@@ -8549,6 +8549,14 @@ final class CallCollector: SyntaxVisitor {
     static let r1065Off = Env.on("CANDOR_R1065_OFF")
     /// SOUNDNESS R1865 §1b KILL SWITCH — the `<curated>.` join marker is not emitted (curated-wins restored).
     static let r1865Off = Env.on("CANDOR_R1865_OFF")
+    /// SOUNDNESS R1865 — the one place a `<curated>.` marker is minted. EVERY κ arm that charges a member call and emits
+    /// no `Call` of its own calls this beside the charge: the explicit-receiver arm, the implicit-self arm inside an
+    /// `extension <Type>`, and the conditional-typealias arm. The Driver answers it with the §2 join, additively.
+    func curatedJoinMarker(_ owner: String, _ member: String, module: String?) {
+        guard !Self.r1865Off else { return }
+        calls.append(Call(path: "<curated>.\(member)", leaf: member, strArg: nil, typed: false,
+                          args: [], argTypes: [], ownerModule: module, extOwner: owner))
+    }
     func depInstanceMemberCallee(_ expr: ExprSyntax) -> String? {
         guard !Self.r1065Off, let call = Self.peel(expr).as(FunctionCallExprSyntax.self),
               let ma = Self.peel(call.calledExpression).as(MemberAccessExprSyntax.self), let base = ma.base else { return nil }
@@ -9492,6 +9500,7 @@ final class CallCollector: SyntaxVisitor {
                 // table knows the member — a declared type shadows κ, a local free fn / shadowing local wins.
                 let est = isEstablishingMember(effect: eff, root: et, member: name)
                 directEffects.insert(eff)
+                curatedJoinMarker(et, name, module: nil)   // SOUNDNESS R1865 — implicit self in `extension <Type>`
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { let ks = fsKind(root: et, member: name)
@@ -9954,6 +9963,7 @@ final class CallCollector: SyntaxVisitor {
                                           typed: true, args: argKinds(node), argTypes: argTypesOf(node)))
                     } else if let eff = kappaMember(root: arm, member: member) {
                         directEffects.insert(eff)
+                        curatedJoinMarker(arm, member, module: nil)   // SOUNDNESS R1865 — a conditional-typealias arm
                         incompleteSurfaces.insert(eff)   // a different arm is a different destination
                     } else if mixedArmNamesR1714.contains(raw), !Self.r1714Off {
                         // R1714 — a MIXED (binding + declaration) set, and an alias arm no κ entry answers. The
@@ -10437,10 +10447,7 @@ final class CallCollector: SyntaxVisitor {
                 // the charge above, a miss adds nothing (the call is answered — by the classifier), and an
                 // unchained scan never reads it. Not for a type this package DECLARES: that shadow is the GRDB
                 // `bind` lesson, and the branch above already takes it.
-                if !Self.r1865Off, !declaredTypes.contains(rt) {
-                    calls.append(Call(path: "<curated>.\(member)", leaf: member, strArg: nil, typed: false,
-                                      args: [], argTypes: [], ownerModule: spelledModule(of: ma.base), extOwner: rt))
-                }
+                if !declaredTypes.contains(rt) { curatedJoinMarker(rt, member, module: spelledModule(of: ma.base)) }
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { let ks = fsKind(root: rt, member: member)

@@ -10,13 +10,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-- **⚠ SPEC ⟨0.43⟩ (SOUNDNESS R1865): a chained row and a curated classifier entry that answer one call are unioned.** A
-  typed member call that the curated classifier names (`r.get(p)` with `r: HTTPClient`, the `HTTPClient(…)` and
-  `let r: HTTPClient` spellings, and the inner call of `HTTPClient.get(r)(p)`) was charged the classifier's verb and the
-  chained dependency's row for the same member was never read: a row's concrete effects, its `Unknown` and reason, and a
-  §2.1-downgraded entry's `Unknown` were all dropped. Executed: the member writes a file and `deny Fs` / `deny Fs Unknown`
-  exited 0 chained (identical on 0.42.0). The §2 key `<pkg>#<Type>.<member>` is now asked beside the charge and every entry
-  it hits is added; a miss adds nothing, an unchained scan is unchanged, and a type this package declares still shadows.
+- **⚠ SPEC ⟨0.43⟩ (SOUNDNESS R1865): a chained row and a curated classifier entry that answer one call are unioned.**
+  Before this change, a member call that the curated classifier names was charged only the classifier's verb. The
+  chained dependency's row for the same member was never read, so the row's concrete effects, its `Unknown` and reason,
+  and a §2.1-downgraded entry's `Unknown` were all dropped. Executed: the member writes a file, and `deny Fs` and
+  `deny Fs Unknown` exited 0 when chained. 0.42.0 behaves the same. The fix covers every κ arm that charges a member call:
+  - **the explicit receiver:** `r.get(p)` with `r: HTTPClient`, `let r: HTTPClient`, `HTTPClient().get(p)`, the inner
+    call of `HTTPClient.get(r)(p)`, and `self.get(p)` inside `extension HTTPClient`;
+  - **implicit self** inside the consumer's `extension HTTPClient` (`put(p)`);
+  - **a conditional `typealias`** whose arm is the κ type.
+
+  For each spelling, the member may be declared by the type, INHERITED from a dependency base class, or a
+  PROTOCOL-EXTENSION default. The §2 key `<pkg>#<Type>.<member>` is asked beside the charge. When that key misses, the
+  join walks the dependency type's supertypes exactly as the ordinary member join does, tier by tier, so the package the
+  source spells answers first. Every entry the join reaches is added. If the spelled package answers and another chained
+  package holds the same key, the R849 disclosure fires, as on the ordinary join. A miss adds nothing. An unchained scan
+  is unchanged, and a type this package declares still shadows the classifier.
+
+  NOT covered:
+  - the untyped and returned-value spellings (`let r = makeClient(); r.get(p)`): chained, they read the row through
+    `typeSurface.returns`, and the classifier is not asked there, exactly as unchained;
+  - an unqualified κ free name (`shellOut(to:)`): when chained, the dependency row replaces the curated charge, a
+    separate defect.
+
   Kill switch `CANDOR_R1865_OFF`, reach probe `CANDOR_R1865_PROBE`. Conformance PART 110 (16 swift cells).
 - **⚠ SOUNDNESS R1866: an untyped receiver into an unchained κ dependency module is disclosed.** With `import
   AsyncHTTPClient` (or a NIO module) and no report chained, `let r = makeClient(); r.get(p)` and `makeClient().get(p)`
@@ -24,7 +40,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   untyped receiver. These calls now carry `Unknown[dispatch:untyped cross-package receiver]`, the token the chained scan
   already used. This is limited to the κ modules that are dependency packages (`NIO*`, `AsyncHTTPClient`). Kill switch
   `CANDOR_R1866_OFF`, reach probe `CANDOR_R1866_PROBE`. Conformance PART 110 (8 swift cells). A module the scanned package
-  declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target.
+  declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target. A unit test fails if
+  `KAPPA_MODULES` gains a member that is neither in `KAPPA_DEPENDENCY_MODULES` nor a named OS framework.
 - Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), against main and against published 0.42.0:
   ADDED 0, REMOVED 0, `inferred` CHANGED 0. R1865 joined 29 call sites, all in vapor through swift-log's `Logger`. Two
   vapor rows gained the joined entries' `dep:` reasons and no effect. R1866 reached no corpus site, so the corpus did not
