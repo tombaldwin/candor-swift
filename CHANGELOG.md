@@ -42,11 +42,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   `CANDOR_R1866_OFF`, reach probe `CANDOR_R1866_PROBE`. Conformance PART 110 (8 swift cells). A module the scanned package
   declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target. A unit test fails if
   `KAPPA_MODULES` gains a member that is neither in `KAPPA_DEPENDENCY_MODULES` nor a named OS framework.
-- Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), against main and against published 0.42.0:
-  ADDED 0, REMOVED 0, `inferred` CHANGED 0. R1865 joined 29 call sites, all in vapor through swift-log's `Logger`. Two
-  vapor rows gained the joined entries' `dep:` reasons and no effect. R1866 reached no corpus site, so the corpus did not
-  exercise it and this run is only a safety check for it. Unchained: `inferred` CHANGED 0. The remaining `calls`-only diffs
-  are in swift-collections `BigString` and occur between two runs of the same main binary.
+- Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), final binary against main and against
+  published 0.42.0: ADDED 0, REMOVED 0, `inferred` CHANGED 0; buckets 1, 2, 3, 3u, 3i and 3k are all 0. R1865 joined 29
+  call sites, all in vapor through swift-log's `Logger`. Two vapor rows (`DirectoryConfiguration.detect`, `Logger.report`)
+  gained the joined entries' `dep:` reasons and no effect. The remaining wide diffs are `calls`-only rows in
+  swift-collections, which also differ between two runs of the same main binary. R1866 reached no corpus site, so the
+  corpus did not exercise it and this run is only a safety check for it. Unchained: `inferred` CHANGED 0.
 - release tooling: `release.yml`'s job timeout 20 to 45 min and ci.yml's `test` job 20 to 30. Unit tests now take ~11 min, so
   the release job (the same steps plus a release build and upload) exceeded 20 on a healthy runner and was cancelled twice on
   the 0.42.0 cut, leaving the binary to be attached by hand. The "~3 min" comments are corrected to the measured figures.
