@@ -6489,8 +6489,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // one no chained report covers; the token is the chained arm's, so the two arms say one thing.
                 let r1866Standalone: Bool = {
                     guard !chainedHere, !r1866Off, call.depCallee != nil else { return false }
+                    // NOT the package's own module: inside swift-nio, `import NIOCore` names a target this scan
+                    // reads (corpus A/B: 8 swift-nio rows gained the token with nothing crossing a package).
+                    let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
                     return effectiveImports(file).contains {
-                        KAPPA_DEPENDENCY_MODULES.contains($0) && !deps.coversModule($0) }
+                        KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
                 }()
                 if r1866Standalone, r1866Probe {
                     FileHandle.standardError.write("R1866HIT \(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)

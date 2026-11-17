@@ -10,6 +10,26 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **⚠ SPEC ⟨0.43⟩ (SOUNDNESS R1865): a chained row and a curated classifier entry that answer one call are unioned.** A
+  typed member call that the curated classifier names (`r.get(p)` with `r: HTTPClient`, the `HTTPClient(…)` and
+  `let r: HTTPClient` spellings, and the inner call of `HTTPClient.get(r)(p)`) was charged the classifier's verb and the
+  chained dependency's row for the same member was never read: a row's concrete effects, its `Unknown` and reason, and a
+  §2.1-downgraded entry's `Unknown` were all dropped. Executed: the member writes a file and `deny Fs` / `deny Fs Unknown`
+  exited 0 chained (identical on 0.42.0). The §2 key `<pkg>#<Type>.<member>` is now asked beside the charge and every entry
+  it hits is added; a miss adds nothing, an unchained scan is unchanged, and a type this package declares still shadows.
+  Kill switch `CANDOR_R1865_OFF`, reach probe `CANDOR_R1865_PROBE`. Conformance PART 110 (16 swift cells).
+- **⚠ SOUNDNESS R1866: an untyped receiver into an unchained κ dependency module is disclosed.** With `import
+  AsyncHTTPClient` (or a NIO module) and no report chained, `let r = makeClient(); r.get(p)` and `makeClient().get(p)`
+  read pure: the coverage ledger counts κ modules as covered, so there was no `invisible`, and the classifier cannot key an
+  untyped receiver. These calls now carry `Unknown[dispatch:untyped cross-package receiver]`, the token the chained scan
+  already used. This is limited to the κ modules that are dependency packages (`NIO*`, `AsyncHTTPClient`). Kill switch
+  `CANDOR_R1866_OFF`, reach probe `CANDOR_R1866_PROBE`. Conformance PART 110 (8 swift cells). A module the scanned package
+  declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target.
+- Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), against main and against published 0.42.0:
+  ADDED 0, REMOVED 0, `inferred` CHANGED 0. R1865 joined 29 call sites, all in vapor through swift-log's `Logger`. Two
+  vapor rows gained the joined entries' `dep:` reasons and no effect. R1866 reached no corpus site, so the corpus did not
+  exercise it and this run is only a safety check for it. Unchained: `inferred` CHANGED 0. The remaining `calls`-only diffs
+  are in swift-collections `BigString` and occur between two runs of the same main binary.
 - release tooling: `release.yml`'s job timeout 20 to 45 min and ci.yml's `test` job 20 to 30. Unit tests now take ~11 min, so
   the release job (the same steps plus a release build and upload) exceeded 20 on a healthy runner and was cancelled twice on
   the 0.42.0 cut, leaving the binary to be attached by hand. The "~3 min" comments are corrected to the measured figures.
