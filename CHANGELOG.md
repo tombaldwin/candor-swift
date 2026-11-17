@@ -63,12 +63,15 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   - the dependency's typealias when the scan is chained, which the ordinary join also misses.
 
   `CANDOR_R1866M_OFF` switches off the module-keyed half for pricing.
-- Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), final binary against main and against
-  published 0.42.0: ADDED 0, REMOVED 0, `inferred` CHANGED 0; buckets 1, 2, 3, 3u, 3i and 3k are all 0. R1865 joined 29
-  call sites, all in vapor through swift-log's `Logger`. Two vapor rows (`DirectoryConfiguration.detect`, `Logger.report`)
-  gained the joined entries' `dep:` reasons and no effect. The remaining wide diffs are `calls`-only rows in
-  swift-collections, which also differ between two runs of the same main binary. R1866 reached no corpus site, in either its
-  untyped or its typed arm, so the corpus did not exercise it and this run is only a safety check for it. Unchained: `inferred` CHANGED 0.
+- Corpus A/B over 39 entries, final binary.
+  - **Chained** (resolved, entries chained to each other, 88,371 rows), against main and against published 0.42.0: ADDED 0,
+    REMOVED 0, `inferred` CHANGED 0; buckets 1, 2, 3, 3u, 3i and 3k are all 0. R1865 joined 29 call sites, all in vapor
+    through swift-log's `Logger`. Two vapor rows gained the joined entries' `dep:` reasons and no effect.
+  - **Unchained** (88,412 rows), against main: `inferred` CHANGED 3, ADDED 0, REMOVED 0. R1866's typed arm reached 6 sites,
+    all in vapor and all module-keyed. Three vapor rows newly carry `Unknown`, all over the pure allocation
+    `ByteBufferAllocator().buffer(capacity:)` (`File.init` and two callers). That is 0.0034% of rows, an over-disclosure.
+  - The remaining wide diffs are `calls`-only rows in swift-collections, which also differ between two runs of the same
+    main binary.
 - release tooling: `release.yml`'s job timeout 20 to 45 min and ci.yml's `test` job 20 to 30. Unit tests now take ~11 min, so
   the release job (the same steps plus a release build and upload) exceeded 20 on a healthy runner and was cancelled twice on
   the 0.42.0 cut, leaving the binary to be attached by hand. The "~3 min" comments are corrected to the measured figures.
