@@ -53,7 +53,7 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
     }
 
     private func make(_ label: String, dep: String = ChainedCuratedUnionProcessTests.dep,
-                      app: String = ChainedCuratedUnionProcessTests.app) throws -> Fixture {
+                      app: String = ChainedCuratedUnionProcessTests.app, other: String? = nil) throws -> Fixture {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-r1865-\(label)-\(UUID().uuidString)")
@@ -70,12 +70,19 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
             targets: [.target(name: "AsyncHTTPClient")])
         """)
         try write("AsyncHTTPClient/Sources/AsyncHTTPClient/lib.swift", dep)
-        try write("app/Package.swift", """
+        try write("app/Package.swift", other == nil ? """
         // swift-tools-version:5.9
         import PackageDescription
         let package = Package(name: "App", products: [.library(name: "App", targets: ["App"])],
             dependencies: [.package(path: "../AsyncHTTPClient")],
             targets: [.target(name: "App", dependencies: [.product(name: "AsyncHTTPClient", package: "AsyncHTTPClient")])])
+        """ : """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App", products: [.library(name: "App", targets: ["App"])],
+            dependencies: [.package(path: "../AsyncHTTPClient"), .package(path: "../OtherKit")],
+            targets: [.target(name: "App", dependencies: [.product(name: "AsyncHTTPClient", package: "AsyncHTTPClient"),
+                                                          .product(name: "OtherKit", package: "OtherKit")])])
         """)
         try write("app/Sources/App/app.swift", app)
         let fx = Fixture(root: root, bin: bin)
@@ -83,8 +90,21 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         let rd = try ProcessHarness.run(bin, [root.appendingPathComponent("AsyncHTTPClient").path,
                                               "--out", fx.depDir.appendingPathComponent("r").path])
         XCTAssertEqual(rd.code, 0, "dependency scan must succeed — stderr: \(rd.err)")
+        if let other {
+            try write("OtherKit/Package.swift", """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "OtherKit", products: [.library(name: "OtherKit", targets: ["OtherKit"])],
+                dependencies: [.package(path: "../AsyncHTTPClient")],
+                targets: [.target(name: "OtherKit", dependencies: [.product(name: "AsyncHTTPClient", package: "AsyncHTTPClient")])])
+            """)
+            try write("OtherKit/Sources/OtherKit/lib.swift", other)
+            let ro = try ProcessHarness.run(bin, [root.appendingPathComponent("OtherKit").path,
+                                                  "--out", fx.depDir.appendingPathComponent("o").path])
+            XCTAssertEqual(ro.code, 0, "second dependency scan must succeed — stderr: \(ro.err)")
+        }
         for extra in try FileManager.default.contentsOfDirectory(atPath: fx.depDir.path)
-        where extra != "r.AsyncHTTPClient.Swift.json" {
+        where extra != "r.AsyncHTTPClient.Swift.json" && extra != "o.OtherKit.Swift.json" {
             try FileManager.default.removeItem(at: fx.depDir.appendingPathComponent(extra))
         }
         return fx
@@ -248,5 +268,86 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
                        + "treated as covered by `blindModules()` and NOT disclosed by R1866 — an untyped receiver into "
                        + "it reads pure. Add it to KAPPA_DEPENDENCY_MODULES, or name it here as an OS framework")
         XCTAssertTrue(KAPPA_DEPENDENCY_MODULES.isDisjoint(with: PLATFORM_MODULES))
+    }
+
+    // ── R1865: a walk MISS on the κ verb hedges exactly as on its twin (Fable R1815 re-check 1, fxC) ──
+
+    private static let otherAdds = """
+    import Foundation
+    import AsyncHTTPClient
+    extension Fetching {
+        public func patch(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        public func tallyC(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+    }
+    """
+
+    private static let appOther = """
+    import Foundation
+    import AsyncHTTPClient
+    import OtherKit
+    public func viaPatch(_ r: HTTPClient, _ p: String) -> Int { return r.patch(p) }
+    public func viaTallyC(_ r: HTTPClient, _ p: String) -> Int { return r.tallyC(p) }
+    public func viaDelete(_ r: HTTPClient, _ p: String) -> Int { return r.delete(p) }
+    """
+
+    /// A second chained package ADDS `patch` (a κ verb for `HTTPClient`) and `tallyC` to the dependency's protocol; both
+    /// write (executed). The walk from `HTTPClient` reaches neither, and a chained package publishes the leaf, so the
+    /// ordinary join hedges the twin. The marker's walk had been told to add nothing on a miss, which left `viaPatch` at
+    /// ['Net'] — `deny Fs Unknown` 0 over the write — while `viaTallyC` read `Unknown`. A pure κ verb no package publishes
+    /// (`delete`) still adds nothing.
+    func testAMarkerWalkMissHedgesLikeItsTwin() throws {
+        let fx = try make("walkmiss", dep: Self.depShapes, app: Self.appOther, other: Self.otherAdds)
+        defer { try? FileManager.default.removeItem(at: fx.root) }
+        let ch = try scan(fx, chained: true, "ch")
+        XCTAssertEqual(ch["viaTallyC"]?.inferred, ["Unknown"], "PREMISE: the ordinary join hedges the twin's walk miss")
+        XCTAssertEqual(ch["viaTallyC"]?.why, ["dispatch:HTTPClient.tallyC"])
+        XCTAssertEqual(ch["viaPatch"]?.inferred, ["Net", "Unknown"], "the κ verb hedges for the same reason. Was ['Net']")
+        XCTAssertEqual(ch["viaPatch"]?.why, ["dispatch:HTTPClient.patch"])
+        XCTAssertEqual(ch["viaDelete"]?.inferred, ["Net"], "no package publishes `delete`: the miss adds nothing")
+        XCTAssertEqual(try gate(fx, chained: true, "deny Fs Unknown viaPatch"), 1, "GATE LEVEL — was exit 0")
+    }
+
+    // ── R1866 (typed): a non-κ member of a κ type, unchained ──
+
+    /// UNCHAINED, `r.tallyA(p)` on `r: HTTPClient` (and `tallyA(p)` as implicit self in `extension HTTPClient`) was ABSENT
+    /// over an executed write: not a κ verb, the module counted as covered, nothing chained. It now discloses with the
+    /// chained walk-miss token. A PURE non-κ member is disclosed the same way (nothing here can tell it apart); a κ verb is
+    /// not touched; chained, the ordinary join answers and this arm is silent.
+    func testATypedNonKappaMemberOfAKappaTypeDisclosesUnchained() throws {
+        let app = """
+        import Foundation
+        import AsyncHTTPClient
+        public func inhTwin(_ r: HTTPClient, _ p: String) -> Int { return r.tallyA(p) }
+        public func protoTwin(_ r: HTTPClient, _ p: String) -> Int { return r.tallyB(p) }
+        public func verbGet(_ r: HTTPClient, _ p: String) -> Int { return r.get(p) }
+        extension HTTPClient {
+            public func extTally(_ p: String) -> Int { return tallyA(p) }
+            public func extPrint(_ p: String) -> Int { print(p); return 0 }
+        }
+        """
+        let fx = try make("typed", dep: Self.depShapes, app: app)
+        defer { try? FileManager.default.removeItem(at: fx.root) }
+        let nc = try scan(fx, chained: false, "nc")
+        XCTAssertEqual(nc["inhTwin"]?.inferred, ["Unknown"], "was ABSENT over an executed write")
+        XCTAssertEqual(nc["inhTwin"]?.why, ["dispatch:HTTPClient.tallyA"])
+        XCTAssertEqual(nc["protoTwin"]?.inferred, ["Unknown"])
+        XCTAssertEqual(nc["HTTPClient.extTally"]?.inferred, ["Unknown"], "implicit self: was ABSENT")
+        XCTAssertNil(nc["HTTPClient.extPrint"], "BOUND — a stdlib free function inside the extension is not the type's member")
+        XCTAssertEqual(nc["verbGet"]?.inferred, ["Net"], "BOUND — a κ verb is the classifier's, unchanged")
+        XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown inhTwin"), 1, "GATE LEVEL — was exit 0")
+        let ch = try scan(fx, chained: true, "ch")
+        XCTAssertEqual(ch["inhTwin"]?.inferred, ["Fs"], "chained: the ordinary join's answer, no hedge from this arm")
+        let off = try scan(fx, chained: false, env: ["CANDOR_R1866_OFF": "1"], "off")
+        XCTAssertNil(off["inhTwin"], "§1b — the silence, reproduced with the fix switched off")
+    }
+
+    /// The typed arm keys on `KAPPA_DEPENDENCY_ROOTS`; a root κ does not model, or a module outside the dependency set,
+    /// would be a hedge with no curated coverage behind it (or a covered module nobody discloses).
+    func testKappaDependencyRootsAreKappaRootsOfDependencyModules() {
+        let probe = ["get", "connect", "write", "bind", "execute"]
+        for (root, mods) in KAPPA_DEPENDENCY_ROOTS {
+            XCTAssertTrue(probe.contains { kappaMember(root: root, member: $0) != nil }, "\(root) is not a κ member root")
+            XCTAssertTrue(mods.isSubset(of: KAPPA_DEPENDENCY_MODULES), "\(root): \(mods) not all κ dependency modules")
+        }
     }
 }

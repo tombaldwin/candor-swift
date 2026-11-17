@@ -24,8 +24,11 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   PROTOCOL-EXTENSION default. The §2 key `<pkg>#<Type>.<member>` is asked beside the charge. When that key misses, the
   join walks the dependency type's supertypes exactly as the ordinary member join does, tier by tier, so the package the
   source spells answers first. Every entry the join reaches is added. If the spelled package answers and another chained
-  package holds the same key, the R849 disclosure fires, as on the ordinary join. A miss adds nothing. An unchained scan
-  is unchanged, and a type this package declares still shadows the classifier.
+  package holds the same key, the R849 disclosure fires, as on the ordinary join. If the walk misses a member that some
+  chained package publishes, it hedges `Unknown[dispatch:<Type>.<member>]`, exactly as it does for the non-κ twin (for
+  example, another package adding `extension Fetching { func patch }`). Where no chained report names the type, or nothing
+  publishes the member, a miss adds nothing. An unchained scan is unchanged, and a type this package declares still
+  shadows the classifier.
 
   NOT covered:
   - the untyped and returned-value spellings (`let r = makeClient(); r.get(p)`): chained, they read the row through
@@ -42,6 +45,12 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   `CANDOR_R1866_OFF`, reach probe `CANDOR_R1866_PROBE`. Conformance PART 110 (8 swift cells). A module the scanned package
   declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target. A unit test fails if
   `KAPPA_MODULES` gains a member that is neither in `KAPPA_DEPENDENCY_MODULES` nor a named OS framework.
+  **The typed sibling is covered too.** Unchained, a TYPED call to a member the classifier does not model is now
+  disclosed, where the receiver is one of the κ types those modules declare (`HTTPClient`, the NIO bootstraps, `Channel`,
+  `ChannelHandlerContext`). Examples: `r.tallyA(p)` with `r: HTTPClient`, or `tallyA(p)` as implicit self inside
+  `extension HTTPClient`. These were ABSENT over an executed write; they now carry `Unknown[dispatch:<Type>.<member>]`.
+  A PURE non-modelled member of such a type gets the same `Unknown`, because nothing unchained can tell it apart. κ
+  verbs, chained scans and stdlib free functions called bare inside the extension are unchanged.
 - Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), final binary against main and against
   published 0.42.0: ADDED 0, REMOVED 0, `inferred` CHANGED 0; buckets 1, 2, 3, 3u, 3i and 3k are all 0. R1865 joined 29
   call sites, all in vapor through swift-log's `Logger`. Two vapor rows (`DirectoryConfiguration.detect`, `Logger.report`)

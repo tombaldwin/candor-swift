@@ -3248,6 +3248,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinDebug = Env.trace("CANDOR_JOIN_DEBUG")
     /// SOUNDNESS R1865 reach probe — one line per `<curated>.` marker a chained entry answered.
     let r1865Probe = Env.trace("CANDOR_R1865_PROBE")
+    /// SOUNDNESS R1866 (typed, implicit self) — stdlib free functions a bare call inside `extension HTTPClient` may name
+    /// instead of a member (`print(p)`); left to the release. An omission here over-discloses (an `Unknown`), never hides.
+    let R1866_STDLIB_FREE_NAMES: Set<String> = ["print", "debugPrint", "dump", "precondition", "preconditionFailure",
+        "assert", "assertionFailure", "fatalError", "type", "withExtendedLifetime", "numericCast", "unsafeBitCast",
+        "unsafeDowncast", "withUnsafePointer", "withUnsafeMutablePointer", "withUnsafeBytes", "withUnsafeMutableBytes",
+        "withoutActuallyEscaping", "sequence", "isKnownUniquelyReferenced", "autoreleasepool", "readLine",
+        "withTaskGroup", "withThrowingTaskGroup", "withCheckedContinuation", "withCheckedThrowingContinuation",
+        "withUnsafeContinuation", "withUnsafeThrowingContinuation", "withTaskCancellationHandler"]
     /// SOUNDNESS R1866 §1b kill switch and reach probe — see `r1866Standalone`.
     let r1866Off = Env.on("CANDOR_R1866_OFF")
     let r1866Probe = Env.trace("CANDOR_R1866_PROBE")
@@ -3687,11 +3695,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         else { return false }
         return sups.allSatisfy { $0.hasPrefix("\(pkg)#") && isPlatformTypeName(String($0.dropFirst(pkg.count + 1))) }
     }
-    /// `hedgeMiss: false` — SOUNDNESS R1865's `<curated>.` marker: the classifier already answered the call, so a walk
-    /// that reaches no body adds nothing (SPEC §2 ⟨0.43⟩ "a call that joins no entry adds nothing beyond the classifier's
-    /// charge"); what it DOES reach is applied exactly as for the ordinary member join.
     func sourceTypedWalk(_ key: String, _ leaf: String, tiers: [[(p: String, mods: [String])]],
-                         to qual: String, guessed: Bool, hedgeMiss: Bool = true) {
+                         to qual: String, guessed: Bool) {
         var starts: [String] = []
         for tier in tiers where starts.isEmpty {
             for (p, _) in tier where deps.surface.typeKeysSeen.contains("\(p)#\(key)")
@@ -3715,7 +3720,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 FileHandle.standardError.write("R843WALK \(qual) \(st).\(leaf) hits=\(a.hits) answered=\(a.answered) structural=\(a.structural)\n".data(using: .utf8)!)
             }
         }
-        if walkMiss, !guessed, hedgeMiss {
+        if walkMiss, !guessed {
             direct[qual, default: []].insert("Unknown")
             whyMap[qual, default: []].insert("dispatch:\(key).\(leaf)")
         }
@@ -5073,7 +5078,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // the type does not declare itself still reads the body that runs (Fable R1865 merge review: an
                 // inherited `get` and a protocol-default `post` read ['Net'] over an executed write). The walk
                 // is asked per tier, so the package the source SPELLS answers before another package's
-                // same-named type (R846); a walk that reaches nothing adds nothing (`hedgeMiss: false`).
+                // same-named type (R846). A walk that MISSES hedges exactly as it does for the twin: Fable's fxC,
+                // where a second chained package adds `extension Fetching { func patch }` (writes, executed) — the
+                // non-κ twin read `Unknown[dispatch:HTTPClient.tallyC]` and the κ verb `['Net']` over the write. That
+                // hedge is TRUE (the walk cannot place a member some chained package publishes) and ⟨0.43⟩'s "a call
+                // that joins no entry adds nothing" is about a key that joins nothing, not one the walk shows is
+                // unresolved. Where no walk starts (no chained report names the type) the walk is silent for both.
                 let tiers = joinTiers(file, module: call.ownerModule)
                 for (ti, tier) in tiers.enumerated() {
                     let hits = tier.compactMap { deps.lookup("\($0.p)#\(owner).\(call.leaf)") }
@@ -5089,7 +5099,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     if r843Off { continue }
                     let before = depApplyTick
-                    sourceTypedWalk(owner, call.leaf, tiers: [tier], to: f.qual, guessed: false, hedgeMiss: false)
+                    sourceTypedWalk(owner, call.leaf, tiers: [tier], to: f.qual, guessed: false)
                     if depApplyTick != before {
                         if joinDebug || r1865Probe {
                             FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) walk\n".data(using: .utf8)!)
@@ -6704,6 +6714,33 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // it tagged every function touching a stdlib method in a blind-importing file (rampant false
             // uncertainty, sweep [33]/[36]). The construction (`BlindClient()`) / free call into a blind lib is
             // the honest signal; a member-only blind receiver is covered by the scan-level κ-ledger.
+            // SOUNDNESS R1866 (typed) — THE TYPED SIBLING. Unchained, `r.tallyA(p)` on `r: HTTPClient` with `import
+            // AsyncHTTPClient`: `tallyA` is no κ verb, so the κ arm never fired; the module is in `KAPPA_MODULES`, so
+            // the blind-module ledger does not name it; no report is chained, so no join ran. The row was ABSENT over
+            // an executed write (`deny Fs` and `deny Fs Unknown` exit 0; pre-existing on 0.42.0). κ covers its verbs on
+            // the type, not the type's other members, so the call is disclosed with the token the chained walk-miss
+            // uses for the same member. A PURE non-κ member gets the same `Unknown` — nothing here can tell it apart.
+            // …and IMPLICIT SELF inside the consumer's `extension HTTPClient { … tallyA(p) … }`: the same member, reached
+            // as a bare name, which the release sent to the blind-module ledger (that excludes κ modules). A bare name
+            // there may also be a platform free function (`print`), so the stdlib-pure and κ-free names are left out.
+            let r1866Owner: String? = call.unqualified
+                ? ((!call.argRef && call.leaf.first?.isLowercase == true
+                    && !CallCollector.PURE_STDLIB_FREE_FNS.contains(call.leaf) && !R1866_STDLIB_FREE_NAMES.contains(call.leaf)
+                    && kappaFree(name: call.leaf, argCount: call.args.count) == nil) ? f.enclosingType : nil)
+                : call.extOwner
+            if !r1866Off, !resolved, !call.path.hasPrefix("<"), let owner = r1866Owner,
+               let mods = KAPPA_DEPENDENCY_ROOTS[owner], !declaredTypes.contains(owner),
+               kappaMember(root: owner, member: call.leaf) == nil {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+                if effectiveImports(file).contains(where: { mods.contains($0) && !own.contains($0) && !deps.coversModule($0) }) {
+                    if r1866Probe {
+                        FileHandle.standardError.write("R1866HIT typed \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")
+                }
+            }
             if Env.trace("CANDOR_R548_PROBE"), !resolved {
                 let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 FileHandle.standardError.write(

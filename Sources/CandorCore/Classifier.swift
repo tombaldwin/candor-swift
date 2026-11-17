@@ -2651,6 +2651,16 @@ public let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData",
 /// `invisible`), the classifier cannot key the call, and no report is chained. The Driver discloses that call.
 public let KAPPA_DEPENDENCY_MODULES: Set<String> = ["NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL",
     "NIOTransportServices", "AsyncHTTPClient"]
+/// SOUNDNESS R1866 (typed) — the types `kappaMember` models that a κ DEPENDENCY module declares, with the modules that
+/// declare (or re-export) them. κ answers only its VERBS on these types; any other member is a body no scan read, and
+/// with the module counted as covered nothing else says so. Every key must be a `kappaMember` root and every module a
+/// `KAPPA_DEPENDENCY_MODULES` member (pinned by `testKappaDependencyRootsAreKappaRootsOfDependencyModules`).
+public let KAPPA_DEPENDENCY_ROOTS: [String: Set<String>] = [
+    "HTTPClient": ["AsyncHTTPClient"],
+    "ClientBootstrap": ["NIOPosix"], "ServerBootstrap": ["NIOPosix"], "DatagramBootstrap": ["NIOPosix"],
+    "NIOTSConnectionBootstrap": ["NIOTransportServices"],
+    "Channel": ["NIOCore", "NIOPosix"], "ChannelHandlerContext": ["NIOCore", "NIOPosix"],
+]
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // SQL tables — the SPEC §2 pinned extraction, token-for-token with the other three engines
