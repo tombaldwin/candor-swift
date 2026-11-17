@@ -3248,16 +3248,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let joinDebug = Env.trace("CANDOR_JOIN_DEBUG")
     /// SOUNDNESS R1865 reach probe — one line per `<curated>.` marker a chained entry answered.
     let r1865Probe = Env.trace("CANDOR_R1865_PROBE")
-    /// SOUNDNESS R1866 (typed, implicit self) — stdlib free functions a bare call inside `extension HTTPClient` may name
-    /// instead of a member (`print(p)`); left to the release. An omission here over-discloses (an `Unknown`), never hides.
-    let R1866_STDLIB_FREE_NAMES: Set<String> = ["print", "debugPrint", "dump", "precondition", "preconditionFailure",
-        "assert", "assertionFailure", "fatalError", "type", "withExtendedLifetime", "numericCast", "unsafeBitCast",
-        "unsafeDowncast", "withUnsafePointer", "withUnsafeMutablePointer", "withUnsafeBytes", "withUnsafeMutableBytes",
-        "withoutActuallyEscaping", "sequence", "isKnownUniquelyReferenced", "autoreleasepool", "readLine",
-        "withTaskGroup", "withThrowingTaskGroup", "withCheckedContinuation", "withCheckedThrowingContinuation",
-        "withUnsafeContinuation", "withUnsafeThrowingContinuation", "withTaskCancellationHandler"]
     /// SOUNDNESS R1866 §1b kill switch and reach probe — see `r1866Standalone`.
     let r1866Off = Env.on("CANDOR_R1866_OFF")
+    /// …the MODULE-keyed half of the typed arm alone (a non-root type the κ dependency module's sources declare), for pricing.
+    let r1866mOff = Env.on("CANDOR_R1866M_OFF")
     let r1866Probe = Env.trace("CANDOR_R1866_PROBE")
     /// SOUNDNESS R910 §1b KILL SWITCH and reach probe — see `askOwnKey`.
     let r910Off = Env.on("CANDOR_R910_OFF")
@@ -6719,23 +6713,45 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // the blind-module ledger does not name it; no report is chained, so no join ran. The row was ABSENT over
             // an executed write (`deny Fs` and `deny Fs Unknown` exit 0; pre-existing on 0.42.0). κ covers its verbs on
             // the type, not the type's other members, so the call is disclosed with the token the chained walk-miss
-            // uses for the same member. A PURE non-κ member gets the same `Unknown` — nothing here can tell it apart.
-            // …and IMPLICIT SELF inside the consumer's `extension HTTPClient { … tallyA(p) … }`: the same member, reached
-            // as a bare name, which the release sent to the blind-module ledger (that excludes κ modules). A bare name
-            // there may also be a platform free function (`print`), so the stdlib-pure and κ-free names are left out.
+            // uses for the same member. A PURE member gets the same `Unknown` — nothing unchained can tell it apart.
+            //
+            // THE OWNER IS ANY TYPE THE κ DEPENDENCY MODULE DECLARES, not only the κ roots: `r.send(p)` on
+            // `r: HTTPClientRequest` was as silent as `tallyA`, while its returned-value spelling was already disclosed
+            // by the untyped arm. Two sources of the owner-module fact: the κ roots (`KAPPA_DEPENDENCY_ROOTS`, no
+            // sources needed), and the dependency's own readable sources (`moduleDeclarations`, re-exports followed —
+            // VEIN D's evidence, the declaration must be public). A module whose sources cannot be read answers only
+            // for its roots, and the residue is a non-root type of an unresolved dependency.
+            //
+            // …and IMPLICIT SELF inside the consumer's `extension <Type>`: the same member reached as a bare name. NO
+            // name is excluded: a dependency may declare a member called `print` or `max` (Fable fxD — `return
+            // print(p)` resolves to it and writes), and unchained nothing here can prove a bare name is NOT a member.
+            // A stdlib free function called bare inside such an extension is therefore disclosed too (an `Unknown`).
             let r1866Owner: String? = call.unqualified
-                ? ((!call.argRef && call.leaf.first?.isLowercase == true
-                    && !CallCollector.PURE_STDLIB_FREE_FNS.contains(call.leaf) && !R1866_STDLIB_FREE_NAMES.contains(call.leaf)
-                    && kappaFree(name: call.leaf, argCount: call.args.count) == nil) ? f.enclosingType : nil)
+                ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
                 : call.extOwner
             if !r1866Off, !resolved, !call.path.hasPrefix("<"), let owner = r1866Owner,
-               let mods = KAPPA_DEPENDENCY_ROOTS[owner], !declaredTypes.contains(owner),
+               owner.first?.isUppercase == true, !declaredTypes.contains(owner),
                kappaMember(root: owner, member: call.leaf) == nil {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
-                if effectiveImports(file).contains(where: { mods.contains($0) && !own.contains($0) && !deps.coversModule($0) }) {
+                let open = effectiveImports(file).filter {
+                    KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
+                let byRoot = KAPPA_DEPENDENCY_ROOTS[owner].map { roots in open.contains { roots.contains($0) } } ?? false
+                let byModule: Bool = {
+                    guard !byRoot, !r1866mOff, !open.isEmpty else { return false }
+                    for m in open {
+                        var closure = Set<String>(), queue = [m]
+                        while let x = queue.popLast() {
+                            guard closure.insert(x).inserted else { continue }
+                            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                        }
+                        if closure.contains(where: { moduleDeclarations($0)?.names[owner] == true }) { return true }
+                    }
+                    return false
+                }()
+                if byRoot || byModule {
                     if r1866Probe {
-                        FileHandle.standardError.write("R1866HIT typed \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                        FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : "module") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
                     }
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")

@@ -332,13 +332,64 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         XCTAssertEqual(nc["inhTwin"]?.why, ["dispatch:HTTPClient.tallyA"])
         XCTAssertEqual(nc["protoTwin"]?.inferred, ["Unknown"])
         XCTAssertEqual(nc["HTTPClient.extTally"]?.inferred, ["Unknown"], "implicit self: was ABSENT")
-        XCTAssertNil(nc["HTTPClient.extPrint"], "BOUND — a stdlib free function inside the extension is not the type's member")
+        XCTAssertEqual(nc["HTTPClient.extPrint"]?.why, ["dispatch:HTTPClient.print"],
+                       "PRICED OVER-DISCLOSURE — a bare `print` inside the extension may be a dependency MEMBER named `print` "
+                       + "(see the next test); unchained nothing proves it is the stdlib function, so it is disclosed")
         XCTAssertEqual(nc["verbGet"]?.inferred, ["Net"], "BOUND — a κ verb is the classifier's, unchanged")
         XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown inhTwin"), 1, "GATE LEVEL — was exit 0")
         let ch = try scan(fx, chained: true, "ch")
         XCTAssertEqual(ch["inhTwin"]?.inferred, ["Fs"], "chained: the ordinary join's answer, no hedge from this arm")
         let off = try scan(fx, chained: false, env: ["CANDOR_R1866_OFF": "1"], "off")
         XCTAssertNil(off["inhTwin"], "§1b — the silence, reproduced with the fix switched off")
+    }
+
+    /// Fable R1815 re-check 2 (fxD). (a) The dependency declares MEMBERS named `print` and `max` (both write); inside
+    /// `extension HTTPClient`, `return print(p)` is that member. A stdlib-name exclusion hid them (ABSENT unchained while
+    /// `tallyA` beside them disclosed). (b) A type of the κ dependency module that is NOT a κ root (`HTTPClientRequest`)
+    /// was silent typed while its returned-value spelling disclosed; the owner is now any type the module's own sources
+    /// declare, and (c) that includes the dependency's own `typealias Client = HTTPClient`. The consumer's own type named
+    /// like a root (`struct Channel`) and a member the consumer declares in the extension gain nothing.
+    func testTheTypedArmKeysOnTheModuleAndExcludesNoBareName() throws {
+        let dep = """
+        import Foundation
+        open class HTTPClient {
+            public init() {}
+            public func tallyA(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+            public func print(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+            public func max(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        }
+        public struct HTTPClientRequest {
+            public init() {}
+            public func send(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+        }
+        public typealias Client = HTTPClient
+        """
+        let app = """
+        import Foundation
+        import AsyncHTTPClient
+        public struct Channel { public init() {}; public func foo(_ p: String) -> Int { return p.count } }
+        public func nonRoot(_ r: HTTPClientRequest, _ p: String) -> Int { return r.send(p) }
+        public func depAlias(_ r: Client, _ p: String) -> Int { return r.tallyA(p) }
+        public func ownChannel(_ c: Channel, _ p: String) -> Int { return c.foo(p) }
+        extension HTTPClient {
+            public func extPrint(_ p: String) -> Int { return print(p) }
+            public func extMax(_ p: String) -> Int { return max(p) }
+            public func extHelper(_ p: String) -> Int { return helper(p) }
+            public func helper(_ p: String) -> Int { return p.count }
+        }
+        """
+        let fx = try make("modkey", dep: dep, app: app)
+        defer { try? FileManager.default.removeItem(at: fx.root) }
+        let nc = try scan(fx, chained: false, "nc")
+        XCTAssertEqual(nc["HTTPClient.extPrint"]?.inferred, ["Unknown"], "the dependency's `print` member: was ABSENT")
+        XCTAssertEqual(nc["HTTPClient.extMax"]?.inferred, ["Unknown"], "the dependency's `max` member: was ABSENT")
+        XCTAssertEqual(nc["nonRoot"]?.why, ["dispatch:HTTPClientRequest.send"], "a non-root type of the module: was ABSENT")
+        XCTAssertEqual(nc["depAlias"]?.inferred, ["Unknown"], "the dependency's own typealias of a root: was ABSENT")
+        XCTAssertNil(nc["ownChannel"], "BOUND — the consumer's own type named like a κ root")
+        XCTAssertNil(nc["HTTPClient.extHelper"], "BOUND — a member the consumer declares resolves locally")
+        XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown nonRoot"), 1, "GATE LEVEL — was exit 0")
+        let off = try scan(fx, chained: false, env: ["CANDOR_R1866M_OFF": "1"], "off")
+        XCTAssertNil(off["nonRoot"], "§1b — the module-keyed half switched off: the root list alone does not reach it")
     }
 
     /// The typed arm keys on `KAPPA_DEPENDENCY_ROOTS`; a root κ does not model, or a module outside the dependency set,

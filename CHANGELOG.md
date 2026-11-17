@@ -46,11 +46,23 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
   declares itself is excluded: inside swift-nio, `import NIOCore` is the package's own target. A unit test fails if
   `KAPPA_MODULES` gains a member that is neither in `KAPPA_DEPENDENCY_MODULES` nor a named OS framework.
   **The typed sibling is covered too.** Unchained, a TYPED call to a member the classifier does not model is now
-  disclosed, where the receiver is one of the κ types those modules declare (`HTTPClient`, the NIO bootstraps, `Channel`,
-  `ChannelHandlerContext`). Examples: `r.tallyA(p)` with `r: HTTPClient`, or `tallyA(p)` as implicit self inside
-  `extension HTTPClient`. These were ABSENT over an executed write; they now carry `Unknown[dispatch:<Type>.<member>]`.
-  A PURE non-modelled member of such a type gets the same `Unknown`, because nothing unchained can tell it apart. κ
-  verbs, chained scans and stdlib free functions called bare inside the extension are unchanged.
+  disclosed, when the receiver's type is declared by a κ dependency module the file imports and does not chain. That type
+  may be one of the κ roots (`HTTPClient`, the NIO bootstraps, `Channel`, `ChannelHandlerContext`). It may also be any
+  type the module's own readable sources declare publicly, re-exports followed: `HTTPClientRequest`, `ByteBuffer`, or
+  the dependency's own `typealias Client = HTTPClient`. Examples are `r.tallyA(p)` with `r: HTTPClient`, `r.send(p)`
+  with `r: HTTPClientRequest`, and implicit-self `tallyA(p)` inside `extension HTTPClient`. These were ABSENT over an
+  executed write; they now carry `Unknown[dispatch:<Type>.<member>]`.
+
+  No bare name is excluded inside such an extension, because a dependency may declare a member called `print` or `max`.
+  The price is that a stdlib free function called bare there is disclosed too. A PURE member gets the same `Unknown`,
+  because nothing unchained can tell it apart. κ verbs and chained scans are unchanged. Without readable dependency
+  sources, only the κ roots are recognised.
+
+  Not reached:
+  - a subclass the consumer declares (`final class MyClient: HTTPClient`);
+  - the dependency's typealias when the scan is chained, which the ordinary join also misses.
+
+  `CANDOR_R1866M_OFF` switches off the module-keyed half for pricing.
 - Corpus A/B over 39 entries, chained to each other and resolved (88,371 rows), final binary against main and against
   published 0.42.0: ADDED 0, REMOVED 0, `inferred` CHANGED 0; buckets 1, 2, 3, 3u, 3i and 3k are all 0. R1865 joined 29
   call sites, all in vapor through swift-log's `Logger`. Two vapor rows (`DirectoryConfiguration.detect`, `Logger.report`)
