@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+## [0.43.0] — 2026-11-19
+
 - **Declares spec ⟨0.43⟩** (SPEC §2 union clause; candor-swift unions since R1865). Docs and the floor pin name 0.43.
 
 - **Build: the join counter is a reference cell (no behaviour change).** Swift 6.1's `-warnings-as-errors` build rejected
