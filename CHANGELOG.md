@@ -10,6 +10,10 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Build: the join counter is a reference cell (no behaviour change).** Swift 6.1's `-warnings-as-errors` build rejected
+  `if depApplyTick != before` after `sourceTypedWalk(…)` as an always-false, never-executed branch (a diagnostic false positive: a
+  6.1 build prints the same R1865 walk joins as 6.4). The counter is now a small class instance so no toolchain can fold the read.
+
 - **⚠ SPEC ⟨0.43⟩ (SOUNDNESS R1865): a chained row and a curated classifier entry that answer one call are unioned.**
   Before this change, a member call that the curated classifier names was charged only the classifier's verb. The
   chained dependency's row for the same member was never read, so the row's concrete effects, its `Unknown` and reason,

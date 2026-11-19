@@ -3498,9 +3498,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return !refuted
     }
     let r974aProbe = Env.trace("CANDOR_R974A_PROBE")
-    var depApplyTick = 0   // SOUNDNESS R974 (a) — counts joins, so a call can tell it reached a chained entry
+    // SOUNDNESS R974 (a) — counts joins, so a call can tell it reached a chained entry. A BOX, not a captured `var`:
+    // Swift 6.1's mandatory dataflow diagnostics treated `depApplyTick != before` after `sourceTypedWalk(…)` as
+    // always false (the walk reaches `applyDepEntry` only through other local funcs) and `-warnings-as-errors` then
+    // failed CI on "will never be executed". The diagnostic is a false positive — a 6.1 build prints the same
+    // `R1865JOIN … walk` lines as 6.4 — but a reference cell makes the read opaque to that analysis on any toolchain.
+    final class Tick { var n = 0 }
+    let depApplyTick = Tick()
     func applyDepEntry(_ de: DepEntry, to qual: String) {
-        depApplyTick += 1
+        depApplyTick.n += 1
         // ⟨0.39⟩ OBLIGATION 3 — THE JOIN UNIONS, PER KEY. A worklist rather than recursion because a
         // chained entry reached through `dispatchesOn` may itself dispatch (the abstraction's owner is not
         // always the implementor's owner — that is R504's four-package chain), and Swift's local functions
@@ -5092,9 +5098,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         break
                     }
                     if r843Off { continue }
-                    let before = depApplyTick
+                    let before = depApplyTick.n
                     sourceTypedWalk(owner, call.leaf, tiers: [tier], to: f.qual, guessed: false)
-                    if depApplyTick != before {
+                    if depApplyTick.n != before {
                         if joinDebug || r1865Probe {
                             FileHandle.standardError.write("R1865JOIN \(f.qual) \(owner).\(call.leaf) walk\n".data(using: .utf8)!)
                         }
@@ -5313,11 +5319,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // join answered it, or it resolved nowhere in a file that imports one — and only where one of the
             // argument-carried witnesses can do anything (decided after the graph, `r1071Pending`), so a pure `==`
             // costs nothing. A call answered by this scan's own body is R951's and is left to it.
-            let r974aTick = depApplyTick
+            let r974aTick = depApplyTick.n
             defer {
                 if !CallCollector.r974aOff, !call.argWitnesses.isEmpty, !call.path.hasPrefix("<"), !call.argRef,
                    case let r974aFile = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                   depApplyTick != r974aTick || (!resolved && !deps.chainedPkgs(importing: fileImports[r974aFile] ?? []).isEmpty
+                   depApplyTick.n != r974aTick || (!resolved && !deps.chainedPkgs(importing: fileImports[r974aFile] ?? []).isEmpty
                                                  && r974aUnanswered(call, f, r974aFile)) {
                     for w in call.argWitnesses {
                         let targets = Array(resolveQual(w))
@@ -5326,7 +5332,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // R1175 (C): a class's `isEqual(_:)` override is its `Equatable` witness
                         let proto = member == "==" || member == "isEqual" ? "Equatable" : member == "<" ? "Comparable" : "Hashable"
                         if CallCollector.veinBProbe || r974aProbe {
-                            FileHandle.standardError.write("R974ACHAIN \(f.qual) \(call.path) owner=\(call.extOwner ?? "-") unq=\(call.unqualified) join=\(depApplyTick != r974aTick) -> \(w)\n".data(using: .utf8)!)
+                            FileHandle.standardError.write("R974ACHAIN \(f.qual) \(call.path) owner=\(call.extOwner ?? "-") unq=\(call.unqualified) join=\(depApplyTick.n != r974aTick) -> \(w)\n".data(using: .utf8)!)
                         }
                         r1071Pending.append((f.qual, targets, "dispatch:\(proto).\(member) witness passed to a chained package"))
                     }
