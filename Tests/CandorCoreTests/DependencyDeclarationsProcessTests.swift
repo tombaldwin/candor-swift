@@ -244,3 +244,89 @@ final class ReexportAndFacadeJoinProcessTests: XCTestCase {
         XCTAssertFalse(b["viaAliasCalm"]?.contains("Fs") ?? false, "pure twin")
     }
 }
+
+/// D4 / D5 of the L4 merge review — a RESOLVED alias keeps the disclosure its spelling carried and asks κ and the wire under the
+/// target's name; a package's umbrella module is that package (identity is the package's, never the module's name).
+final class AliasDisclosureAndPackageIdentityProcessTests: XCTestCase {
+    private func pkg(_ name: String, deps: [String], src: String, pkgName: String? = nil, extra: [(String, String)] = []) -> [(String, String)] {
+        let dl = deps.map { ".package(path: \"../\($0)\")" }.joined(separator: ", ")
+        let pl = deps.map { ".product(name: \"\($0)\", package: \"\($0)\")" }.joined(separator: ", ")
+        let extraT = extra.isEmpty ? "" : ", " + extra.map { ".target(name: \"\($0.0)\")" }.joined(separator: ", ")
+        var out: [(String, String)] = [("\(name)/Package.swift", """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "\(pkgName ?? name)", products: [.library(name: "\(name)", targets: ["\(name)"])],
+                dependencies: [\(dl)], targets: [.target(name: "\(name)", dependencies: [\(pl)\(extra.isEmpty ? "" : (pl.isEmpty ? "" : ", ") + extra.map { "\"\($0.0)\"" }.joined(separator: ", "))])\(extraT)])
+            """), ("\(name)/Sources/\(name)/lib.swift", src)]
+        for e in extra { out.append(("\(name)/Sources/\(e.0)/lib.swift", e.1)) }
+        return out
+    }
+
+    private func run(_ files: [(String, String)], consumer: (String, [String], String), chained: [String]) throws -> [String: (inf: Set<String>, inv: Set<String>)] {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-d45-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (rel, text) in files + pkg(consumer.0, deps: consumer.1, src: consumer.2) {
+            let u = root.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: u, atomically: true, encoding: .utf8)
+        }
+        let reports = root.appendingPathComponent("reports"); try FileManager.default.createDirectory(at: reports, withIntermediateDirectories: true)
+        for m in chained {
+            let r = try ProcessHarness.run(bin, [root.appendingPathComponent(m).path, "--out", reports.appendingPathComponent("r").path])
+            XCTAssertEqual(r.code, 0, r.err)
+        }
+        let r = try ProcessHarness.run(bin, [root.appendingPathComponent(consumer.0).path, "--out", root.appendingPathComponent("o").path],
+                                       env: chained.isEmpty ? [:] : ["CANDOR_DEPS": reports.path])
+        XCTAssertEqual(r.code, 0, r.err)
+        let d = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("o.\(consumer.0).Swift.json"))) as? [String: Any]
+        var out: [String: (inf: Set<String>, inv: Set<String>)] = [:]
+        for f in (d?["functions"] as? [[String: Any]]) ?? [] {
+            out[(f["fn"] as? String) ?? "?"] = (Set((f["inferred"] as? [String]) ?? []), Set((f["invisible"] as? [String]) ?? []))
+        }
+        return out
+    }
+
+    private static let files = """
+    import Foundation
+    public final class File {
+        public let path: String
+        public init(path p: String) throws { let pr = Process(); pr.executableURL = URL(fileURLWithPath: "/usr/bin/touch"); pr.arguments = [p + ".i"]; try? pr.run(); pr.waitUntilExit(); self.path = p }
+        public func tally(_ s: String) -> Int { FileManager.default.createFile(atPath: path + s, contents: nil); return 1 }
+        public func quiet(_ s: String) -> Int { s.count }
+    }
+    """
+
+    func testRenamedAliasOfAKappaTypeKeepsItsDisclosureAndReadsTheRow() throws {
+        let f = pkg("Files", deps: [], src: Self.files) + pkg("FilesFacade", deps: ["Files"], src: "import Files\npublic typealias Doc = Files.File\n")
+        let app = """
+        import Foundation
+        import FilesFacade
+        public func dCtor(_ p: String) throws -> String { try Doc(path: p).path }
+        public func dTally(_ d: Doc, _ s: String) -> Int { d.tally(s) }
+        public func dQuiet(_ d: Doc, _ s: String) -> Int { d.quiet(s) }
+        """
+        let nc = try run(f, consumer: ("App", ["FilesFacade"], app), chained: [])
+        XCTAssertTrue(nc["dTally"]?.inv.contains("FilesFacade") ?? false, "the alias spelling's disclosure survives the resolution")
+        XCTAssertTrue(nc["dCtor"]?.inv.contains("FilesFacade") ?? false)
+        XCTAssertTrue(nc["dQuiet"]?.inv.contains("FilesFacade") ?? false, "pure twin keeps it too")
+        XCTAssertFalse(nc["dQuiet"]?.inf.contains("Fs") ?? false)
+        let ch = try run(f, consumer: ("App", ["FilesFacade"], app), chained: ["Files", "FilesFacade"])
+        XCTAssertTrue(ch["dCtor"]?.inf.contains("Exec") ?? false, "the κ ctor joins Files#File.init under the target's name")
+        XCTAssertTrue(ch["dTally"]?.inf.contains("Fs") ?? false)
+        XCTAssertFalse(ch["dQuiet"]?.inf.contains("Fs") ?? false)
+    }
+
+    func testAnUmbrellaModuleOfTheKappaPackageIsTheEntity() throws {
+        // package `ShellOut`: module `ShellOut` re-exports `ShellOutCore`, which declares the function.
+        let f = pkg("ShellOut", deps: [], src: "@_exported import ShellOutCore\n", pkgName: "ShellOut",
+                    extra: [("ShellOutCore", """
+                    import Foundation
+                    @discardableResult
+                    public func shellOut(to command: String, at p: String) -> String { let pr = Process(); pr.executableURL = URL(fileURLWithPath: "/usr/bin/touch"); pr.arguments = [p + ".x"]; try? pr.run(); return command }
+                    """)])
+        let app = "import ShellOut\npublic func runIt(_ p: String) -> String { shellOut(to: \"echo\", at: p) }\n"
+        let nc = try run(f, consumer: ("App", ["ShellOut"], app), chained: [])
+        XCTAssertTrue(nc["runIt"]?.inf.contains("Exec") ?? false, "κ's Exec is kept: the implementation module belongs to the package κ describes")
+    }
+}

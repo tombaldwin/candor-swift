@@ -2158,6 +2158,8 @@ final class CallCollector: SyntaxVisitor {
         }
         return out
     }()
+    /// SOUNDNESS R1868(e) — the dependency aliases this unit resolved (see `AiTypeIndex.depAliasNames`).
+    var usedDepAliases: Set<String> = []
     private func aliasInScope(_ s: String, scopedMembers: Bool = true) -> String? {
         if Self.aiNdOff { return typeAliases[s] }
         if scopedMembers {
@@ -2178,7 +2180,7 @@ final class CallCollector: SyntaxVisitor {
             if ai.fileAliases[s] != u { vbHit("R1497", "\(s) -> \(u) not \(ai.fileAliases[s] ?? "-")") }
             return u
         }
-        if let u = ai.fileAliases[s] { return u }
+        if let u = ai.fileAliases[s] { if ai.depAliasNames.contains(s) { usedDepAliases.insert(s) }; return u }
         if let ts = ai.nestedAliasTargets[s] {
             if ts.count == 1 { return ts.first }
             // Owners disagree and none is in scope: the release's last-writer answer is kept as the FLOOR.
@@ -4685,8 +4687,8 @@ final class CallCollector: SyntaxVisitor {
         /// such declaration — a typealias or an unbindable overload included), `nil` (not readable).
         func srcReaches(_ m: String) -> Bool? {
             guard let src = depModuleDeclsS1(m) else { return nil }
-            if src.nominal[name] == true { return true }
-            let sigs = src.fns[name]?.filter { $0.visible } ?? []
+            if src.nominal[alias] == true { return true }
+            let sigs = src.fns[alias]?.filter { $0.visible } ?? []
             return sigs.contains { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }
         }
         func any(_ ms: [String]) -> Bool? {
@@ -4694,7 +4696,7 @@ final class CallCollector: SyntaxVisitor {
             for m in ms { switch srcReaches(m) { case true?: return true; case nil: r = nil; case false?: break } }
             return r
         }
-        func rel(_ m: String) -> KappaRelation? { kappaRelation(name: alias, module: m) }
+        func rel(_ m: String) -> KappaRelation? { kappaRelation(name: alias, module: m, owningPackage: deps.modulePkgs[m]) }
         // ── platform entries (R649 / R1876) ──
         if platformOnly {
             guard qualifier == nil else { return .kappaOnly }
@@ -4759,8 +4761,9 @@ final class CallCollector: SyntaxVisitor {
         for (p, mods) in chained {
             let rels = mods.compactMap(rel)
             if rels.contains(.unknown) && !rels.contains(.same) { return depShadows(name) ? .shadow : .kappaOnly }  // pre-S1
-            let wireFree = deps.declaresFreeName("\(p)#\(name)")
-            let wireInit = deps.lookup("\(p)#\(name).init") != nil
+            // asked under the RESOLVED spelling: `Doc(path:)` through a dependency alias is `Files#File.init` (D4)
+            let wireFree = deps.declaresFreeName("\(p)#\(alias)")
+            let wireInit = deps.lookup("\(p)#\(alias).init") != nil
             let ev = any(mods)
             if rels.contains(.same) {
                 // The wire's key is arity-blind: where the entity's own READABLE sources show no declaration this call's labels can
@@ -9885,7 +9888,7 @@ final class CallCollector: SyntaxVisitor {
                     // the call goes to the §2 join, exactly as the shadowed spelling below emits it. The join adds the
                     // row's effects; a miss adds nothing (κ answered). Before S1 a free function took the row alone
                     // (R1867, row-wins) and a type's ctor took κ alone (R1870, curated-wins).
-                    calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
+                    calls.append(Call(path: aliasName, leaf: aliasName, strArg: lit, typed: false, args: argKinds(node),
                                       argTypes: argTypesOf(node), unqualified: true,
                                       argLabelled: node.arguments.contains { $0.label != nil }))
                 }
@@ -13954,6 +13957,9 @@ struct AiTypeIndex {
     var pathsByLeaf: [String: Set<String>] = [:]
     var protocolPaths: Set<String> = []
     var fileAliases: [String: String] = [:]
+    /// SOUNDNESS R1868(e) — the names in `fileAliases` that are a DEPENDENCY's aliases (not this scan's own), so a collector can
+    /// record which it resolved (`usedDepAliases`) and the Driver can keep the §2 ledger's attribution under the alias spelling.
+    var depAliasNames: Set<String> = []
     /// SOUNDNESS R1497 — file -> the top-level `fileprivate`/`private` aliases it declares, and the unit's own file.
     /// Two files may each declare `fileprivate typealias K = …`; `fileAliases` (merged module-wide) held the last
     /// file's target, so a call through K in every other file went to the wrong type: silent where that type is pure

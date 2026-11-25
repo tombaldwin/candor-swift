@@ -277,13 +277,17 @@ public enum KappaRelation: Hashable, Sendable {
 /// Stage S1's reading of the registry (curated-routing design §4, Fable review §2 Q2). `nil` when `name` is no
 /// κ name. A `Logger`-shaped entry (platform AND package) is `.same` for the package's module and `.different`
 /// for every other module.
-public func kappaRelation(name: String, module: String) -> KappaRelation? {
+public func kappaRelation(name: String, module: String, owningPackage: String? = nil) -> KappaRelation? {
     guard let e = KAPPA_REGISTRY[name] else { return nil }
     var unknown = false
     for d in e.describes {
         guard case .package(let p, _) = d else { continue }
         guard let mods = p.modules else { unknown = true; continue }
         if mods.contains(module) { return .same }
+        // IDENTITY IS THE PACKAGE'S, NOT THE MODULE'S NAME (design Q2): a module the manifests say belongs to the package κ
+        // describes is that package — an umbrella that `@_exported import`s its implementation module (`NIO`, `ShellOutCore`)
+        // is not a vendored copy just because the registry's module list does not name it.
+        if let op = owningPackage, op == p.name { return .same }
     }
     return unknown ? .unknown : .different
 }

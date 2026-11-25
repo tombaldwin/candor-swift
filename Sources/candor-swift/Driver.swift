@@ -3055,6 +3055,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     overlay[name] = target
                 }
             }
+            // …and the aliases of the modules those targets are spelled through (`Widget = Facade2.Gadget`, `Gadget = Core2.Gadget`
+            // inside Facade2): followed for the MODULES the join may ask only, never as overlay names (an alias a module
+            // declares is nameable from a file only through that module's own import).
+            var queue = Array(modules), seenQ = Set(closure)
+            while let q = queue.popLast() {
+                guard seenQ.insert(q).inserted, !PLATFORM_MODULES.contains(q), let facts = moduleAliases(q) else { continue }
+                for (_, a) in facts.aliases where a.visible {
+                    let segs = a.target.split(separator: ".").map(String.init)
+                    if segs.count > 1, moduleNames.contains(segs[0]) { if modules.insert(segs[0]).inserted { queue.append(segs[0]) } }
+                }
+            }
             for n in banned { overlay[n] = nil }
             // This scan's own spellings win; a platform or curated name is not re-pointed by a dependency.
             for n in Array(overlay.keys) where localTypes.contains(n) || declaredTypes.contains(n) || typeAliases[n] != nil
@@ -4941,7 +4952,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    guard aiBase.enabled else { return aiBase }
                                    var a = aiBase
                                    a.file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })   // R1497
-                                   if let m = aiAliasesWithDependencies(forFile: a.file ?? "", base: aiBase.fileAliases) { a.fileAliases = m }   // R1868(e)
+                                   if let m = aiAliasesWithDependencies(forFile: a.file ?? "", base: aiBase.fileAliases) {   // R1868(e)
+                                       a.fileAliases = m
+                                       a.depAliasNames = Set(depAliasFacts(forFile: a.file ?? "").overlay.keys).subtracting(aiBase.fileAliases.keys)
+                                   }
                                    let path = f.enclosingTypePath ?? f.enclosingType
                                    a.enclosingTypePath = path
                                    var g = Set(f.genericBounds.keys)
@@ -4968,6 +4982,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         cc.prescanLocalGenericBindings(Syntax(body))                          // R1044 residual
         if CallCollector.veinBProbe { FileHandle.standardError.write("VBFN\t\(f.qual)\n".data(using: .utf8)!) }
         cc.walk(body)
+        // SOUNDNESS R1868(e) / D4 — A RESOLVED ALIAS MUST NOT COST THE DISCLOSURE ITS SPELLING CARRIED. The overlay re-types
+        // the receiver to the alias's TARGET, so the R1066 ledger (which asks which blind imported module declares the
+        // spelled type) no longer sees the module that declares the ALIAS; release named it (`[] inv:Facade`). A unit that
+        // resolved a dependency alias is therefore attributed to the readable blind modules that declare the alias name, as
+        // the release's spelling was. Non-gating (R133); a module a chained report covers is not blind and is not named.
+        if !cc.usedDepAliases.isEmpty {
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            for a in cc.usedDepAliases.sorted() { blindDirect[f.qual, default: []].formUnion(sourceProvenDepModules(of: a, inFile: file)) }
+        }
         if !cc.genericWitnessReqs.isEmpty { genericWitnessReqsByUnit[f.qual] = cc.genericWitnessReqs }   // R951
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).
@@ -5206,7 +5229,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if let e = bareNameDepEntry(p, name, f) {
                         if joinDebug { FileHandle.standardError.write("JOINSITE global \(f.qual) \(p)#\(name) -> \(e.whyReason ?? "-")\n".data(using: .utf8)!) }
                         hits.append(e)
-                        if mods.contains(where: { kappaRelation(name: name, module: $0) == .same }) { kappaSameEntity = true }
+                        if mods.contains(where: { kappaRelation(name: name, module: $0, owningPackage: deps.modulePkgs[$0]) == .same }) { kappaSameEntity = true }
                     }
                 }
                 // STAGE S1 (R1867, the REFERENCE spelling) — `let f = shellOut; f(…)` joins the row for the function
