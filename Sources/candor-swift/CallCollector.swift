@@ -315,6 +315,10 @@ final class CallCollector: SyntaxVisitor {
     var opaqueFnLocals: Set<String> = []    // fn-typed LOCALS whose value is opaque (not a visible
                                             // closure): invoking one is §4 Unknown — only fn-typed
                                             // PARAMS can defer to call-site flow (callers pass them).
+    /// SOUNDNESS R1873 — a `let g = r.get` binding -> the METHOD REFERENCE it holds, as `Owner\u{1}member\u{1}module`
+    /// (see `depMethodRefR1873`), so `g(p)` is answered as `r.get(p)`. `fnValueAlias`'s lifecycle, for its reason: a
+    /// stale entry would charge an unrelated value's invocation the referenced member — a fabrication.
+    var methodRefR1873: [String: String] = [:]
     var fnValueAlias: [String: String] = [:] // INFERRED-type fn-value locals bound to a NAMED local fn
                                             // (`let g = eff`): invoking `g()` edges to `eff` (the real
                                             // unit — more precise than Unknown). The README §4 contract
@@ -4226,6 +4230,121 @@ final class CallCollector: SyntaxVisitor {
     private static let r610Off = Env.on("CANDOR_R610_OFF")
     /// SOUNDNESS R1491 KILL SWITCH — the plain `let r = a.b` binder types nothing again (the release reading).
     static let r1491Off = Env.on("CANDOR_R1491_OFF")
+
+    /// §1b KILL SWITCHES, one per arm, because each can REMOVE something as well as add it:
+    ///  - `CANDOR_R1872K_OFF` — the κ arm on a generic-parameter receiver. κ then answers the call and the member call
+    ///    with the generic owner is no longer emitted, so a chained walk-miss hedge on a PURE κ verb is replaced by κ's
+    ///    charge (exactly the reading the class-typed parameter has).
+    ///  - `CANDOR_R1873_OFF` — references. The invocation `f(…)`/`g(…)` is answered as the referent instead of as a bare
+    ///    local name, so whatever the bare name used to join is no longer asked.
+    ///  - `CANDOR_R1455T4E_OFF` — the factory-literal element parameter. A member call it types is no longer DROPPED, and
+    ///    R1073 keeps a release hedge only on a unit that drops one (`droppedMember`).
+    static let r1872KOff = Env.on("CANDOR_R1872K_OFF")
+    static let r1873Off = Env.on("CANDOR_R1873_OFF")
+    static let r1455T4ElemOff = Env.on("CANDOR_R1455T4E_OFF")
+
+    // ── STAGE S2c — RECEIVER TYPING (SOUNDNESS R1872 unchained, R1873, R1455 T4) ─────────────────────────────────
+    // Three spellings formed no receiver identity, so no source was ever asked and the call was silent unchained:
+    // a generic parameter bounded by a type this scan does not declare (`<C: HTTPClient>`, `c.get(p)`), a function or
+    // method REFERENCE (`let f = shellOut; f(…)`, `let g = r.get; g(p)`, `[p].map(r.tally)`), and an element closure
+    // parameter over a literal of dependency-factory results (`[makeClient()].map { c in c.get(p) }`). Each is a
+    // RESOLUTION: the spelling is given the identity its plain twin already has (`c: HTTPClient`, `shellOut(…)`,
+    // `r.get(p)`, `let c = makeClient()`), and every arm that twin reaches answers it — no new rule, no new hedge.
+
+    /// SOUNDNESS R1872 — the BOUND a generic-parameter receiver stands for, for the κ arm only: `<C: HTTPClient>` and
+    /// `c.get(p)` reach `HTTPClient.get` or a subclass override of it, exactly as `c: HTTPClient` does, so κ's verb floor
+    /// applies to it as it applies to the class-typed parameter. Not where the bound is a type this scan DECLARES
+    /// (local resolution answers it; the GRDB `bind` lesson) or a local protocol (bounded CHA answers it), and not where
+    /// the parameter name is itself a declared type. `declaredTypes`, never `localTypes`: a consumer's own `extension
+    /// HTTPClient` must not hide the bound (R1872's chained half, the R651/R656 shape).
+    func foreignGenericBoundR1872(_ t: String) -> String? {
+        guard let b = genericBoundsR951[t], !declaredTypes.contains(t), !declaredTypes.contains(b),
+              !localProtocols.contains(b), b.first?.isUppercase == true else { return nil }
+        return b
+    }
+
+    /// SOUNDNESS R1873 — `let f = shellOut`: the bare name a `let` binds to an unbound referent (a free function, a
+    /// dependency's or the platform's, or an implicit-`self` member), so that invoking `f(…)` is answered exactly as
+    /// `shellOut(…)` is — κ, the §2 join, the blind ledger — rather than as an unknown local `f`. A LOCAL free function
+    /// keeps `fnValueAlias`'s own edge (R178's arm); a name any binding, parameter or local holds is a VALUE, never a
+    /// referent, and is refused here.
+    func freeReferentR1873(_ v0: ExprSyntax, binding name: String) -> String? {
+        guard let dr = Self.peel(v0).as(DeclReferenceExprSyntax.self) else { return nil }
+        let x = dr.baseName.text
+        guard x != name, x.first?.isLowercase == true, x != "self", x != "super", vars[x] == nil,
+              !fnTyped.contains(x), !opaqueFnLocals.contains(x), !isBoundLocal(x), !binderShadow.contains(x),
+              !paramNamesR851.contains(x), arrayElem[x] == nil, dictElem[x] == nil, tupleElem[x] == nil,
+              !localFreeFns.contains(x) else { return nil }
+        return x
+    }
+
+    /// SOUNDNESS R1873 — the name a bare call `f(…)` is answered under: the referent of a `let f = <free name>` (see
+    /// `freeReferentR1873`), else the name itself.
+    func invokedNameR1873(_ n: String) -> String {
+        guard let t = fnValueAlias[n], !localFreeFns.contains(t) else { return n }
+        vbHit("R1873", "ref \(n) -> \(t)")
+        return t
+    }
+
+    /// SOUNDNESS R1873 — a METHOD REFERENCE on a receiver of a type this scan does not declare (`r.get` with
+    /// `r: HTTPClient`, `c.get` with `<C: HTTPClient>`): `Owner.member`, or nil. The receiver must be TYPED (a tracked
+    /// value or a type reference, not a guess through an unexplained hop) and the member lowercase.
+    func depMethodRefR1873(_ e: ExprSyntax) -> (owner: String, member: String, module: String?)? {
+        guard let ma = Self.peel(e).as(MemberAccessExprSyntax.self), let b = ma.base else { return nil }
+        let m = ma.declName.baseName.text
+        guard m.first?.isLowercase == true, !Self.METATYPE_MEMBERS.contains(m) else { return nil }
+        let r = rootOf(b)
+        guard let rt0 = r.root, !rt0.hasPrefix("<"), !r.opaqueHop, r.isVar || rt0.first?.isUppercase == true else { return nil }
+        let rt = foreignGenericBoundR1872(rt0) ?? rt0
+        guard rt.first?.isUppercase == true, !declaredTypes.contains(rt), !localProtocols.contains(rt),
+              !genericParamNamesFn.contains(rt), genericBoundsR951[rt] == nil else { return nil }
+        return (rt, m, spelledModule(of: b))
+    }
+
+    /// SOUNDNESS R1873 — is `arg` the argument of a standard-library higher-order method whose parameter at that
+    /// position is a FUNCTION in every overload? The unlabelled sole argument of `map`/`compactMap`/`flatMap`/`forEach`/
+    /// `filter`/`allSatisfy`, the `where:`/`by:`/`while:`/`whereSeparator:` predicate of the sequence algorithms, and
+    /// the combining function of `reduce`. `contains(x)`, `first`, `prefix(3)`, `min()` take values and are excluded.
+    static func functionOnlyHOFArgR1873(_ node: FunctionCallExprSyntax, _ arg: LabeledExprSyntax) -> Bool {
+        guard let m = node.calledExpression.as(MemberAccessExprSyntax.self)?.declName.baseName.text else { return false }
+        let label = arg.label?.text
+        if label == nil, node.arguments.count == 1,
+           ["map", "compactMap", "flatMap", "forEach", "filter", "allSatisfy"].contains(m) { return true }
+        if let l = label, ["where", "by", "while", "whereSeparator"].contains(l),
+           ["first", "last", "contains", "firstIndex", "lastIndex", "removeAll", "drop", "prefix", "sorted", "sort",
+            "min", "max", "partition", "split", "allSatisfy", "elementsEqual", "starts"].contains(m) { return true }
+        if m == "reduce", node.arguments.count == 2, arg.id == node.arguments.last?.id, label == nil { return true }
+        return false
+    }
+
+    static func decodeMethodRefR1873(_ enc: String) -> (owner: String, member: String, module: String?)? {
+        let parts = enc.split(separator: "\u{1}", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 3 else { return nil }
+        return (parts[0], parts[1], parts[2].isEmpty ? nil : parts[2])
+    }
+
+    /// SOUNDNESS R1873 — a method reference INVOKED (`g(p)` after `let g = r.get`) or handed to a higher-order function
+    /// that invokes it (`[p].map(r.tally)`): the member call `r.member(…)` it stands for. κ answers a verb on the owner
+    /// and asks the §2 join beside it (the R1865 marker), exactly as the typed-receiver arm does; any other member goes
+    /// out as the member call with the owner, so the join (chained) and the R1866 typed disclosure (unchained) answer it.
+    func emitMethodRefR1873(_ ref: (owner: String, member: String, module: String?), node: FunctionCallExprSyntax?) {
+        vbHit("R1873", "mref \(ref.owner).\(ref.member)")
+        if let eff = kappaMember(root: ref.owner, member: ref.member) {
+            directEffects.insert(eff)
+            curatedJoinMarker(ref.owner, ref.member, module: ref.module)
+            if eff == "Fs" { let ks = fsKind(root: ref.owner, member: ref.member)
+                              if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
+            if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: ref.owner, member: ref.member) { privacyKinds[eff, default: []].insert(k) } }
+            if eff == "Llm" { directEffects.insert("Net") }
+            // The locator is not in hand at a reference (and a referenced call's arguments are positional), so an
+            // establishing verb's surface is incomplete, never certified off a sibling literal.
+            if isEstablishingMember(effect: eff, root: ref.owner, member: ref.member) { incompleteSurfaces.insert(eff) }
+        } else {
+            calls.append(Call(path: ref.member, leaf: ref.member, strArg: nil, typed: false,
+                              args: node.map { argKinds($0) } ?? [], argTypes: node.map { argTypesOf($0) } ?? [],
+                              ownerModule: ref.module, extOwner: ref.owner))
+        }
+    }
     /// SOUNDNESS R1513 KILL SWITCH — a nested type's facts are read under its SIMPLE name again (last writer wins
     /// across same-named types). Per-mechanism switches, each also off under `CANDOR_R1513_OFF`: S an in-body unit
     /// of a shared name reads its own type's facts by path, L any other shared name a scope of the unit nests does too
@@ -6889,6 +7008,7 @@ final class CallCollector: SyntaxVisitor {
         depBoundLocals.removeValue(forKey: name)
         localConstStrings.removeValue(forKey: name)
         fnValueAlias.removeValue(forKey: name)
+        methodRefR1873.removeValue(forKey: name)   // SOUNDNESS R1873
         // A REBIND MUST DROP THE PATH. Without this, `func a() { let p = NSHomeDirectory() + "/Desktop" }`
         // followed by `func b(_ p: String) { …contents(atPath: p) }` charged b's PARAMETER the Desktop
         // key — a fabrication from a name collision, which is the exact class NameKeyedStateTests exists
@@ -7276,6 +7396,7 @@ final class CallCollector: SyntaxVisitor {
         var opaque: Set<String>, opaqueElem: Set<String>, depBound: [String: String]
         var protoTyped: [String: String], constStrings: [String: String]
         var fnValueAlias: [String: String], casePayload: Set<String>
+        var methodRefR1873: [String: String]   // SOUNDNESS R1873
         // R362 — see `literalLocals`. Scoped for the same reason `casePayload` is.
         var literalLocals: Set<String>
         var binderShadow: Set<String>   // R847 — see `binderShadow`
@@ -7287,6 +7408,9 @@ final class CallCollector: SyntaxVisitor {
     /// over rather than set directly because `typeClosureParams` runs before the closure is entered (see
     /// `visit(ClosureExprSyntax)`). Consumed once, so an un-entered closure cannot leak an entry.
     private var monoClosureParams: [SyntaxIdentifier: Set<String>] = [:]
+    /// SOUNDNESS R1455 T4 — closure node -> element parameter -> the dependency factory its element came from. Handed
+    /// over exactly as `monoClosureParams` is, and consumed once.
+    private var depFactoryClosureParamsR1455: [SyntaxIdentifier: [String: String]] = [:]
 
     private func enterShadowScope(_ node: some SyntaxProtocol) {
         // Saved UNCONDITIONALLY. The old `guard !isEmpty` skipped the save when both sets were empty on
@@ -7331,7 +7455,7 @@ final class CallCollector: SyntaxVisitor {
         shadowScopes[node.id] = ShadowSave(opaque: monoNames, opaqueElem: opaqueElem,
                                            depBound: depBoundLocals, protoTyped: protoTyped,
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias,
-                                           casePayload: casePayloadLocals,
+                                           casePayload: casePayloadLocals, methodRefR1873: methodRefR1873,
                                            literalLocals: literalLocals, binderShadow: binderShadow,
                                            caseElseOut: caseElseOut)
     }
@@ -7350,6 +7474,7 @@ final class CallCollector: SyntaxVisitor {
         protoTyped = saved.protoTyped
         localConstStrings = saved.constStrings
         fnValueAlias = saved.fnValueAlias
+        methodRefR1873 = saved.methodRefR1873
         casePayloadLocals = saved.casePayload
         literalLocals = saved.literalLocals
         binderShadow = saved.binderShadow
@@ -7704,6 +7829,11 @@ final class CallCollector: SyntaxVisitor {
         // parameter (`xs.forEach { $0.greet() }` over a `[T]`/`[some P]`): the shadow above is what makes
         // the flag scoped to THIS closure, so it has to be set after it, not before.
         if let mono = monoClosureParams.removeValue(forKey: node.id) { monoNames.formUnion(mono) }
+        // SOUNDNESS R1455 T4 — the element parameter's factory provenance, inside this closure's save (see
+        // `depFactoryElemR1455`), so it is given back when the closure closes.
+        if let dep = depFactoryClosureParamsR1455.removeValue(forKey: node.id) {
+            for (n, c) in dep { depBoundLocals[n] = c }
+        }
         // SOUNDNESS R1490 (f) — an element parameter over `[any P]`, and a parameter ANNOTATED `any P` / `P` (a closure
         // cannot declare `some P` or a generic of its own; a name that is the enclosing function's generic parameter is
         // refused by `stdExistentialRecvR1473`'s own spelling checks).
@@ -8365,6 +8495,21 @@ final class CallCollector: SyntaxVisitor {
                   Self.isElementIterator(ma.declName.baseName.text), let base = ma.base else { return nil }
             return metatypeElementOf(base)
         }()
+        // SOUNDNESS R1455 T4 (element of a factory literal) — `[makeClient()].map { c in c.get(p) }`. The element of an
+        // array LITERAL is the value its element expression produces, so where every element is a call of the SAME
+        // plausible dependency factory (`depFactoryCallee`, the guard `let c = makeClient()` and `makeClient().get(p)`
+        // already share) and no arm above typed the element, the element parameter is bound exactly as `let c =
+        // makeClient()` binds `c`: untyped, with the factory's provenance, so its member calls take the `<untyped>.`
+        // marker the Driver answers through `typeSurface.returns` (chained) or discloses (R1866, unchained).
+        let depFactoryElemR1455: String? = {
+            guard !Self.r1455T4ElemOff, iteratorElem == nil, nestedIterElem == nil, callableElem == nil,
+                  let ma = node.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.isElementIterator(ma.declName.baseName.text), let base = ma.base,
+                  let arr = Self.peel(base).as(ArrayExprSyntax.self), !arr.elements.isEmpty else { return nil }
+            let cs = arr.elements.map { el -> String? in rootOf(el.expression).root == nil ? depFactoryCallee(el.expression) : nil }
+            guard let first = cs.first, let c = first, cs.allSatisfy({ $0 == c }) else { return nil }
+            return c
+        }()
         // the TRAILING closure (or first positional) is the iterator's element closure
         let elemClosure = node.trailingClosure
             ?? node.arguments.lazy.compactMap { Self.peel($0.expression).as(ClosureExprSyntax.self) }.first
@@ -8504,6 +8649,12 @@ final class CallCollector: SyntaxVisitor {
                         FileHandle.standardError.write(
                             "R349TUPLE \(iteratorMethod ?? "?") -> \(slots)\n".data(using: .utf8)!)
                     }
+                } else if isElementParam(i), let callee = depFactoryElemR1455, closure == elemClosure, p.annotated == nil {
+                    // SOUNDNESS R1455 T4 — the factory element's provenance (see `depFactoryElemR1455`). Handed to the
+                    // closure's own visit, after its shadow, as the element opacity is: `shadowName` would wipe it here.
+                    clearBindingTypeOnly(p.name)
+                    vbHit("R1455T4E", "\(p.name) <- \(callee)")
+                    depFactoryClosureParamsR1455[closure.id, default: [:]][p.name] = callee
                 } else if p.annotated == nil, let ts = declaredT4, i < ts.count, let t = ts[i] {
                     // SOUNDNESS R1455 T4 — the binding its annotated twin `{ (p: T) in … }` gets, cleared first so
                     // nothing of an outer same-named binding survives beside it.
@@ -9526,6 +9677,14 @@ final class CallCollector: SyntaxVisitor {
                 } else if let rt = recv.root, localTypes.contains(rt) {
                     calls.append(Call(path: "\(rt).\(m)", leaf: m, strArg: nil, typed: true))
                 }
+                // SOUNDNESS R1873 — `[p].map(r.tally)` with `r: HTTPClient`: a METHOD REFERENCE on a type this scan does
+                // not declare, handed to a higher-order function that invokes it. Only where the parameter it fills is
+                // a FUNCTION in every overload the standard library declares (so the argument cannot be a property's
+                // value): answered as the member call `r.tally(…)`. Beside the local arm above, not instead of it: an
+                // extension-only type (`localTypes`, not `declaredTypes`) may answer from either side.
+                if !Self.r1873Off, Self.functionOnlyHOFArgR1873(node, arg), let ref = depMethodRefR1873(arg.expression) {
+                    emitMethodRefR1873(ref, node: nil)
+                }
             }
         }
         // SOUNDNESS R381 — THE LOCATOR COMES FROM THE LOCATOR POSITION. `firstStringLiteral` scans the
@@ -9535,7 +9694,8 @@ final class CallCollector: SyntaxVisitor {
         // first cut of R381's fix. Positional arg 0 only, via the label-aware picker (`""` is the first
         // UNLABELED arg), which yields nil when that argument is not a plain literal — so the surface is
         // honestly incomplete rather than fabricated.
-        let freeCallName = node.calledExpression.as(DeclReferenceExprSyntax.self)?.baseName.text
+        let freeCallName = node.calledExpression.as(DeclReferenceExprSyntax.self)
+            .map { Self.r1873Off ? $0.baseName.text : invokedNameR1873($0.baseName.text) }   // SOUNDNESS R1873
         // SOUNDNESS R394 — the locator POSITION is now declared per call name (`locatorLabelsForFree`)
         // rather than special-cased for the resolver family alone. `shellOut(to:at:)` was publishing its
         // WORKING DIRECTORY as the command; the resolver family was the only spelling this site knew to
@@ -9590,8 +9750,13 @@ final class CallCollector: SyntaxVisitor {
                 return byResolver
             }
             ?? firstStringLiteral(node.arguments)
-        if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
-            let name = dr.baseName.text
+        if !Self.r1873Off, let dr = node.calledExpression.as(DeclReferenceExprSyntax.self),
+           let ref = methodRefR1873[dr.baseName.text].flatMap(Self.decodeMethodRefR1873) {
+            // SOUNDNESS R1873 — `g(p)` after `let g = r.get` is the member call `r.get(p)` (see `emitMethodRefR1873`).
+            emitMethodRefR1873(ref, node: node)
+        } else if let dr = node.calledExpression.as(DeclReferenceExprSyntax.self) {
+            // SOUNDNESS R1873 — `f(…)` after `let f = shellOut` is answered as `shellOut(…)` (see `freeReferentR1873`).
+            let name = Self.r1873Off ? dr.baseName.text : invokedNameR1873(dr.baseName.text)
             // SOUNDNESS R1048 — `Array(seq)`, `Set(seq)`, `zip(a, b)`: a local iterable handed to a constructor or
             // free function this scan does not declare is iterated there.
             iterateLocalArguments(node, calleeIsForeign: !localFreeFns.contains(name) && !localTypes.contains(name)
@@ -10686,7 +10851,11 @@ final class CallCollector: SyntaxVisitor {
                 // What is NOT covered: the ctor arms keyed directly on a `DeclReferenceExpr` callee
                 // earlier in this visitor (`Data`/`String(contentsOf:)`). Pinned as an expected-failure
                 // ratchet in `ExecCapabilityProcessTests`, with the reason the fix belongs one level up.
-            } else if let rt = base.root, let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
+            } else if let rt0 = base.root,
+                      // SOUNDNESS R1872 — a generic-parameter receiver asks κ about its bound (see `foreignGenericBoundR1872`).
+                      case let rt = (base.isVar && !Self.r1872KOff ? foreignGenericBoundR1872(rt0) : nil) ?? rt0,
+                      let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
+                if rt != rt0 { vbHit("R1872", "kappa \(rt0)->\(rt).\(member)") }
                 directEffects.insert(eff)
                 // SOUNDNESS R1865 — SPEC §2 ⟨0.43⟩: A CHAINED ROW AND A CURATED ENTRY THAT ANSWER ONE CALL ARE
                 // UNIONED. This branch charged the classifier's verb and emitted NO call, so the Driver's §2 join
@@ -13915,6 +14084,21 @@ final class CallCollector: SyntaxVisitor {
                             vbHit("R1491", "\(name) -> \(t)\(info.opaqueHop ? " (guess)" : "")")
                         }
                     }
+                }
+            }
+            // SOUNDNESS R1873 — A FUNCTION OR METHOD REFERENCE BOUND BY A `let`. `let f = shellOut; f(…)` and `let g = r.get;
+            // g(p)` (`r: HTTPClient`) read no κ charge and no disclosure unchained: the binding held no identity, so the
+            // invocation was answered as an unknown local. The referent is recorded BESIDE whatever the arms above
+            // decided (a copy typed by R215/R1491 keeps its type), and asked only where the name is then INVOKED.
+            if !Self.r1873Off, node.bindingSpecifier.text == "let", binding.typeAnnotation == nil,
+               binding.accessorBlock == nil, let v0 = binding.initializer?.value {
+                if fnValueAlias[name] == nil, !fnTyped.contains(name), !opaqueFnLocals.contains(name),
+                   let x = freeReferentR1873(v0, binding: name) {
+                    vbHit("R1873", "bind \(name) -> \(x)")
+                    fnValueAlias[name] = x
+                } else if let r = depMethodRefR1873(v0) {
+                    vbHit("R1873", "bind \(name) -> \(r.owner).\(r.member)")
+                    methodRefR1873[name] = "\(r.owner)\u{1}\(r.member)\u{1}\(r.module ?? "")"
                 }
             }
             // SOUNDNESS R1498 — `let t = (A(), 1)` / `= l.tup` / `= mkPair()` / `= other`: the binding IS a tuple, so

@@ -93,6 +93,8 @@ final class NameKeyedStateTests: XCTestCase {
         "depBoundLocals":    .clearedOnRebind(scoped: true),
         "localConstStrings": .clearedOnRebind(scoped: true),
         "fnValueAlias":      .clearedOnRebind(scoped: true),
+        // SOUNDNESS R1873 — the method reference a `let g = r.get` holds; `fnValueAlias`'s twin, on its lifecycle.
+        "methodRefR1873":    .clearedOnRebind(scoped: true),
         "protoTyped":        .clearedOnRebind(scoped: true),
         "opaqueElem":        .clearedOnRebind(scoped: true),
         // ── per-binding TYPES: cleared, deliberately NOT scoped. A stale type is dangerous inward and
@@ -495,6 +497,8 @@ final class NameKeyedStateTests: XCTestCase {
         "bodyIsStoredInitializer": .notPerBinding,
         "handledBinders": .notPerBinding, "typeScopes": .notPerBinding,
         "shadowScopes": .notPerBinding, "monoClosureParams": .notPerBinding,
+        // SOUNDNESS R1455 T4 — `monoClosureParams`'s twin: closure-node keyed, consumed once by that closure's own visit.
+        "depFactoryClosureParamsR1455": .notPerBinding,
         // R98 — a set of SYNTAX IDs, not names: which `if/guard case` conditions deferred their binder
         // clear to `visitPost` because the initializer mentions the bound name. Entered and removed by
         // the same node's visit/visitPost pair, so no binding name reaches it and a rebind cannot.

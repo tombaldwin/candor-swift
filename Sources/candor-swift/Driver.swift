@@ -7050,9 +7050,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // name is excluded: a dependency may declare a member called `print` or `max` (Fable fxD — `return
             // print(p)` resolves to it and writes), and unchained nothing here can prove a bare name is NOT a member.
             // A stdlib free function called bare inside such an extension is therefore disclosed too (an `Unknown`).
+            // SOUNDNESS R1872 — …and a GENERIC-PARAMETER receiver (`<C: HTTPClient>`, `<F: Fetching>`) asks about its BOUND,
+            // as the chained join already does through `dispatchAbstraction` and the R1066/R1104/R706 arms below do
+            // through `genericBounds`: `c.tally(p)` reaches `HTTPClient.tally` or an override of it, exactly as on a
+            // `c: HTTPClient` parameter. Not for a bound this scan declares (local resolution answers it).
             let r1866Owner: String? = call.unqualified
                 ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
-                : call.extOwner
+                : call.extOwner.map { raw in
+                    guard let b = f.genericBounds[raw], !declaredTypes.contains(raw), !declaredTypes.contains(b) else { return raw }
+                    if r1866Probe { FileHandle.standardError.write("R1872HIT bound \(f.qual) \(raw)->\(b).\(call.leaf)\n".data(using: .utf8)!) }
+                    return b
+                }
             // SOUNDNESS R1874 — a `super.<m>` call asks the same question of each EXTERNAL base (see `externalSuperBases`).
             let r1874Super = !r1866Off && call.extOwner == CallCollector.superMarker && !call.unqualified
             let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
