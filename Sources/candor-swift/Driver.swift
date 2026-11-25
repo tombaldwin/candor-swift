@@ -3351,6 +3351,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// over-attributes in that case — an `invisible` naming a module the call may not reach, which is the
     /// direction a disclosure is allowed to err in, never a charge.
     let r1071Off = Env.on("CANDOR_R1071_OFF")
+    /// SOUNDNESS R1873 — does a dependency module this file imports (re-exports followed) declare `owner.member` as a
+    /// STATIC or `class` function in its readable sources? Positive evidence only: an unreadable module proves nothing.
+    var staticFnCacheR1873: [String: [String: Set<String>]] = [:]
+    func depDeclaresStaticFunctionR1873(_ owner: String, _ member: String, file: String) -> Bool {
+        let ty = owner.split(separator: ".").last.map(String.init) ?? owner
+        var closure = Set<String>(), queue = Array(fileImports[file] ?? [])
+        while let m = queue.popLast() {
+            guard closure.insert(m).inserted else { continue }
+            queue.append(contentsOf: deps.moduleReexports[m] ?? [])
+        }
+        for m in closure.sorted() {
+            let table: [String: Set<String>]
+            if let c = staticFnCacheR1873[m] { table = c } else {
+                var t: [String: Set<String>] = [:]
+                for path in deps.moduleSwiftSources[m] ?? [] where path.hasSuffix(".swift") {
+                    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { continue }
+                    for (k, v) in staticFunctionDeclarations(source: text) { t[k, default: []].formUnion(v) }
+                }
+                staticFnCacheR1873[m] = t; table = t
+            }
+            if table[ty]?.contains(member) == true { return true }
+        }
+        return false
+    }
     var moduleExtCache: [String: [String: [String: Bool]]?] = [:]
     func moduleExtensionMembers(_ m: String) -> [String: [String: Bool]]? {
         if let c = moduleExtCache[m] { return c }
@@ -5329,6 +5353,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            // SOUNDNESS R1873 — a TYPE-base method reference (`[p].map(HTTPClient.spawn)`) is a call only when the member
+            // is STATIC; an unapplied instance method (`HTTPClient.get`) invokes nothing. Without that proof the
+            // reference forms nothing, which is the release's reading.
+            if call.typeBaseRefR1873, let owner = call.extOwner,
+               !depDeclaresStaticFunctionR1873(owner, call.leaf,
+                                               file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })) {
+                continue
+            }
             // SOUNDNESS R1499 — see `r1499Unreachable`: the release's floor edge would name a local body this call cannot run.
             if call.platformHopR1499, call.typed, let dot = call.path.lastIndex(of: ".") {
                 // …AND WHAT IT CAN RUN: a member a LOCAL EXTENSION gives a platform type (`extension NSMutableDictionary

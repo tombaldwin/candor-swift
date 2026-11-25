@@ -212,6 +212,9 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// SOUNDNESS R1065 — a `<untyped>.` marker from `depInstanceMemberCallee`: its MISS discloses only where
               /// the member's leaf could have a body someone answers (a local type's member, or a chained package's).
               var instanceHop: Bool = false
+              /// SOUNDNESS R1873 — a method REFERENCE with a TYPE base (`[p].map(HTTPClient.spawn)`): a call only if the
+              /// member is static, which the Driver proves from the dependency's readable sources or the call is dropped.
+              var typeBaseRefR1873: Bool = false
               /// SOUNDNESS R1081 — on a binary-operator call: each operand's LITERAL kind (`int`, `float`, `string`,
               /// `bool`), nil where the operand is not a literal. Read only by the Driver's operand-type admission.
               var operandLits: [String?] = []
@@ -4232,14 +4235,11 @@ final class CallCollector: SyntaxVisitor {
     static let r1491Off = Env.on("CANDOR_R1491_OFF")
 
     /// §1b KILL SWITCHES, one per arm, because each can REMOVE something as well as add it:
-    ///  - `CANDOR_R1872K_OFF` — the κ arm on a generic-parameter receiver. κ then answers the call and the member call
-    ///    with the generic owner is no longer emitted, so a chained walk-miss hedge on a PURE κ verb is replaced by κ's
-    ///    charge (exactly the reading the class-typed parameter has).
+    /// (The generic-bound κ charge, R1872, has none: it is a union beside the release's call, additive by construction.)
     ///  - `CANDOR_R1873_OFF` — references. The invocation `f(…)`/`g(…)` is answered as the referent instead of as a bare
     ///    local name, so whatever the bare name used to join is no longer asked.
     ///  - `CANDOR_R1455T4E_OFF` — the factory-literal element parameter. A member call it types is no longer DROPPED, and
     ///    R1073 keeps a release hedge only on a unit that drops one (`droppedMember`).
-    static let r1872KOff = Env.on("CANDOR_R1872K_OFF")
     static let r1873Off = Env.on("CANDOR_R1873_OFF")
     static let r1455T4ElemOff = Env.on("CANDOR_R1455T4E_OFF")
 
@@ -4289,7 +4289,7 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1873 — a METHOD REFERENCE on a receiver of a type this scan does not declare (`r.get` with
     /// `r: HTTPClient`, `c.get` with `<C: HTTPClient>`): `Owner.member`, or nil. The receiver must be TYPED (a tracked
     /// value or a type reference, not a guess through an unexplained hop) and the member lowercase.
-    func depMethodRefR1873(_ e: ExprSyntax) -> (owner: String, member: String, module: String?)? {
+    func depMethodRefR1873(_ e: ExprSyntax) -> (owner: String, member: String, module: String?, typeBase: Bool)? {
         guard let ma = Self.peel(e).as(MemberAccessExprSyntax.self), let b = ma.base else { return nil }
         let m = ma.declName.baseName.text
         guard m.first?.isLowercase == true, !Self.METATYPE_MEMBERS.contains(m) else { return nil }
@@ -4298,7 +4298,10 @@ final class CallCollector: SyntaxVisitor {
         let rt = foreignGenericBoundR1872(rt0) ?? rt0
         guard rt.first?.isUppercase == true, !declaredTypes.contains(rt), !localProtocols.contains(rt),
               !genericParamNamesFn.contains(rt), genericBoundsR951[rt] == nil else { return nil }
-        return (rt, m, spelledModule(of: b))
+        // A TYPE base (`HTTPClient.spawn`) is a call only for a STATIC member: an unapplied INSTANCE method
+        // (`HTTPClient.get`, type `(HTTPClient) -> (String) -> Int`) yields a closure and invokes nothing. The
+        // collector cannot tell the two apart; the Driver asks the dependency's readable sources (`typeBase`).
+        return (rt, m, spelledModule(of: b), !r.isVar)
     }
 
     /// SOUNDNESS R1873 — is `arg` the argument of a standard-library higher-order method whose parameter at that
@@ -4317,33 +4320,53 @@ final class CallCollector: SyntaxVisitor {
         return false
     }
 
-    static func decodeMethodRefR1873(_ enc: String) -> (owner: String, member: String, module: String?)? {
+    /// SOUNDNESS R1873 — is the receiver of the higher-order call one the STANDARD LIBRARY's method answers? The
+    /// method-name test alone admits a dependency's or a declared type's own `map(_ s: String)`, whose argument is a
+    /// value. Only a collection literal, or a receiver whose element (or dictionary value) the collector already
+    /// resolves, qualifies; anything else forms nothing (the release's reading).
+    func stdlibHOFReceiverR1873(_ node: FunctionCallExprSyntax) -> Bool {
+        guard let b = node.calledExpression.as(MemberAccessExprSyntax.self)?.base else { return false }
+        let p = Self.peel(b)
+        if p.is(ArrayExprSyntax.self) || p.is(DictionaryExprSyntax.self) { return true }
+        return elementTypeOf(b) != nil || dictValueOf(b) != nil
+    }
+
+    static func decodeMethodRefR1873(_ enc: String) -> (owner: String, member: String, module: String?, typeBase: Bool)? {
         let parts = enc.split(separator: "\u{1}", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 3 else { return nil }
-        return (parts[0], parts[1], parts[2].isEmpty ? nil : parts[2])
+        guard parts.count == 4 else { return nil }
+        return (parts[0], parts[1], parts[2].isEmpty ? nil : parts[2], parts[3] == "T")
     }
 
     /// SOUNDNESS R1873 — a method reference INVOKED (`g(p)` after `let g = r.get`) or handed to a higher-order function
     /// that invokes it (`[p].map(r.tally)`): the member call `r.member(…)` it stands for. κ answers a verb on the owner
     /// and asks the §2 join beside it (the R1865 marker), exactly as the typed-receiver arm does; any other member goes
     /// out as the member call with the owner, so the join (chained) and the R1866 typed disclosure (unchained) answer it.
-    func emitMethodRefR1873(_ ref: (owner: String, member: String, module: String?), node: FunctionCallExprSyntax?) {
-        vbHit("R1873", "mref \(ref.owner).\(ref.member)")
-        if let eff = kappaMember(root: ref.owner, member: ref.member) {
-            directEffects.insert(eff)
+    func emitMethodRefR1873(_ ref: (owner: String, member: String, module: String?, typeBase: Bool), node: FunctionCallExprSyntax?) {
+        vbHit("R1873", "mref \(ref.owner).\(ref.member)\(ref.typeBase ? " (type base)" : "")")
+        if !ref.typeBase, let eff = kappaMember(root: ref.owner, member: ref.member) {
+            chargeKappaVerbR1873(ref.owner, ref.member, eff)
             curatedJoinMarker(ref.owner, ref.member, module: ref.module)
-            if eff == "Fs" { let ks = fsKind(root: ref.owner, member: ref.member)
-                              if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
-            if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: ref.owner, member: ref.member) { privacyKinds[eff, default: []].insert(k) } }
-            if eff == "Llm" { directEffects.insert("Net") }
-            // The locator is not in hand at a reference (and a referenced call's arguments are positional), so an
-            // establishing verb's surface is incomplete, never certified off a sibling literal.
-            if isEstablishingMember(effect: eff, root: ref.owner, member: ref.member) { incompleteSurfaces.insert(eff) }
         } else {
-            calls.append(Call(path: ref.member, leaf: ref.member, strArg: nil, typed: false,
-                              args: node.map { argKinds($0) } ?? [], argTypes: node.map { argTypesOf($0) } ?? [],
-                              ownerModule: ref.module, extOwner: ref.owner))
+            // A type base never takes κ (its verbs are instance members); its call is answered only where the
+            // Driver proves the member STATIC from the dependency's sources (`typeBaseRefR1873`).
+            var c = Call(path: ref.member, leaf: ref.member, strArg: nil, typed: false,
+                         args: node.map { argKinds($0) } ?? [], argTypes: node.map { argTypesOf($0) } ?? [],
+                         ownerModule: ref.module, extOwner: ref.owner)
+            c.typeBaseRefR1873 = ref.typeBase
+            calls.append(c)
         }
+    }
+
+    /// κ's verb on `owner.member` charged where no locator is in hand (a reference, a generic receiver's bound): the
+    /// effect and its refinements, and an establishing verb's surface marked incomplete rather than certified off a
+    /// sibling literal.
+    func chargeKappaVerbR1873(_ owner: String, _ member: String, _ eff: String) {
+        directEffects.insert(eff)
+        if eff == "Fs" { let ks = fsKind(root: owner, member: member)
+                          if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
+        if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: owner, member: member) { privacyKinds[eff, default: []].insert(k) } }
+        if eff == "Llm" { directEffects.insert("Net") }
+        if isEstablishingMember(effect: eff, root: owner, member: member) { incompleteSurfaces.insert(eff) }
     }
     /// SOUNDNESS R1513 KILL SWITCH — a nested type's facts are read under its SIMPLE name again (last writer wins
     /// across same-named types). Per-mechanism switches, each also off under `CANDOR_R1513_OFF`: S an in-body unit
@@ -9682,7 +9705,8 @@ final class CallCollector: SyntaxVisitor {
                 // a FUNCTION in every overload the standard library declares (so the argument cannot be a property's
                 // value): answered as the member call `r.tally(…)`. Beside the local arm above, not instead of it: an
                 // extension-only type (`localTypes`, not `declaredTypes`) may answer from either side.
-                if !Self.r1873Off, Self.functionOnlyHOFArgR1873(node, arg), let ref = depMethodRefR1873(arg.expression) {
+                if !Self.r1873Off, Self.functionOnlyHOFArgR1873(node, arg), stdlibHOFReceiverR1873(node),
+                   let ref = depMethodRefR1873(arg.expression) {
                     emitMethodRefR1873(ref, node: nil)
                 }
             }
@@ -10300,6 +10324,17 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
                                   typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil))
             }
+            // SOUNDNESS R1872 — κ ON A GENERIC-PARAMETER RECEIVER, AS A UNION AND NEVER INSTEAD. `<C: HTTPClient>` and
+            // `c.get(p)` reach `HTTPClient.get` or an override of it, so κ's verb floor applies as it does to `c:
+            // HTTPClient`; it is ADDED here, before the chain, and the chain below still answers the call with the
+            // generic owner exactly as the release did. That call is what discloses the override question (the walk
+            // hedge chained, the generic-bound arms unchained on a file importing a blind module) and what keys the
+            // chained join; replacing it with κ's verb alone turned an executed override's disclosed `Fs` silent.
+            if base.isVar, let rt0 = base.root, let b = foreignGenericBoundR1872(rt0),
+               let eff = memberEffect(root: b, member: member, receiver: ma.base) {
+                vbHit("R1872", "kappa \(rt0)->\(b).\(member)")
+                chargeKappaVerbR1873(b, member, eff)
+            }
             // ── SOUNDNESS R429, THE MIXED ARM SET — BEFORE THE DISPATCH CHAIN, NOT INSIDE IT ──
             // This union used to sit inside the typed-local-receiver branch below, which is entered only
             // when the DEALIASED root is a project type. `dealias` reads a last-writer-wins map, so for
@@ -10851,11 +10886,7 @@ final class CallCollector: SyntaxVisitor {
                 // What is NOT covered: the ctor arms keyed directly on a `DeclReferenceExpr` callee
                 // earlier in this visitor (`Data`/`String(contentsOf:)`). Pinned as an expected-failure
                 // ratchet in `ExecCapabilityProcessTests`, with the reason the fix belongs one level up.
-            } else if let rt0 = base.root,
-                      // SOUNDNESS R1872 — a generic-parameter receiver asks κ about its bound (see `foreignGenericBoundR1872`).
-                      case let rt = (base.isVar && !Self.r1872KOff ? foreignGenericBoundR1872(rt0) : nil) ?? rt0,
-                      let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
-                if rt != rt0 { vbHit("R1872", "kappa \(rt0)->\(rt).\(member)") }
+            } else if let rt = base.root, let eff = memberEffect(root: rt, member: member, receiver: ma.base) {
                 directEffects.insert(eff)
                 // SOUNDNESS R1865 — SPEC §2 ⟨0.43⟩: A CHAINED ROW AND A CURATED ENTRY THAT ANSWER ONE CALL ARE
                 // UNIONED. This branch charged the classifier's verb and emitted NO call, so the Driver's §2 join
@@ -14098,7 +14129,7 @@ final class CallCollector: SyntaxVisitor {
                     fnValueAlias[name] = x
                 } else if let r = depMethodRefR1873(v0) {
                     vbHit("R1873", "bind \(name) -> \(r.owner).\(r.member)")
-                    methodRefR1873[name] = "\(r.owner)\u{1}\(r.member)\u{1}\(r.module ?? "")"
+                    methodRefR1873[name] = "\(r.owner)\u{1}\(r.member)\u{1}\(r.module ?? "")\u{1}\(r.typeBase ? "T" : "")"
                 }
             }
             // SOUNDNESS R1498 — `let t = (A(), 1)` / `= l.tup` / `= mkPair()` / `= other`: the binding IS a tuple, so

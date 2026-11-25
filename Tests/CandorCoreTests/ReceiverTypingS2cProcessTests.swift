@@ -21,6 +21,7 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
         public var label: String { "x" }
         open func get(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
         open func delete(_ p: String) -> Int { return p.count }
+        open func patch(_ p: String) -> Int { return p.count }   // a pure κ verb no subclass overrides
         open func tally(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
         open func quiet(_ p: String) -> Int { return p.count }
     }
@@ -30,6 +31,13 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
         public func fetchW(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
     }
     public func makeClient() -> HTTPClient { HTTPClient() }
+    extension HTTPClient {
+        public static func spawn(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+    }
+    public final class LoudClient: HTTPClient {
+        public override func delete(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return p.count }
+    }
+    public struct Box { public init() {}; public func map(_ s: String) -> Int { s.count } }
     """
 
     private static let shell = """
@@ -40,14 +48,16 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
     }
     """
 
-    private static let app = """
+    /// The cells file. `twoImports` adds `import ShellOut` to it: a consumer file importing a κ-dependency module AND a
+    /// blind third-party module (the ordinary file), on which the release hedges a generic-bound member call.
+    private static func app(twoImports: Bool) -> String { """
     import Foundation
     import AsyncHTTPClient
-    import ShellOut
+    \(twoImports ? "import ShellOut" : "")
     open class LocalBase { public init() {}; open func get(_ p: String) -> Int { return p.count } }
     // R1872 — generic bounds
     public func genGet<C: HTTPClient>(_ c: C, _ p: String) -> Int { c.get(p) }
-    public func genDeletePure<C: HTTPClient>(_ c: C, _ p: String) -> Int { c.delete(p) }
+    public func genPatchPure<C: HTTPClient>(_ c: C, _ p: String) -> Int { c.patch(p) }
     public func genTally<C: HTTPClient>(_ c: C, _ p: String) -> Int { c.tally(p) }
     public func genProto<F: Fetching>(_ f: F, _ p: String) -> Int { f.fetchW(p) }
     public func genLocalBound<C: LocalBase>(_ c: C, _ p: String) -> Int { c.get(p) }
@@ -56,14 +66,24 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
     public func mrefTally(_ r: HTTPClient, _ p: String) -> Int { let g = r.tally; return g(p) }
     public func argrefTally(_ r: HTTPClient, _ p: String) -> Int { [p].map(r.tally).first ?? 0 }
     public func argValueControl(_ r: HTTPClient, _ p: String) -> Bool { [p].contains(r.label) }
-    public func frefShell(_ p: String) -> String { let f = shellOut; return f("echo", p) }
-    public func frefNeverCalled(_ p: String) -> Int { let f = shellOut; _ = f; return p.count }
-    public func frefParamControl(_ shellOut: (String, String) -> String, _ p: String) -> Int { let f = shellOut; return f("e", p).count }
+    public func genDeleteOverride<C: HTTPClient>(_ c: C, _ p: String) -> Int { c.delete(p) }   // run with LoudClient(): writes
+    public func staticRef(_ p: String) -> Int { [p].map(HTTPClient.spawn).first ?? 0 }
+    public func unappliedRefKappa(_ p: String) -> Int { let c = makeClient(); return [c].map(HTTPClient.get).count }
+    public func unappliedRefQuiet(_ p: String) -> Int { let c = makeClient(); return [c].map(HTTPClient.quiet).count }
+    public func depMapValue(_ r: HTTPClient) -> Int { Box().map(r.label) }
     // R1455 T4 — element of a factory literal
     public func closTally(_ p: String) -> Int { [makeClient()].map { c in c.tally(p) }.first ?? 0 }
     public func closGet(_ p: String) -> Int { [makeClient()].map { c in c.get(p) }.first ?? 0 }
     public func closShorthand(_ p: String) -> Int { [makeClient()].map { $0.tally(p) }.first ?? 0 }
     public func closIntControl(_ p: String) -> Int { [p.count].map { c in c.signum() }.first ?? 0 }
+    """ }
+
+    private static let shellCells = """
+    import Foundation
+    import ShellOut
+    public func frefShell(_ p: String) -> String { let f = shellOut; return f("echo", p) }
+    public func frefNeverCalled(_ p: String) -> Int { let f = shellOut; _ = f; return p.count }
+    public func frefParamControl(_ shellOut: (String, String) -> String, _ p: String) -> Int { let f = shellOut; return f("e", p).count }
     """
 
     private struct Row { var inferred: Set<String>; var why: Set<String>; var invisible: Set<String> }
@@ -75,7 +95,7 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
         var appDir: URL { root.appendingPathComponent("app") }
     }
 
-    private func make(_ label: String) throws -> Fixture {
+    private func make(_ label: String, twoImports: Bool = false) throws -> Fixture {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("candor-s2c-\(label)-\(UUID().uuidString)")
@@ -101,7 +121,8 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
             targets: [.target(name: "App", dependencies: [.product(name: "AsyncHTTPClient", package: "AsyncHTTPClient"),
                                                           .product(name: "ShellOut", package: "ShellOut")])])
         """)
-        try write("app/Sources/App/app.swift", Self.app)
+        try write("app/Sources/App/app.swift", Self.app(twoImports: twoImports))
+        try write("app/Sources/App/shell.swift", Self.shellCells)
         let fx = Fixture(root: root, bin: bin)
         try FileManager.default.createDirectory(at: fx.depDir, withIntermediateDirectories: true)
         for pkg in ["AsyncHTTPClient", "ShellOut"] {
@@ -157,9 +178,40 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
         let ch = try scan(fx, chained: true, "ch")
         XCTAssertEqual(ch["genGet"]?.inferred, ["Fs", "Net"], "chained: κ ∪ the row (R1865's union), as on `c: HTTPClient`")
         XCTAssertEqual(ch["genTally"]?.inferred, ["Fs"], "chained: the row")
-        XCTAssertEqual(ch["genDeletePure"]?.inferred, ["Net"], "TWIN: κ's permitted over-charge on a pure verb, never Fs")
-        let off = try scan(fx, chained: false, env: ["CANDOR_R1872K_OFF": "1"], "off")
-        XCTAssertNotEqual(off["genGet"]?.inferred.contains("Net"), true, "§1b — the κ arm off: κ no longer answers the bound")
+        XCTAssertEqual(ch["genPatchPure"]?.inferred, ["Net", "Unknown"], "TWIN: κ's permitted over-charge on a pure verb BESIDE the release's walk-miss hedge (a union: nothing removed), never Fs")
+        XCTAssertEqual(nc["genDeleteOverride"]?.inferred, ["Net"], "one import: κ's floor, as `c: HTTPClient` (was ABSENT)")
+    }
+
+    /// FABLE L5 MERGE REVIEW D1 — THE TWO-IMPORT LAYOUT. On a cells file importing the κ-dependency module AND a blind
+    /// third-party module, the release hedged the generic-bound member call (`Unknown {dispatch:HTTPClient.<m>}`), which
+    /// is what discloses an override that writes. κ's verb is a UNION beside that hedge, never a replacement: the first
+    /// cut replaced it and `deny Fs Unknown` went 1→0 over an executed override write.
+    func testOnATwoImportFileTheGenericBoundKeepsTheReleaseHedgeBesideKappa() throws {
+        let fx = try make("gen2", twoImports: true); defer { try? FileManager.default.removeItem(at: fx.root) }
+        let nc = try scan(fx, chained: false, "nc")
+        for fn in ["genGet", "genDeleteOverride"] {
+            XCTAssertEqual(nc[fn]?.inferred.isSuperset(of: ["Net", "Unknown"]), true, "\(fn): κ AND the release's hedge — \(String(describing: nc[fn]))")
+        }
+        XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown genDeleteOverride"), 1,
+                       "GATE — an override that writes stays disclosed (the first cut read exit 0)")
+        let ch = try scan(fx, chained: true, "ch")
+        XCTAssertEqual(ch["genDeleteOverride"]?.inferred.contains("Fs"), true, "chained: the dependency's override row joins")
+    }
+
+    // ── R1873 — a TYPE-base reference handed to a higher-order function (FABLE L5 MERGE REVIEW D2/D3) ──
+
+    func testATypeBaseReferenceIsACallOnlyWhenTheMemberIsStatic() throws {
+        let fx = try make("tbase"); defer { try? FileManager.default.removeItem(at: fx.root) }
+        let nc = try scan(fx, chained: false, "nc")
+        XCTAssertEqual(nc["staticRef"]?.why, ["dispatch:HTTPClient.spawn"],
+                       "`[p].map(HTTPClient.spawn)` runs the static `spawn` per element: disclosed (was ABSENT)")
+        XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown staticRef"), 1, "GATE — over an executed write")
+        // TWINS — an unapplied INSTANCE method yields closures and invokes nothing.
+        XCTAssertNil(nc["unappliedRefKappa"], "`[c].map(HTTPClient.get)` performs nothing: no κ `Net`")
+        XCTAssertNil(nc["unappliedRefQuiet"], "`[c].map(HTTPClient.quiet)` performs nothing: no hedge")
+        // D3 — a dependency's own `map(_ s: String)` takes a VALUE: no member call is formed on the argument.
+        XCTAssertFalse(nc["depMapValue"]?.why.contains("dispatch:HTTPClient.label") ?? false,
+                       "`Box().map(r.label)`: `r.label` is a value, not a reference anything invokes")
     }
 
     // ── R1873 — references ──
