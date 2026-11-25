@@ -3305,6 +3305,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SOUNDNESS R1874 — the supertypes of `et` that a `super.` call can run an EXTERNAL body in: not declared by this scan
     /// (a declared base is the in-scan climb's question), not a protocol (`super` names a class), not a std-pure protocol or
     /// raw-value base. The superclass the source spells first comes first; the rest are the transitive ancestors.
+    /// SOUNDNESS R1868(d) — is `t` a type a DEPENDENCY declares, as far as this scan can tell: a κ dependency root of an imported
+    /// module, a type an imported module's readable sources declare (re-exports followed), or a type a chained report names.
+    /// A platform type the consumer extends (`String`, `View`, `NSObject`) is none of these, and is not hedged as an external
+    /// base on the strength of an extension alone.
+    func dependencyDeclaresType(_ t: String, _ f: FnInfo) -> Bool {
+        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        let imports = effectiveImports(file)
+        if let roots = KAPPA_DEPENDENCY_ROOTS[t], imports.contains(where: { roots.contains($0) }) { return true }
+        for m in imports {
+            var closure = Set<String>(), queue = [m]
+            while let x = queue.popLast() {
+                guard closure.insert(x).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            }
+            if closure.contains(where: { moduleDeclarations($0)?.names[t] == true }) { return true }
+        }
+        return deps.chainedPkgs(importing: fileImports[file] ?? []).contains {
+            deps.mentionedTypes.contains("\($0.pkg)#\(t)") || deps.surface.typeKeysSeen.contains("\($0.pkg)#\(t)") }
+    }
     func externalSuperBases(_ et: String) -> [String] {
         let first = Set((inheritR1499[et] ?? []).filter { $0.first }.map { $0.name })
         return (supertypesOf[et] ?? []).filter {
@@ -5597,10 +5616,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // SOUNDNESS R1872/R1868(d) — A SUPERTYPE THIS PACKAGE MERELY EXTENDS IS STILL EXTERNAL. `localTypes` holds every
                         // extended name (`pushType`), so `class MyClient: HTTPClient` stopped being hedged the moment the same
                         // package wrote `extension HTTPClient { … }` anywhere — the R651/R656 door one hop over. Only a type
-                        // this scan DECLARES shadows (`declaredTypes`); an extension-only one is the dependency's or the
-                        // platform's, and the hedge the un-extended consumer already carries is restored, nothing more.
+                        // this scan DECLARES shadows (`declaredTypes`); an extension-only one that a DEPENDENCY declares
+                        // (`dependencyDeclaresType`) keeps the hedge the un-extended consumer carries. A platform type the
+                        // consumer extends (`String`, `View`, `NSObject`) is left as it was: hedging it is a different, much
+                        // wider question (hundreds of rows on the chained corpus) than a dependency class's subclass.
                         let extSupers = (supertypesOf[type] ?? []).filter {
-                            !localTypes.contains($0) || (!declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0))
+                            !localTypes.contains($0) || (!declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0)
+                                && dependencyDeclaresType($0, f))
                         }.sorted()
                         let hedgeSupers: [String] = {
                             let raw = supertypesOf[type] ?? []
