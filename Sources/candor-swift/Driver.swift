@@ -3302,6 +3302,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let named = all.filter { $0.mods.contains(m) || deps.pkgOfModule(m) == $0.p }
         return named.isEmpty || named.count == all.count ? [all] : [named, all]
     }
+    /// SOUNDNESS R1874 — the supertypes of `et` that a `super.` call can run an EXTERNAL body in: not declared by this scan
+    /// (a declared base is the in-scan climb's question), not a protocol (`super` names a class), not a std-pure protocol or
+    /// raw-value base. The superclass the source spells first comes first; the rest are the transitive ancestors.
+    func externalSuperBases(_ et: String) -> [String] {
+        let first = Set((inheritR1499[et] ?? []).filter { $0.first }.map { $0.name })
+        return (supertypesOf[et] ?? []).filter {
+            $0 != et && !declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0)
+                && !STD_PURE_PROTOCOLS.contains($0) && !RAW_VALUE_BASE_TYPES.contains($0)
+        }.sorted { (first.contains($0) ? 0 : 1, $0) < (first.contains($1) ? 0 : 1, $1) }
+    }
     func dispatchAbstraction(_ owner: String, _ f: FnInfo) -> String? {
         let typeBound = f.enclosingType.flatMap { typeGenericBoundsAll[$0]?[owner] }
         // REACH PROBE (§E1) — "CHANGED 0 is not evidence until REACH is measured". Fires only on the arm
@@ -3312,7 +3322,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 "R550HIT \(f.qual) \(owner)->\(typeBound!)\n".data(using: .utf8)!)
         }
         guard let bound = f.genericBounds[owner] ?? typeBound else { return owner }  // not a type parameter
-        guard !localTypes.contains(bound), !STD_PURE_PROTOCOLS.contains(bound),
+        guard !declaredTypes.contains(bound), !STD_PURE_PROTOCOLS.contains(bound),
               !RAW_VALUE_BASE_TYPES.contains(bound) else { return nil }
         return bound
     }
@@ -5383,11 +5393,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // external base) resolves to nothing, exactly as before.
                 let member = call.leaf
                 if let et = f.enclosingType {
+                    var localSuperResolvedR1874 = false
                     for sup in supertypesOf[et] ?? [] where sup != et {
                         for t in resolveQual("\(sup).\(member)") {
                             edges[f.qual, default: []].insert(t)
                             callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
-                            resolved = true
+                            resolved = true; localSuperResolvedR1874 = true
                         }
                     }
                     // ACROSS THE SCAN BOUNDARY (SPEC §2). The walk above resolves against PROJECT units
@@ -5447,6 +5458,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                     resolved = true
                                 }
                             }
+                        }
+                    }
+                    // SOUNDNESS R1874 — `super.<member>` INTO A SUPERCLASS THIS PACKAGE DOES NOT DECLARE. The arms above
+                    // answer from project units and from a CHAINED report; with neither, "an unresolvable `super`
+                    // resolves to nothing" read as a purity claim over a call that runs the dependency's body
+                    // (`class Over: HTTPClient { override func get(_ p: String) -> Int { super.get(p) } }`, executed Fs,
+                    // ABSENT unchained). It is the typed-receiver question and gets the typed-receiver answers: the κ verb
+                    // of the external base here, and below the R1866 typed arm's disclosure (`super` supplies the owner;
+                    // that arm owns the "is this base a κ-dependency module's type, and is its module uncovered" test, so
+                    // a platform base — `super.init()` into `NSObject` — is NOT disclosed). A DECLARED base is never asked
+                    // (a local unit that answered shadows κ — the GRDB lesson), and a chained row keeps its answer, with
+                    // the κ term added beside it exactly as it is for a typed receiver.
+                    if !localSuperResolvedR1874 {
+                        for sup in externalSuperBases(et) {
+                            if let eff = kappaMember(root: sup, member: member) { direct[f.qual, default: []].insert(eff) }
                         }
                     }
                 }
@@ -5568,7 +5594,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // The NARROWED set decides only the final hedge below: the R657 dependency ask and the Fluent
                         // arm keep the release's set, so no join a chained report answers is skipped (measured: gating
                         // the ask on the narrowed set dropped 19 `dep:` reasons on swift-certificates).
-                        let extSupers = (supertypesOf[type] ?? []).filter { !localTypes.contains($0) }.sorted()
+                        // SOUNDNESS R1872/R1868(d) — A SUPERTYPE THIS PACKAGE MERELY EXTENDS IS STILL EXTERNAL. `localTypes` holds every
+                        // extended name (`pushType`), so `class MyClient: HTTPClient` stopped being hedged the moment the same
+                        // package wrote `extension HTTPClient { … }` anywhere — the R651/R656 door one hop over. Only a type
+                        // this scan DECLARES shadows (`declaredTypes`); an extension-only one is the dependency's or the
+                        // platform's, and the hedge the un-extended consumer already carries is restored, nothing more.
+                        let extSupers = (supertypesOf[type] ?? []).filter {
+                            !localTypes.contains($0) || (!declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0))
+                        }.sorted()
                         let hedgeSupers: [String] = {
                             let raw = supertypesOf[type] ?? []
                             let legacy = extSupers
@@ -6735,9 +6768,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let r1866Owner: String? = call.unqualified
                 ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
                 : call.extOwner
-            if !r1866Off, !resolved, !call.path.hasPrefix("<"), let owner = r1866Owner,
-               owner.first?.isUppercase == true, !declaredTypes.contains(owner),
-               kappaMember(root: owner, member: call.leaf) == nil {
+            // SOUNDNESS R1874 — a `super.<m>` call asks the same question of each EXTERNAL base (see `externalSuperBases`).
+            let r1874Super = !r1866Off && call.extOwner == CallCollector.superMarker && !call.unqualified
+            let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
+                                                   : (r1866Owner.map { [$0] } ?? [])
+            if !r1866Off, !resolved, r1874Super || !call.path.hasPrefix("<") {
+              for owner in r1866Owners where owner.first?.isUppercase == true && !declaredTypes.contains(owner)
+                                          && kappaMember(root: owner, member: call.leaf) == nil {
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
                 let open = effectiveImports(file).filter {
@@ -6762,6 +6799,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")
                 }
+              }
             }
             if Env.trace("CANDOR_R548_PROBE"), !resolved {
                 let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
