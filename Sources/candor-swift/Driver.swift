@@ -330,6 +330,16 @@ func returnDeclKeyOwner(_ k: String) -> String? {
           let dot = k.firstIndex(of: ".") else { return nil }
     return String(k[..<dot])
 }
+/// SOUNDNESS R1868(c) — type names a PLATFORM module declares that neither the κ registry nor the engine's platform tables hold,
+/// by the module that declares them. Read only by the unreadable-κ-dependency disclosure, and only for a file importing the module.
+let platformFrameworkTypeNamesR1868c: [String: Set<String>] = [
+    "Synchronization": ["Mutex", "Atomic", "AtomicLazyReference", "WordPair"],
+    "CryptoKit": ["SHA1", "SHA256", "SHA384", "SHA512", "HMAC", "SymmetricKey", "AES", "ChaChaPoly", "HKDF", "Insecure"],
+    "Crypto": ["SHA1", "SHA256", "SHA384", "SHA512", "HMAC", "SymmetricKey", "AES", "ChaChaPoly", "HKDF", "Insecure"],
+    "Testing": ["Test", "Suite", "Issue", "Confirmation"],
+    "Observation": ["Observable", "ObservationTracking"],
+]
+
 func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepIndex = DepIndex(),
              xcodeLinksByFile: [String: [LocalProductRef]] = [:],
              xcodeModulesByFile: [String: [String]] = [:],
@@ -2964,6 +2974,165 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         moduleDeclCache[m] = out
         return out
     }
+    // ── SOUNDNESS R1868(e) / R1878 — WHAT A DEPENDENCY MODULE'S OWN `typealias`ES NAME ───────────────────────────────────
+    //
+    // `topLevelTypeDeclarations` records an alias NAME as a declared type and nothing about what it spells, so a call on
+    // `r: Client` (`public typealias Client = HTTPClient` in the dependency) was answered by no source: unchained it read
+    // the module's R1866 hedge only because `names["Client"]` was true; chained the join asked `AsyncHTTPClient#Client.get`,
+    // which no report has, and the row was ABSENT over an executed write; with the sources unreadable, ABSENT unchained too.
+    //
+    // The consumer's own aliases already resolve (`x_calias`): `typeAliases` is handed to every `CallCollector`. This is the
+    // same table with the DEPENDENCY's visible aliases added for a file that can NAME them — the modules the file imports
+    // (re-exports followed), never the scan's own targets (`typeAliases` already holds those) — so the collector's whole
+    // receiver machinery (κ verbs, the R1865 marker, the join key, the R1866 disclosure) runs on the aliased type and the
+    // alias is one more SPELLING, resolved where spellings are resolved, not a fifth copy of the dispatch rules.
+    //
+    // NEVER A GUESS: only a `public`/`open` alias (an internal one is not nameable from another module), declared once in
+    // its module with one target, whose name this scan does not itself declare, extend or alias, and which no other imported
+    // module aliases to a DIFFERENT type. A name the engine already treats as a platform or curated name is left alone (a
+    // dependency re-declaring `Data` is a different question). A target spelled through a module (`Files.File`) is stripped
+    // to the type name; the qualifier is kept so the join can ask that module's package (`aliasTargetModules`).
+    let r1868eOff = Env.on("CANDOR_R1868E_OFF")
+    let r1868eProbe = Env.trace("CANDOR_R1868E_PROBE")
+    var moduleAliasCache: [String: (aliases: [String: (target: String, visible: Bool)], conflicting: Set<String>)?] = [:]
+    func moduleAliases(_ m: String) -> (aliases: [String: (target: String, visible: Bool)], conflicting: Set<String>)? {
+        if let c = moduleAliasCache[m] { return c }
+        var out: (aliases: [String: (target: String, visible: Bool)], conflicting: Set<String>)? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var all: [String: (target: String, visible: Bool)] = [:], conflicting = Set<String>(), ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let r = topLevelTypeAliases(source: text)
+                conflicting.formUnion(r.conflicting)
+                for (n, a) in r.aliases {
+                    if let prior = all[n] {
+                        if prior.target != a.target { conflicting.insert(n) }
+                        all[n] = (prior.target, prior.visible || a.visible)
+                    } else { all[n] = a }
+                }
+            }
+            if ok { out = (all, conflicting) }
+        }
+        moduleAliasCache[m] = out
+        return out
+    }
+    /// The modules `file` can NAME through an import: its own imports and every `@_exported import` closure beneath them.
+    func importClosure(_ file: String) -> [String] {
+        var seen = Set<String>(), order: [String] = []
+        var queue = Array((fileImports[file] ?? []).reversed())
+        while let x = queue.popLast() {
+            guard seen.insert(x).inserted else { continue }
+            order.append(x)
+            queue.append(contentsOf: (deps.moduleReexports[x] ?? []).sorted().reversed())
+        }
+        return order
+    }
+    var depAliasFactsCache: [String: (overlay: [String: String], modules: [String])] = [:]
+    /// `overlay`: alias name -> the type name it spells, for the aliases `file` can name. `modules`: the modules those
+    /// aliases' targets are SPELLED through (`Files` for `typealias File = Files.File`), in a stable order.
+    func depAliasFacts(forFile file: String) -> (overlay: [String: String], modules: [String]) {
+        if let c = depAliasFactsCache[file] { return c }
+        var overlay: [String: String] = [:], modules = Set<String>(), banned = Set<String>()
+        if !r1868eOff, !deps.moduleSwiftSources.isEmpty {
+            let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+            let closure = importClosure(file)
+            let moduleNames = Set(closure).union(deps.moduleSwiftSources.keys).union(deps.modulePkgs.keys)
+            for m in closure where !PLATFORM_MODULES.contains(m) && !own.contains(m) {
+                guard let facts = moduleAliases(m) else { continue }
+                for (name, a) in facts.aliases.sorted(by: { $0.key < $1.key }) {
+                    guard a.visible, !facts.conflicting.contains(name) else { if !a.visible || facts.conflicting.contains(name) { banned.insert(name) }; continue }
+                    var segs = a.target.split(separator: ".").map(String.init)
+                    var qualifier: String? = nil
+                    if segs.count > 1, moduleNames.contains(segs[0]) || PLATFORM_MODULES.contains(segs[0]) || KAPPA_MODULES.contains(segs[0]) {
+                        qualifier = segs.removeFirst()
+                    }
+                    let target = segs.joined(separator: ".")
+                    // The module the alias is SPELLED through is a module the join may ask even where no rename is needed
+                    // (`typealias File = Files.File`: the name is already the type's own).
+                    if let q = qualifier, !target.isEmpty { modules.insert(q) }
+                    guard !target.isEmpty, target != name else { continue }
+                    if let prior = overlay[name], prior != target { banned.insert(name); continue }
+                    overlay[name] = target
+                }
+            }
+            for n in banned { overlay[n] = nil }
+            // This scan's own spellings win; a platform or curated name is not re-pointed by a dependency.
+            for n in Array(overlay.keys) where localTypes.contains(n) || declaredTypes.contains(n) || typeAliases[n] != nil
+                || STDLIB_NOMINALS.contains(n) || PLATFORM_VALUE_TYPES.contains(n) || KAPPA_REGISTRY[n] != nil {
+                overlay[n] = nil
+            }
+            if r1868eProbe, !overlay.isEmpty {
+                FileHandle.standardError.write("R1868E file=\(file) \(overlay.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","))\n".data(using: .utf8)!)
+            }
+        }
+        let out = (overlay, modules.sorted())
+        depAliasFactsCache[file] = out
+        return out
+    }
+    var moduleFreeDeclCache: [String: (fns: [String: [FreeFnSignature]], nominal: [String: Bool])?] = [:]
+    func moduleFreeDecls(_ m: String) -> (fns: [String: [FreeFnSignature]], nominal: [String: Bool])? {
+        if let c = moduleFreeDeclCache[m] { return c }
+        var out: (fns: [String: [FreeFnSignature]], nominal: [String: Bool])? = nil
+        if !deps.notSwiftCoverable.contains(m), let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var fns: [String: [FreeFnSignature]] = [:], nominal: [String: Bool] = [:], ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let r = topLevelCalleeDeclarations(source: text)
+                if r.opaque { ok = false; break }
+                for (n, sg) in r.fns { fns[n, default: []].append(contentsOf: sg) }
+                for (n, v) in r.nominal { nominal[n] = (nominal[n] ?? false) || v }
+            }
+            if ok { out = (fns, nominal) }
+        }
+        moduleFreeDeclCache[m] = out
+        return out
+    }
+    /// Could a bare call `name(labels…)` bind to a visible declaration of one of `mods`' own sources? `nil` = a module's sources
+    /// are unreadable (cannot be decided); `labels == nil` (a trailing closure, or not recorded) fits every signature.
+    func moduleBindsBare(_ mods: [String], _ name: String, _ labels: [String?]?) -> Bool? {
+        var undecided = false
+        for m in mods {
+            guard let d = moduleFreeDecls(m) else { undecided = true; continue }
+            if d.nominal[name] == true { return true }
+            if (d.fns[name] ?? []).contains(where: { sg in sg.visible && (labels.map { l in sg.couldAccept(callLabels: l, trailingClosures: 0) } ?? true) }) { return true }
+        }
+        return undecided ? nil : false
+    }
+    var aliasesMergedCache: [String: [String: String]] = [:]
+    /// `typeAliases` plus the dependency aliases `file` can name (this scan's own spelling wins), built once per file.
+    func aliasesWithDependencies(forFile file: String) -> [String: String] {
+        if let c = aliasesMergedCache[file] { return c }
+        let o = depAliasFacts(forFile: file).overlay
+        let out = o.isEmpty ? typeAliases : typeAliases.merging(o) { mine, _ in mine }
+        aliasesMergedCache[file] = out
+        return out
+    }
+    var aiAliasesMergedCache: [String: [String: String]?] = [:]
+    /// The collector's scoped file-alias table (`AiTypeIndex.fileAliases`) with the dependency aliases `file` can name added
+    /// (a name already in the table wins). nil when the file names none, so the caller keeps the shared table untouched.
+    func aiAliasesWithDependencies(forFile file: String, base: [String: String]) -> [String: String]? {
+        if let c = aiAliasesMergedCache[file] { return c }
+        let o = depAliasFacts(forFile: file).overlay
+        let out: [String: String]? = o.isEmpty ? nil : base.merging(o) { mine, _ in mine }
+        aiAliasesMergedCache[file] = out
+        return out
+    }
+    /// SOUNDNESS R1877 / R1878 — THE MODULES THE §2 JOIN MAY ASK, for `file`: the modules it imports, the modules those
+    /// `@_exported import` (a re-exported name is in scope for the importer, and `blindModules` already counts it —
+    /// R827 — but the join asked only the file's own imports, so a covered re-exported module's row was never read and
+    /// the ledger, seeing it covered, said nothing), and the modules a dependency's alias targets are spelled through.
+    /// ADDITIVE: it only widens the candidate set, so a key that answered still answers, and `joinTiers` keeps preferring
+    /// the package the source spells.
+    func joinModules(_ file: String) -> [String] {
+        let imports = fileImports[file] ?? []
+        // Re-exports are followed through EVERY module, covered or not: `effectiveImports` follows only a covered module
+        // (it answers the ledger's question), and a module that is nothing but `@_exported import X` has an empty report,
+        // which makes NO coverage claim — so its re-export was the one not followed.
+        var out = imports, seen = Set(out)
+        for m in importClosure(file) where seen.insert(m).inserted { out.append(m) }
+        for m in depAliasFacts(forFile: file).modules where seen.insert(m).inserted { out.append(m) }
+        return out
+    }
     /// The verdict of the owner proof. `proven` keys a wire entry; `undecided` carries every package that
     /// may own the name and is reached ONLY on evidence that the name IS a dependency's (some candidate
     /// declares it) — it is what the sites below DISCLOSE on; `none` is the release's refusal, unchanged.
@@ -3124,6 +3293,44 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // is not what an unresolved checkout hides, and its types are the platform's — the κ ledger answers for it.
         let declared = declaredByFile[file] ?? []
         return cands.filter { declared.contains($0) && moduleDeclarations($0) == nil }
+    }
+    /// SOUNDNESS R1868(c) — the κ DEPENDENCY modules among `among` (imported, not this scan's, no chained report) whose
+    /// sources are UNREADABLE and which may therefore declare the type `spelled`. `unreadableDepModules`' question for a
+    /// module the blind ledger does not name (`blindModules` excludes `KAPPA_MODULES`): the same exclusion tables, the same
+    /// "a module the file's target DECLARES as a dependency" rule, and one more refusal — a type another imported module's
+    /// READABLE sources declare is that module's, not an unread one's.
+    func unreadableKappaDepModules(of spelled: String, inFile file: String, among: [String], generics: Set<String>) -> Set<String> {
+        var segs = spelled.split(separator: ".").map(String.init)
+        let imports = fileImports[file] ?? []
+        var cands = Set(among)
+        if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
+        guard let name = segs.first, !name.isEmpty, name.first?.isUppercase == true, name != "Self",
+              !PLATFORM_MODULES.contains(name), !KAPPA_MODULES.contains(name),
+              !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name),
+              !generics.contains(name), !typeGenericParamNamesAI.values.contains(where: { $0.contains(name) }),
+              !STDLIB_NOMINALS.contains(name), !STDLIB_PROTOCOLS.contains(name),
+              STDLIB_DIRECT_CONFORMANCES[name] == nil, !PLATFORM_VALUE_TYPES.contains(name),
+              !STD_PURE_PROTOCOLS.contains(name), !PLATFORM_PROTOCOL_NAMES.contains(name)
+        else { return [] }
+        // A name κ already knows as a PLATFORM root (`Bundle`, `FileManager`) is the platform's. So is a name a platform module
+        // this file imports declares and the engine's tables do not hold (`Synchronization.Mutex`, CryptoKit's digests): the
+        // corpus A/B on unreadable sources hedged `Mutex.withLock` and `SHA256.update` for exactly that reason. A DENYLIST, and
+        // it fails toward silence only for a dependency type that spells one of these names.
+        if let e = KAPPA_REGISTRY[name], e.describes.contains(where: { if case .platform = $0 { return true }; return false }) { return [] }
+        for (module, names) in platformFrameworkTypeNamesR1868c where names.contains(name) && imports.contains(module) { return [] }
+        let declared = declaredByFile[file] ?? []
+        let unread = cands.filter { declared.contains($0) && moduleDeclarations($0) == nil }
+        guard !unread.isEmpty else { return [] }
+        // another import's READABLE sources declare the name: it is that module's.
+        for x in imports where !unread.contains(x) && !PLATFORM_MODULES.contains(x) {
+            var closure = Set<String>(), queue = [x]
+            while let y = queue.popLast() {
+                guard closure.insert(y).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[y] ?? [])
+            }
+            if closure.contains(where: { moduleDeclarations($0)?.names[name] == true }) { return [] }
+        }
+        return unread
     }
     /// SOUNDNESS R1071 — the blind dependency modules of `file` whose readable sources declare a PUBLIC member
     /// `member` in an extension of the type `spelled` names (`extension Date { public func stamp() }`), for a
@@ -3296,8 +3503,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// package is asked, because a member can live in a DIFFERENT module than its type — an `extension
     /// RatesCore.Client` in a third package publishes under that package's name — and restricting there
     /// would be the silent direction. Two tiers; the caller stops at the first that answers.
-    func joinTiers(_ file: String, module: String?) -> [[(p: String, mods: [String])]] {
-        let all = deps.chainedPkgs(importing: fileImports[file] ?? []).map { (p: $0.0, mods: $0.1) }
+    func joinTiers(_ file: String, module: String?, bare: (name: String, labels: [String?]?)? = nil) -> [[(p: String, mods: [String])]] {
+        var all = deps.chainedPkgs(importing: joinModules(file)).map { (p: $0.0, mods: $0.1) }   // R1877/R1878
+        // A BARE name that a directly imported module's own free function / type could be the callee of (a re-exporting
+        // wrapper's pure overload `shellOut(cmd:)` beside the re-exported `shellOut(to:at:)`) is not asked of a package
+        // reached ONLY through the re-export — the wire key is arity-blind and would charge the wrapper's pure function
+        // with the other one's effects (S1 merge review D2's twin, `w_over_p`). Where the labels fit the re-exported
+        // declaration too, or its sources are unreadable, the package stays (the union / over-charge direction).
+        if let b = bare {
+            let direct = Set(deps.chainedPkgs(importing: fileImports[file] ?? []).map { $0.pkg })
+            if all.contains(where: { !direct.contains($0.p) }), moduleBindsBare(Array(fileImports[file] ?? []), b.name, b.labels) == true {
+                all = all.filter { entry in
+                    direct.contains(entry.p) || entry.mods.contains { moduleBindsBare([$0], b.name, b.labels) != false }
+                }
+            }
+        }
         guard let m = module else { return [all] }
         let named = all.filter { $0.mods.contains(m) || deps.pkgOfModule(m) == $0.p }
         return named.isEmpty || named.count == all.count ? [all] : [named, all]
@@ -4704,7 +4924,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
                                mixedArmNamesR1714: Set(aliasCondPathsR1714.intersection(declCondPathsR1714.subtracting(declUncondPathsR1714))
                                    .map { $0.split(separator: ".").last.map(String.init) ?? $0 }),
-                               typeAliases: typeAliases, typeAliasArms: typeAliasArms,
+                               typeAliases: aliasesWithDependencies(forFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1868(e)
+                               typeAliasArms: typeAliasArms,
                                fnTypeAliases: fnTypeAliases,
                                enclosingMembers: f.enclosingType.map { t in
                                    membersVisibleCache[t] ?? {
@@ -4714,12 +4935,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                opaqueSeqBuilders: opaqueSeqBuilders, seqBuilderConcrete: seqBuilderConcrete,
                                closureFields: closureFields, mutableClosureFields: mutableClosureFields,
                                moduleConstStrings: globalConstStrings,
-                               importedModules: Set(fileImports[String(f.loc.prefix { $0 != ":" })] ?? []),
+                               importedModules: Set(joinModules(String(f.loc.prefix { $0 != ":" }))),   // R1877/R1878: a re-exported module, and an alias target's module, is nameable
                                projectModules: projectModules, deps: deps,
                                ai: {
                                    guard aiBase.enabled else { return aiBase }
                                    var a = aiBase
                                    a.file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })   // R1497
+                                   if let m = aiAliasesWithDependencies(forFile: a.file ?? "", base: aiBase.fileAliases) { a.fileAliases = m }   // R1868(e)
                                    let path = f.enclosingTypePath ?? f.enclosingType
                                    a.enclosingTypePath = path
                                    var g = Set(f.genericBounds.keys)
@@ -6630,7 +6852,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // that resolved to this package, because the `owner == m` arm below asks about the
                 // MODULE spelling, not the package.
                 var hitKey: String? = nil   // R826 — the key that answered, for a convention owner's publish
-                let memberTiers = joinTiers(file, module: call.unqualified ? nil : call.ownerModule)
+                let memberTiers = joinTiers(file, module: call.unqualified ? nil : call.ownerModule,
+                                            bare: call.unqualified && !call.argRef ? (call.path, call.argLabels) : nil)
                 for (ti, tier) in memberTiers.enumerated() where hits.isEmpty {
                 for (p, mods) in tier {
                     // SOUNDNESS R1463 — `rawValue` read bare inside an enum with a RAW TYPE is that enum's own
@@ -6812,28 +7035,59 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
                                                    : (r1866Owner.map { [$0] } ?? [])
             if !r1866Off, !resolved, r1874Super || !call.path.hasPrefix("<") {
-              for owner in r1866Owners where owner.first?.isUppercase == true && !declaredTypes.contains(owner)
-                                          && kappaMember(root: owner, member: call.leaf) == nil {
+              for rawOwner in r1866Owners where rawOwner.first?.isUppercase == true && !declaredTypes.contains(rawOwner) {
+                // SOUNDNESS R1868(c) — A GENERIC PARAMETER IS ITS BOUND (`<F: Fetching>`, `f.fetchW(p)`): the same
+                // resolution the ordinary join's key uses (`dispatchAbstraction`), so the disclosure and the key name
+                // one abstraction. A bound this scan declares, or a std-pure one, resolves to nil and keeps the raw
+                // spelling, which is what this arm asked before.
+                let owner: String = dispatchAbstraction(rawOwner, f) ?? rawOwner
+                guard owner.first?.isUppercase == true, !declaredTypes.contains(owner),
+                      kappaMember(root: owner, member: call.leaf) == nil else { continue }
+                // SOUNDNESS R1868(a) — A NESTED TYPE (`HTTPClient.Inner`) IS KEYED BY ITS HEAD: a type the dependency
+                // declares owns everything declared inside it, and the declaration walker records top-level names only.
+                // The head is the question; a head THIS scan declares is its own (the nested type is then a local one).
+                let segs = owner.split(separator: ".").map(String.init)
+                let head = segs.first ?? owner
+                guard !declaredTypes.contains(head) else { continue }
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
                 let open = effectiveImports(file).filter {
                     KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
-                let byRoot = KAPPA_DEPENDENCY_ROOTS[owner].map { roots in open.contains { roots.contains($0) } } ?? false
+                let byRoot = KAPPA_DEPENDENCY_ROOTS[head].map { roots in open.contains { roots.contains($0) } } ?? false
+                func openClosure(_ m: String) -> Set<String> {
+                    var closure = Set<String>(), queue = [m]
+                    while let x = queue.popLast() {
+                        guard closure.insert(x).inserted else { continue }
+                        queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                    }
+                    return closure
+                }
                 let byModule: Bool = {
                     guard !byRoot, !r1866mOff, !open.isEmpty else { return false }
-                    for m in open {
-                        var closure = Set<String>(), queue = [m]
-                        while let x = queue.popLast() {
-                            guard closure.insert(x).inserted else { continue }
-                            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
-                        }
-                        if closure.contains(where: { moduleDeclarations($0)?.names[owner] == true }) { return true }
-                    }
+                    for m in open where openClosure(m).contains(where: { moduleDeclarations($0)?.names[head] == true }) { return true }
                     return false
                 }()
-                if byRoot || byModule {
+                // SOUNDNESS R1868(b) — A MEMBER THE DEPENDENCY ADDS BY EXTENSION TO A TYPE IT DOES NOT DECLARE
+                // (`extension String { func slurp }`): the receiver is a platform type, so neither the roots nor the
+                // module's declared names own it, and the call read pure. Positive evidence only — a readable module whose
+                // `public` extension of the receiver's type declares THIS member. The member may be the platform's own
+                // (a name collision), which over-discloses; that is the direction a disclosure may err in.
+                let byExtension: Bool = {
+                    guard !byRoot, !byModule, !open.isEmpty, let leafType = segs.last else { return false }
+                    for m in open where openClosure(m).contains(where: { moduleExtensionMembers($0)?[leafType]?[call.leaf] == true }) { return true }
+                    return false
+                }()
+                // SOUNDNESS R1868(c) — A TYPE THE KAPPA DEPENDENCY MODULE MAY DECLARE BUT WHOSE SOURCES ARE UNREADABLE
+                // (not fetched): only the κ roots are known without them, so a non-root type, an alias, a protocol or a
+                // subclass of a root read pure. The type is not this scan's, not a generic parameter, and not a
+                // platform/stdlib name the engine's tables hold, and no OTHER imported module's readable sources declare it.
+                let byUnreadable: Bool = {
+                    guard !byRoot, !byModule, !byExtension, !open.isEmpty else { return false }
+                    return !unreadableKappaDepModules(of: owner, inFile: file, among: open, generics: Set(f.genericBounds.keys)).isEmpty
+                }()
+                if byRoot || byModule || byExtension || byUnreadable {
                     if r1866Probe {
-                        FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : "module") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                        FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : byModule ? "module" : byExtension ? "ext" : "unreadable") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
                     }
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")

@@ -4763,7 +4763,10 @@ final class CallCollector: SyntaxVisitor {
             let wireInit = deps.lookup("\(p)#\(name).init") != nil
             let ev = any(mods)
             if rels.contains(.same) {
-                if wireFree || wireInit || ev == true { same = true; why.append("same:\(p)") }
+                // The wire's key is arity-blind: where the entity's own READABLE sources show no declaration this call's labels can
+                // bind (`shellOut(cmd:)` beside ShellOut's `shellOut(to:at:)`, reached through a re-export), the entity is not the
+                // callee, and unioning its row would charge another function's effects (R1877: the wrapper's pure overload).
+                if ((wireFree || wireInit) && ev != false) || ev == true { same = true; why.append("same:\(p)") }
             } else if ev == true || (ev == nil && (wireFree || wireInit)) {
                 differentProof = true; why.append("different:\(p)")
             } else if ev == false && wireFree {

@@ -808,6 +808,57 @@ public func topLevelTypeDeclarations(source: String) -> (names: [String: Bool], 
     return (names, opaque)
 }
 
+/// SOUNDNESS R1868(e) / R1878 — the FILE-SCOPE `typealias` declarations of one source file: alias name -> the type NAME the
+/// alias spells (`typeName`'s reading, the same one `DeclCollector` records for the consumer's own aliases), whether it is
+/// visible to an importer (`public`/`open` ONLY: an internal alias is not nameable from another module, `package` is not
+/// nameable from another package), and the names declared more than once with a different target or inside an `#if`
+/// (`conflicting`: an alias a reader cannot pick a single target for is not resolved — never a guess).
+///
+/// A function-typed, tuple-typed or otherwise nameless target is not recorded (no single type to resolve to). A target
+/// spelled through a module (`Files.File`) is returned DOTTED, exactly as `typeName` yields it; the reader decides which
+/// leading segment is a module. `opaque` as in `topLevelTypeDeclarations`.
+public func topLevelTypeAliases(source: String) -> (aliases: [String: (target: String, visible: Bool)],
+                                                     conflicting: Set<String>, opaque: Bool) {
+    var out: [String: (target: String, visible: Bool)] = [:]
+    var conflicting = Set<String>()
+    var opaque = false
+    func note(_ x: TypeAliasDeclSyntax, conditional: Bool) {
+        let mods = x.modifiers.map { $0.name.text }
+        if mods.contains("private") || mods.contains("fileprivate") { return }
+        // A GENERIC alias (`typealias CaseKeyPath<Root, Value> = KeyPath<Root, Case<Value>>`) is not resolved: `typeName` drops
+        // the arguments, so the target names a type the call is not on (corpus A/B: a chained row's own hedge was lost).
+        if x.genericParameterClause != nil { conflicting.insert(x.name.text); return }
+        guard let target = typeName(x.initializer.value).name else { conflicting.insert(x.name.text); return }
+        let vis = mods.contains("public") || mods.contains("open")
+        if let prior = out[x.name.text] {
+            if prior.target != target || conditional { conflicting.insert(x.name.text) }
+            out[x.name.text] = (prior.target, prior.visible || vis)
+        } else {
+            out[x.name.text] = (target, vis)
+            if conditional { conflicting.insert(x.name.text) }
+        }
+    }
+    func walk(_ items: CodeBlockItemListSyntax, conditional: Bool) {
+        for item in items { if let d = item.item.as(DeclSyntax.self) { walkDecl(d, conditional: conditional) } }
+    }
+    func walkDecl(_ d: DeclSyntax, conditional: Bool) {
+        if let x = d.as(TypeAliasDeclSyntax.self) { note(x, conditional: conditional) }
+        else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+        else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st, conditional: true)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl, conditional: true) }
+                case nil: break
+                default: opaque = true
+                }
+            }
+        }
+    }
+    walk(Parser.parse(source: source).statements, conditional: false)
+    return (out, conflicting, opaque)
+}
+
 /// SOUNDNESS R1071 — the members a file's top-level EXTENSIONS declare, by the extended type's simple name:
 /// `extension Date { public func stamp() }` -> `["Date": ["stamp": true]]`. The flag is whether the member is
 /// visible to an importer (`public`/`open` on the member, or a `public`/`open` extension the member does not
