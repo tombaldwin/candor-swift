@@ -46,6 +46,23 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
         import Foundation
         public func connect(host p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return 1 }
         """,
+        // S1 merge review D1 — a FACADE: re-publishes Files' type by typealias, declares nothing of its own.
+        "FilesFacade": """
+        import Files
+        public typealias File = Files.File
+        """,
+        // D2 — re-exports ShellOut AND adds a pure same-named overload with labels the ShellOut call cannot bind.
+        "ShellWrap": """
+        @_exported import ShellOut
+        @discardableResult
+        public func shellOut(cmd: String) -> String { return cmd }
+        """,
+        // D3 — a free `connect` whose middle label is a keyword, so it is declared with backticks.
+        "ConnB": """
+        import Foundation
+        @discardableResult
+        public func connect(_ fd: Int32, `in` tag: String, _ len: Int32) -> Int32 { FileManager.default.createFile(atPath: tag, contents: nil); return 0 }
+        """,
         "ConnG": """
         import Foundation
         public func connect(_ a: Int32, _ b: UnsafePointer<sockaddr>, _ c: socklen_t) -> Int32 { FileManager.default.createFile(atPath: "/tmp/g", contents: nil); return 0 }
@@ -74,6 +91,20 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
         public func posixF(_ fd: Int32, _ sa: UnsafePointer<sockaddr>, _ len: socklen_t) -> Int32 { connect(fd, sa, len) }
         public func depF(_ p: String) -> Int { connect(host: p) }
         """,
+        "FilesFacade": """
+        import FilesFacade
+        public func t_ctor_w(_ p: String) throws -> String { try File(path: p).path }
+        public func t_ctorq_w(_ p: String) throws -> String { try FilesFacade.File(path: p).path }
+        """,
+        "ShellWrap": """
+        import ShellWrap
+        public func w_free_kx(_ p: String) -> String { shellOut(to: "echo", at: p) }
+        public func w_over_p(_ p: String) -> String { shellOut(cmd: p) }
+        """,
+        "ConnB": """
+        import ConnB
+        public func b_conn_w(_ p: String) -> Int32 { connect(3, in: p, 0) }
+        """,
         "ConnG": """
         import Darwin
         import ConnG
@@ -85,6 +116,9 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
         var depDir: URL { root.appendingPathComponent("depR") }
         var appDir: URL { root.appendingPathComponent("app") } }
 
+    /// Which other fixture packages a dependency itself depends on (the facade and the wrapper re-publish another).
+    private static let depDeps: [String: [String]] = ["FilesFacade": ["Files"], "ShellWrap": ["ShellOut"]]
+
     private func make(_ dep: String) throws -> Fixture {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-s1-\(dep)-\(UUID().uuidString)")
@@ -93,26 +127,35 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
             try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
             try text.write(to: u, atomically: true, encoding: .utf8)
         }
-        try write("\(dep)/Package.swift", """
-        // swift-tools-version:5.9
-        import PackageDescription
-        let package = Package(name: "\(dep)", products: [.library(name: "\(dep)", targets: ["\(dep)"])],
-            targets: [.target(name: "\(dep)")])
-        """)
-        try write("\(dep)/Sources/\(dep)/lib.swift", Self.deps[dep]!)
+        let all = (Self.depDeps[dep] ?? []) + [dep]
+        for d in all {
+            let dd = Self.depDeps[d] ?? []
+            try write("\(d)/Package.swift", """
+            // swift-tools-version:5.9
+            import PackageDescription
+            let package = Package(name: "\(d)", products: [.library(name: "\(d)", targets: ["\(d)"])],
+                dependencies: [\(dd.map { ".package(path: \"../\($0)\")" }.joined(separator: ", "))],
+                targets: [.target(name: "\(d)", dependencies: [\(dd.map { ".product(name: \"\($0)\", package: \"\($0)\")" }.joined(separator: ", "))])])
+            """)
+            try write("\(d)/Sources/\(d)/lib.swift", Self.deps[d]!)
+        }
         try write("app/Package.swift", """
         // swift-tools-version:5.9
         import PackageDescription
         let package = Package(name: "App", products: [.library(name: "App", targets: ["App"])],
-            dependencies: [.package(path: "../\(dep)")],
-            targets: [.target(name: "App", dependencies: [.product(name: "\(dep)", package: "\(dep)")])])
+            dependencies: [\(all.map { ".package(path: \"../\($0)\")" }.joined(separator: ", "))],
+            targets: [.target(name: "App", dependencies: [\(all.map { ".product(name: \"\($0)\", package: \"\($0)\")" }.joined(separator: ", "))])])
         """)
         try write("app/Sources/App/app.swift", Self.apps[dep]!)
         let fx = Fixture(root: root, bin: bin, dep: dep)
         try FileManager.default.createDirectory(at: fx.depDir, withIntermediateDirectories: true)
-        let rd = try ProcessHarness.run(bin, [root.appendingPathComponent(dep).path, "--out", fx.depDir.appendingPathComponent("r").path])
-        XCTAssertEqual(rd.code, 0, "dependency scan must succeed — stderr: \(rd.err)")
-        for extra in try FileManager.default.contentsOfDirectory(atPath: fx.depDir.path) where extra != "r.\(dep).Swift.json" {
+        var keep: Set<String> = []
+        for d in all {
+            let rd = try ProcessHarness.run(bin, [root.appendingPathComponent(d).path, "--out", fx.depDir.appendingPathComponent("r\(d)").path])
+            XCTAssertEqual(rd.code, 0, "dependency scan must succeed — stderr: \(rd.err)")
+            keep.insert("r\(d).\(d).Swift.json")
+        }
+        for extra in try FileManager.default.contentsOfDirectory(atPath: fx.depDir.path) where !keep.contains(extra) {
             try FileManager.default.removeItem(at: fx.depDir.appendingPathComponent(extra))
         }
         return fx
@@ -120,7 +163,7 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
 
     /// Rewrite the producer report so `fn`'s row loses `drop` — an under-reporting producer (R1867's shape).
     private func doctor(_ fx: Fixture, fn: String, drop: String) throws {
-        let u = fx.depDir.appendingPathComponent("r.\(fx.dep).Swift.json")
+        let u = fx.depDir.appendingPathComponent("r\(fx.dep).\(fx.dep).Swift.json")
         var d = try JSONSerialization.jsonObject(with: Data(contentsOf: u)) as! [String: Any]
         var n = 0
         d["functions"] = ((d["functions"] as? [[String: Any]]) ?? []).map { f -> [String: Any] in
@@ -148,8 +191,8 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
         return rows
     }
 
-    private func gate(_ fx: Fixture, chained: Bool, _ deny: String) throws -> Int32 {
-        var env: [String: String] = [:]
+    private func gate(_ fx: Fixture, chained: Bool, _ deny: String, env extra: [String: String] = [:]) throws -> Int32 {
+        var env = extra
         if chained { env["CANDOR_DEPS"] = fx.depDir.path }
         let pol = fx.root.appendingPathComponent("p-\(UUID().uuidString).policy")
         try "\(deny)\n".write(to: pol, atomically: true, encoding: .utf8)
@@ -262,5 +305,59 @@ final class KappaFreeNameUnionProcessTests: XCTestCase {
         XCTAssertEqual(kappaRelation(name: "LLM", module: "LangChain"), .unknown,
                        "an unverified module list forms no identity either way")
         XCTAssertNil(kappaRelation(name: "notKappa", module: "X"))
+    }
+
+    // ── S1 merge review: the proof is about the CALLEE, not the name (D1–D3), each pinned beside its pure twin ──
+    // Bodies are the review fixture's, executed there (`fableagent-l2review/exec/truth.tsv`): Files' `File.init` spawns
+    // (`.i`) and writes (`.f0`); ShellOut's `shellOut(to:at:)` spawns and writes; ShellWrap's `shellOut(cmd:)` is pure;
+    // ConnB's `connect(_:in:_:)` writes a file and opens no socket.
+
+    func testD1AFacadeTypealiasIsTheEntityNotADifferentOne() throws {
+        let fx = try make("FilesFacade"); defer { try? FileManager.default.removeItem(at: fx.root) }
+        for chained in [false, true] {
+            let rows = try scan(fx, chained: chained)
+            for c in ["t_ctor_w", "t_ctorq_w"] {
+                XCTAssertTrue(rows[c]?.inferred.contains("Fs") ?? false,
+                              "\(c) chained=\(chained): `typealias File = Files.File` declares no type of its own; the call "
+                              + "reaches Files' `File.init`, so κ's Fs stays (0.43.0's reading). The lane's first cut read "
+                              + "`[] inv:FilesFacade` here — a withdrawal from the κ entity itself")
+            }
+            XCTAssertEqual(try gate(fx, chained: chained, "deny Fs t_ctor_w"), 1)
+        }
+    }
+
+    func testD2AReexportOfTheEntityKeepsKappaAndTheBindingOverloadIsItsOwn() throws {
+        let fx = try make("ShellWrap"); defer { try? FileManager.default.removeItem(at: fx.root) }
+        for chained in [false, true] {
+            let rows = try scan(fx, chained: chained)
+            XCTAssertTrue(rows["w_free_kx"]?.inferred.contains("Exec") ?? false,
+                          "chained=\(chained): `shellOut(to:at:)` cannot bind ShellWrap's `shellOut(cmd:)` and reaches ShellOut's "
+                          + "through `@_exported import`; κ's Exec stays. The first cut read ABSENT chained — silent")
+            XCTAssertFalse(rows["w_over_p"]?.inferred.contains("Exec") ?? false,
+                           "PURE TWIN chained=\(chained): `shellOut(cmd:)` binds ShellWrap's own pure overload, and ShellOut's "
+                           + "readable `shellOut(to:at:)` cannot bind it, so κ must not charge it")
+            XCTAssertEqual(try gate(fx, chained: chained, "deny Exec w_free_kx"), 1)
+        }
+    }
+
+    func testD3ABacktickedLabelBindsAndStillShadowsPosixConnect() throws {
+        let fx = try make("ConnB"); defer { try? FileManager.default.removeItem(at: fx.root) }
+        XCTAssertEqual(try scan(fx, chained: true)["b_conn_w"]?.inferred, ["Fs"],
+                       "`connect(3, in: p, 0)` binds ConnB's backticked `in` label; R649's shadow applies and the row's Fs "
+                       + "answers. The first cut compared the label with its backticks and read ['Net'] — Fs silent")
+        XCTAssertEqual(try gate(fx, chained: true, "deny Fs b_conn_w"), 1)
+    }
+
+    func testR1876KillSwitchRestoresTheBaseNameShadow() throws {
+        let fx = try make("ConnF"); defer { try? FileManager.default.removeItem(at: fx.root) }
+        XCTAssertEqual(try scan(fx, chained: true, env: ["CANDOR_R1876_OFF": "1"])["posixF"]?.inferred, ["Fs"],
+                       "§1b: `CANDOR_R1876_OFF=1` restores pre-S1 R649 — the dependency's `connect` shadows by base name")
+    }
+
+    func testBacktickedNamesAreUnescaped() {
+        let r = topLevelCalleeDeclarations(source: "public func f(_ a: Int, `in` t: String) {}\npublic typealias File = X.File\npublic struct S {}")
+        XCTAssertEqual(r.fns["f"]?.first?.labels, [nil, "in"])
+        XCTAssertNil(r.nominal["File"], "a typealias is not a nominal declaration")
+        XCTAssertEqual(r.nominal["S"], true)
     }
 }

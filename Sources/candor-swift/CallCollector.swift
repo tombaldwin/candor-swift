@@ -4606,44 +4606,68 @@ final class CallCollector: SyntaxVisitor {
         case shadow
     }
 
-    /// SOUNDNESS R1871 §1b KILL SWITCH — the one NON-ADDITIVE half of stage S1: κ withdrawn where a declaring module is
-    /// PROVEN a different entity than the third-party package κ describes (a vendored `ShellKit.shellOut`). With it set
-    /// every such site keeps the pre-S1 route (κ fires). The union half is additive and has no switch.
+    /// SOUNDNESS R1871 §1b KILL SWITCH — the NON-ADDITIVE third-party half of stage S1: κ withdrawn where a module is
+    /// PROVEN to declare the callee and is a different entity than the package κ describes (a vendored
+    /// `ShellKit.shellOut`). With it set every such site keeps the pre-S1 route (κ fires).
     static let r1871vOff = Env.on("CANDOR_R1871V_OFF")
+    /// SOUNDNESS R1876 §1b KILL SWITCH — the NON-ADDITIVE platform half: a chained declarer whose readable labels
+    /// cannot bind the call no longer shadows a platform κ name (a dependency's row `Fs` is no longer attached to POSIX
+    /// `connect(fd, a, len)`), and an unreadable declarer is unioned. With it set the platform route is pre-S1 R649:
+    /// shadow exactly when `depShadows`.
+    static let r1876Off = Env.on("CANDOR_R1876_OFF")
     /// Reach probe: one `S1ROUTE` line per κ free-name site whose route is not `kappaOnly`, with the reason.
     static let s1Probe = Env.trace("CANDOR_S1_PROBE")
 
-    /// Readable dependency sources, per module: file-scope free functions (with signatures) and type names. `nil` =
-    /// the module's sources are not readable (or a macro / unread `#if` shape makes the walk incomplete), so nothing
-    /// may be concluded from silence. Cached for the whole scan (a module's sources do not change mid-scan).
-    nonisolated(unsafe) static var depDeclCacheS1: [String: (fns: [String: [FreeFnSignature]], types: [String: Bool])?] = [:]
-    func depModuleDeclsS1(_ m: String) -> (fns: [String: [FreeFnSignature]], types: [String: Bool])? {
+    /// Readable dependency sources, per module: file-scope free functions (with signatures) and NOMINAL types (never a
+    /// `typealias`). `nil` = the sources are not readable (or a macro / unread `#if` shape makes the walk incomplete),
+    /// so nothing may be concluded from them. Cached for the whole scan.
+    nonisolated(unsafe) static var depDeclCacheS1: [String: (fns: [String: [FreeFnSignature]], nominal: [String: Bool])?] = [:]
+    func depModuleDeclsS1(_ m: String) -> (fns: [String: [FreeFnSignature]], nominal: [String: Bool])? {
         if let c = Self.depDeclCacheS1[m] { return c }
-        var out: (fns: [String: [FreeFnSignature]], types: [String: Bool])? = nil
+        var out: (fns: [String: [FreeFnSignature]], nominal: [String: Bool])? = nil
         if !deps.notSwiftCoverable.contains(m), let files = deps.moduleSwiftSources[m], !files.isEmpty {
-            var fns: [String: [FreeFnSignature]] = [:], types: [String: Bool] = [:], ok = true
+            var fns: [String: [FreeFnSignature]] = [:], nominal: [String: Bool] = [:], ok = true
             for path in files {
                 guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
-                let f = topLevelFreeFunctions(source: text), t = topLevelTypeDeclarations(source: text)
-                if f.opaque || t.opaque { ok = false; break }
-                for (n, s) in f.fns { fns[n, default: []].append(contentsOf: s) }
-                for (n, v) in t.names { types[n] = (types[n] ?? false) || v }
+                let r = topLevelCalleeDeclarations(source: text)
+                if r.opaque { ok = false; break }
+                for (n, sg) in r.fns { fns[n, default: []].append(contentsOf: sg) }
+                for (n, v) in r.nominal { nominal[n] = (nominal[n] ?? false) || v }
             }
-            if ok { out = (fns, types) }
+            if ok { out = (fns, nominal) }
         }
         Self.depDeclCacheS1[m] = out
         return out
     }
 
-    /// The argument labels of a call, in order (`nil` = unlabelled), and its trailing-closure count.
+    /// The argument labels of a call, in order (`nil` = unlabelled; backticks removed, D3), and its trailing-closure
+    /// count.
     private func callLabelsS1(_ node: FunctionCallExprSyntax) -> ([String?], Int) {
-        let labels = node.arguments.map { $0.label?.text }
+        let labels = node.arguments.map { $0.label.map { unescapedSwiftName($0.text) } }
         let trailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
         return (labels, trailing)
     }
 
+    /// `ms` and every module they `@_exported import`, transitively (the engine's own `moduleReexports`).
+    private func reexportClosureS1(_ ms: [String]) -> Set<String> {
+        var seen = Set<String>(), queue = ms
+        while let m = queue.popLast() {
+            guard seen.insert(m).inserted else { continue }
+            queue.append(contentsOf: deps.moduleReexports[m] ?? [])
+        }
+        return seen
+    }
+
     /// The route for a κ-answered free name (`name`, as written; `alias` = `dealias(name)`, the κ key), spelled bare
     /// (`qualifier == nil`) or module-qualified (`Mod.name(…)`, `qualifier == "Mod"`).
+    ///
+    /// **THE PROOF IS ABOUT THE CALLEE, NOT THE NAME** (S1 merge review D1–D3). A module is a DIFFERENT entity's
+    /// declarer only when its readable sources hold a declaration THIS call can reach: a NOMINAL type of the name (for a
+    /// ctor), or a visible free function whose argument labels can bind the call. A `typealias` declares nothing new
+    /// (a facade's `typealias File = Files.File` is Files' type); a same-named overload whose labels cannot bind is
+    /// another function; and where the entity's own module is in scope through `@_exported import` and the sources
+    /// cannot rule its declaration out, the call may reach the entity — so κ stays. Every doubt resolves to the pre-S1
+    /// answer or to the union, never to a withdrawal.
     func kappaFreeRoute(_ name: String, alias: String, _ node: FunctionCallExprSyntax, qualifier: String?) -> KappaFreeRoute {
         let (labels, trailing) = callLabelsS1(node)
         let platformOnly = kappaIsPlatformOnly(alias)
@@ -4654,106 +4678,116 @@ final class CallCollector: SyntaxVisitor {
             }
             return r
         }
-        // A κ name no registry entry covers keeps the pre-S1 answer (the registry tests require every κ name to have
-        // one, so this is a guard, not a path).
         guard KAPPA_REGISTRY[alias] != nil else {
             return qualifier == nil && depShadows(name) ? .shadow : .kappaOnly
         }
-        // Does module `m` (of chained package `p`, or unchained when `p == nil`) DECLARE this name for this call?
-        // `true` declares, `false` provably does not, `nil` cannot tell.
-        //   • PLATFORM entries keep R649's declarer set exactly — a chained report's one-segment qual
-        //     (`declaresFreeName`) — and only NARROW it: where the module's readable sources show every visible
-        //     free function of that name has a label set this call cannot bind, the declaration is another function
-        //     (R1876). Where they cannot be read, the wire carries no labels, so it is undecided.
-        //   • THIRD-PARTY entries: a declaration on the wire, or a visible file-scope function or type in the
-        //     module's readable sources (a pure function has no report row, and is still the callee).
-        func declares(chainedPkg p: String?, module m: String) -> Bool? {
-            let src = depModuleDeclsS1(m)
-            let wire = p.map { deps.declaresFreeName("\($0)#\(name)") || deps.lookup("\($0)#\(name).init") != nil
-                || deps.surface.typeKeysSeen.contains("\($0)#\(name)") } ?? false
-            let srcType = src?.types[name] == true
-            let srcSigs = src?.fns[name]?.filter { $0.visible } ?? []
-            if platformOnly {
-                guard p != nil, deps.declaresFreeName("\(p!)#\(name)") else { return false }
-                if !srcType, !srcSigs.isEmpty {
-                    let binds = srcSigs.contains { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }
-                    if !binds, Self.s1Probe {
-                        FileHandle.standardError.write("S1ROUTE \(name) R1876-unbindable \(p!)/\(m)\n".data(using: .utf8)!)
-                    }
-                    return binds
+        /// Does module `m`'s READABLE source declare a callee this call reaches? `true` / `false` (readable, and no
+        /// such declaration — a typealias or an unbindable overload included), `nil` (not readable).
+        func srcReaches(_ m: String) -> Bool? {
+            guard let src = depModuleDeclsS1(m) else { return nil }
+            if src.nominal[name] == true { return true }
+            let sigs = src.fns[name]?.filter { $0.visible } ?? []
+            return sigs.contains { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }
+        }
+        func any(_ ms: [String]) -> Bool? {
+            var r: Bool? = false
+            for m in ms { switch srcReaches(m) { case true?: return true; case nil: r = nil; case false?: break } }
+            return r
+        }
+        func rel(_ m: String) -> KappaRelation? { kappaRelation(name: alias, module: m) }
+        // ── platform entries (R649 / R1876) ──
+        if platformOnly {
+            guard qualifier == nil else { return .kappaOnly }
+            if Self.r1876Off { return depShadows(name) ? .shadow : .kappaOnly }
+            var bind = false, undecided = false
+            for (p, mods) in deps.chainedPkgs(importing: Array(importedModules)) where deps.declaresFreeName("\(p)#\(name)") {
+                // R649's declarer set, narrowed only where the readable labels show the declaration is another
+                // function. Labels on the wire do not exist, so an unreadable declarer is undecided.
+                var sawSigs = false, binds = false, readable = true
+                for m in mods {
+                    guard let src = depModuleDeclsS1(m) else { readable = false; continue }
+                    if src.nominal[name] == true { binds = true }
+                    let sigs = src.fns[name]?.filter { $0.visible } ?? []
+                    if !sigs.isEmpty { sawSigs = true }
+                    if sigs.contains(where: { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }) { binds = true }
                 }
-                return src == nil ? nil : true
+                if binds { bind = true }
+                else if sawSigs && readable {
+                    if Self.s1Probe { FileHandle.standardError.write("S1ROUTE \(name) R1876-unbindable \(p)/\(mods.joined(separator: ","))\n".data(using: .utf8)!) }
+                } else if readable { bind = true }     // a global / internal declaration: R649's shadow, as before
+                else { undecided = true }
             }
-            if wire || srcType || !srcSigs.isEmpty { return true }
-            return (p == nil && src == nil) ? nil : false
+            if bind { return probe(.shadow, "platform-signature") }
+            return undecided ? probe(.union, "platform-unreadable") : .kappaOnly
+        }
+        guard knownPackage else { return qualifier == nil && depShadows(name) ? .shadow : .kappaOnly }
+        // The entity in scope, directly or through a re-export, and whether its readable sources rule out that this
+        // call reaches it (`entityReaches == false`). Unreadable → nil → it may.
+        let imports = Array(importedModules)
+        let closure = reexportClosureS1(imports)
+        let entityMods = closure.filter { rel($0) == .same }.sorted()
+        let entityInScope = !entityMods.isEmpty
+        let entityReaches: Bool? = entityInScope ? any(entityMods) : false
+        func mayReachEntity(via ms: [String]) -> Bool {
+            let viaClosure = reexportClosureS1(ms).contains { rel($0) == .same }
+            return (entityInScope || viaClosure) && entityReaches != false
         }
         // ── the module-qualified spelling: the qualifier NAMES the module ──
         if let q = qualifier {
-            guard knownPackage, let rel = kappaRelation(name: alias, module: q) else { return .kappaOnly }
+            guard let r = rel(q) else { return .kappaOnly }
             let chained = deps.chainedPkgs(importing: [q]).first?.pkg
-            switch rel {
+            switch r {
             case .same:
-                // R1871 — the same entity: κ ∪ the row. Only a chained package has a row to join.
-                if let p = chained, declares(chainedPkg: p, module: q) != false { return probe(.union, "same:\(q)") }
+                if let p = chained, deps.declaresFreeName("\(p)#\(name)") || deps.lookup("\(p)#\(name).init") != nil
+                    || srcReaches(q) == true { return probe(.union, "same:\(q)") }
                 return .kappaOnly
             case .different:
-                // The vendored copy: withdrawn only on PROOF that `q` itself declares the name (its sources, or its
-                // chained report). A module that merely RE-EXPORTS the entity's module declares nothing, and
-                // unreadable + unchained proves nothing, so κ stays (the over-charge direction).
                 if Self.r1871vOff { return .kappaOnly }
-                return declares(chainedPkg: chained, module: q) == true ? probe(.shadow, "different:\(q)") : .kappaOnly
+                // A re-export of the entity's module through `q` may be what `q.name` names.
+                if reexportClosureS1([q]).contains(where: { rel($0) == .same }) && entityReaches != false { return .kappaOnly }
+                let ev = srcReaches(q)
+                let wire = chained.map { deps.declaresFreeName("\($0)#\(name)") || deps.lookup("\($0)#\(name).init") != nil } ?? false
+                return (ev == true || (ev == nil && wire)) ? probe(.shadow, "different:\(q)") : .kappaOnly
             case .unknown:
                 return .kappaOnly
             }
         }
         // ── the bare spelling ──
-        let chained = deps.chainedPkgs(importing: Array(importedModules))
-        var same = false, different = false, undecided = false
-        var declaringModules: [String] = []
+        let chained = deps.chainedPkgs(importing: imports)
+        var same = false, differentProof = false, wireNotCallee = false
+        var why: [String] = []
         for (p, mods) in chained {
-            var d: Bool? = false
-            for m in mods {
-                switch declares(chainedPkg: p, module: m) {
-                case true?: d = true
-                case nil: if d != true { d = nil }
-                case false?: break
-                }
+            let rels = mods.compactMap(rel)
+            if rels.contains(.unknown) && !rels.contains(.same) { return depShadows(name) ? .shadow : .kappaOnly }  // pre-S1
+            let wireFree = deps.declaresFreeName("\(p)#\(name)")
+            let wireInit = deps.lookup("\(p)#\(name).init") != nil
+            let ev = any(mods)
+            if rels.contains(.same) {
+                if wireFree || wireInit || ev == true { same = true; why.append("same:\(p)") }
+            } else if ev == true || (ev == nil && (wireFree || wireInit)) {
+                differentProof = true; why.append("different:\(p)")
+            } else if ev == false && wireFree {
+                wireNotCallee = true; why.append("wire-not-callee:\(p)")   // pre-S1 shadowed; the readable labels say otherwise
             }
-            guard d != false else { continue }
-            if d == nil { undecided = true }
-            declaringModules.append(contentsOf: mods)
-            let rels = mods.compactMap { kappaRelation(name: alias, module: $0) }
-            if rels.contains(.same) { same = true }
-            else if rels.contains(.unknown) { return depShadows(name) ? .shadow : .kappaOnly }   // pre-S1, unchanged
-            else { different = true }
         }
-        if same {
-            // R1867 / R1870 — the entity's own package declares it: union (a second, different declarer is unioned
-            // too, ⟨0.25⟩ — the over-charge direction).
-            return probe(.union, "same:\(declaringModules.joined(separator: ","))")
-        }
-        if different {
-            if platformOnly {
-                // R649 on a declaration whose labels can bind the call; R1876's unreadable half unions instead.
-                return undecided ? probe(.union, "platform-unreadable") : probe(.shadow, "platform-signature")
+        if same { return probe(.union, why.joined(separator: ",")) }
+        if differentProof {
+            if mayReachEntity(via: imports) {
+                // The entity may be the callee too: never withdraw κ. A free function the wire declares was shadowed
+                // before S1; union keeps both answers.
+                return depShadows(name) ? probe(.union, "different+entity-in-scope") : .kappaOnly
             }
-            // A third-party κ name declared by a DIFFERENT chained package only (the vendored copy, or an unrelated
-            // `File` type). A free function was already shadowed before S1 (R649 / 0.33.0); a type's ctor is the
-            // removal half and has the switch.
-            if depShadows(name) { return probe(.shadow, "different-chained") }
-            return Self.r1871vOff || !knownPackage ? .kappaOnly : probe(.shadow, "different-chained-type")
+            if depShadows(name) { return probe(.shadow, why.joined(separator: ",")) }   // pre-S1 R649 / 0.33.0
+            return Self.r1871vOff ? .kappaOnly : probe(.shadow, why.joined(separator: ",") + " (proven)")
         }
-        // No chained declarer of this call. R1876: a platform name whose only chained declarers provably cannot bind
-        // this call is κ's alone (`depShadows` alone said "shadow" before S1).
-        // R1871 (N5) — UNCHAINED, a readable imported module that declares a third-party κ name and is NOT the entity
-        // κ describes: the call reaches that module's body, so κ must not fire; the ledger names the module.
-        guard knownPackage, !Self.r1871vOff else { return .kappaOnly }
-        let entityImported = importedModules.contains { kappaRelation(name: alias, module: $0) == .same }
-        if entityImported { return .kappaOnly }
+        if wireNotCallee { return probe(.union, why.joined(separator: ",")) }
+        // R1871 (N5) — UNCHAINED: a readable imported module PROVEN to declare the callee, and not the entity.
+        guard !Self.r1871vOff else { return .kappaOnly }
+        if mayReachEntity(via: imports) { return .kappaOnly }
         let chainedMods = Set(chained.flatMap { $0.modules })
-        for m in importedModules.sorted() where !chainedMods.contains(m) && !PLATFORM_MODULES.contains(m)
-            && !projectModules.contains(m) && kappaRelation(name: alias, module: m) == .different {
-            if declares(chainedPkg: nil, module: m) == true { return probe(.shadow, "different-readable:\(m)") }
+        for m in imports.sorted() where !chainedMods.contains(m) && !PLATFORM_MODULES.contains(m)
+            && !projectModules.contains(m) && rel(m) == .different {
+            if srcReaches(m) == true { return probe(.shadow, "different-readable:\(m)") }
         }
         return .kappaOnly
     }

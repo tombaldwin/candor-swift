@@ -1121,9 +1121,34 @@ public struct FreeFnSignature: Hashable, Sendable {
 /// SOUNDNESS R1876 / R1871 — the FREE FUNCTIONS one source file declares at file scope, by base name, and whether
 /// any `#if` or macro shape made the walk incomplete (`opaque`, as in `topLevelTypeDeclarations`). `private` and
 /// `fileprivate` functions are not recorded (an importer cannot call them). Every `#if` branch is walked.
+///
+/// `nominal` holds the NOMINAL types (struct / class / enum / actor) the file declares at file scope, by name, with
+/// visibility — and deliberately NOT a `typealias`: `public typealias File = Files.File` names Files' type, it does not
+/// declare another one, so it is never evidence that the module is a DIFFERENT entity (S1 merge review D1).
+///
+/// Names are compared without backticks: a parameter declared with a backticked label `in` is called `f(in: x)` (D3).
+/// `unescapedSwiftName` is the one place that spelling is normalised.
 public func topLevelFreeFunctions(source: String) -> (fns: [String: [FreeFnSignature]], opaque: Bool) {
+    let r = topLevelCalleeDeclarations(source: source)
+    return (r.fns, r.opaque)
+}
+
+/// An identifier with its escaping backticks removed (`` `in` `` -> `in`).
+public func unescapedSwiftName(_ s: String) -> String {
+    (s.hasPrefix("`") && s.hasSuffix("`") && s.count >= 2) ? String(s.dropFirst().dropLast()) : s
+}
+
+public func topLevelCalleeDeclarations(source: String)
+    -> (fns: [String: [FreeFnSignature]], nominal: [String: Bool], opaque: Bool) {
     var out: [String: [FreeFnSignature]] = [:]
+    var nominal: [String: Bool] = [:]
     var opaque = false
+    func noteType(_ name: String, _ mods: DeclModifierListSyntax) {
+        if mods.contains(where: { ["private", "fileprivate"].contains($0.name.text) }) { return }
+        let vis = mods.contains { ["public", "open"].contains($0.name.text) }
+        let n = unescapedSwiftName(name)
+        nominal[n] = (nominal[n] ?? false) || vis
+    }
     func walk(_ items: CodeBlockItemListSyntax) {
         for item in items {
             guard let d = item.item.as(DeclSyntax.self) else { continue }
@@ -1137,12 +1162,16 @@ public func topLevelFreeFunctions(source: String) -> (fns: [String: [FreeFnSigna
             let vis = mods.contains { ["public", "open"].contains($0.name.text) }
             var labels: [String?] = [], defs: [Bool] = [], vars: [Bool] = []
             for p in f.signature.parameterClause.parameters {
-                let first = p.firstName.text
+                let first = unescapedSwiftName(p.firstName.text)
                 labels.append(first == "_" ? nil : first)
                 defs.append(p.defaultValue != nil)
                 vars.append(p.ellipsis != nil)
             }
-            out[f.name.text, default: []].append(FreeFnSignature(labels: labels, defaults: defs, variadic: vars, visible: vis))
+            out[unescapedSwiftName(f.name.text), default: []].append(FreeFnSignature(labels: labels, defaults: defs, variadic: vars, visible: vis))
+        } else if let x = d.as(StructDeclSyntax.self) { noteType(x.name.text, x.modifiers)
+        } else if let x = d.as(ClassDeclSyntax.self) { noteType(x.name.text, x.modifiers)
+        } else if let x = d.as(EnumDeclSyntax.self) { noteType(x.name.text, x.modifiers)
+        } else if let x = d.as(ActorDeclSyntax.self) { noteType(x.name.text, x.modifiers)
         } else if d.is(MacroExpansionDeclSyntax.self) {
             opaque = true
         } else if let x = d.as(IfConfigDeclSyntax.self) {
@@ -1157,5 +1186,5 @@ public func topLevelFreeFunctions(source: String) -> (fns: [String: [FreeFnSigna
         }
     }
     walk(Parser.parse(source: source).statements)
-    return (out, opaque)
+    return (out, nominal, opaque)
 }
