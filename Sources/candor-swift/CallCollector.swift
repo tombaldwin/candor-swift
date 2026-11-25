@@ -8957,6 +8957,36 @@ final class CallCollector: SyntaxVisitor {
         return callee
     }
 
+    /// SOUNDNESS R1875 — AN ELEMENT OF A DEPENDENCY FACTORY'S RESULT: `makeNodes().first!`, `makeNodes().last`,
+    /// `makeNodes()[0]`, `makeNodes().first(where: …)`, `makeNodes().randomElement()`. The receiver is a value the
+    /// dependency vended, exactly as `makeNode()`'s is, but one element-access hop away, so neither
+    /// `depFactoryCallee` (the receiver is not the call) nor `rootOf` (the factory's `-> [Node]` never travelled)
+    /// formed anything, and a member call on it was DROPPED (`droppedMember`) — with no key and no `Unknown`. Unchained
+    /// the factory call's own `invisible` happened to name the module; chained, that factory's row was read (correctly
+    /// pure) and the drop was left answering alone: `deny Fs` and `deny Fs Unknown` 0 over an executed write.
+    ///
+    /// Returns the factory's provenance with an `[]` suffix, which the Driver reads as "an ELEMENT of what this factory
+    /// returns": it must NOT ask `typeSurface.returns` with it (that names the collection's type, not the element's,
+    /// and the wire carries no element type), so it goes straight to the half-1 disclosure. Same provenance guard as
+    /// both other spellings (`depFactoryCallee`), so a stdlib or local factory never mints it.
+    static let elementHopMembers: Set<String> = ["first", "last"]
+    static let elementHopCalls: Set<String> = ["first", "last", "randomElement", "popLast", "popFirst", "removeFirst",
+                                               "removeLast", "min", "max"]
+    func depElementFactoryCallee(_ expr: ExprSyntax) -> String? {
+        let e = Self.peel(expr)
+        var base: ExprSyntax?
+        if let ma = e.as(MemberAccessExprSyntax.self), Self.elementHopMembers.contains(ma.declName.baseName.text) {
+            base = ma.base
+        } else if let sc = e.as(SubscriptCallExprSyntax.self) {
+            base = sc.calledExpression
+        } else if let fc = e.as(FunctionCallExprSyntax.self), let ma = fc.calledExpression.as(MemberAccessExprSyntax.self),
+                  Self.elementHopCalls.contains(ma.declName.baseName.text) {
+            base = ma.base
+        }
+        guard let b = base, Self.peel(b).is(FunctionCallExprSyntax.self), let callee = depFactoryCallee(b) else { return nil }
+        return callee + "[]"
+    }
+
     /// SOUNDNESS R1065 — `recv.member(…)` where `recv` is a VALUE whose type is not this scan's (neither declared
     /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
     /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
@@ -11073,7 +11103,7 @@ final class CallCollector: SyntaxVisitor {
                 // `Unknown`; it resolves to NOTHING by design — it exists to say no key was formed, not to
                 // carry an effect. Distinguishable from a real path (angle brackets), exactly as the rust
                 // `<untyped>` and `<drop>` markers are, so it can never reach local resolution or κ.
-                if owner == nil, let r = base.root, let callee = depBoundLocals[r] {
+                if owner == nil, let r = base.root, let callee = depBoundLocals[r], !callee.hasSuffix("[]") {
                     calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
                                       typed: false, args: [], argTypes: [],
                                       depCallee: callee, extOwner: nil))
@@ -11107,6 +11137,17 @@ final class CallCollector: SyntaxVisitor {
                 }
                 else if owner == nil, guessedOwner == nil, let b = ma.base {
                     droppedMember = true   // SOUNDNESS R1073 — see `droppedMember`
+                    // SOUNDNESS R1875 — …AND AN ELEMENT OF ONE: `makeNodes().first!.touch(p)`, or `c.touch(p)` after
+                    // `let c = makeNodes().first!` (see `depElementFactoryCallee`). The marker is emitted BESIDE the drop,
+                    // never instead of it: no key is formed here either, so every fence keyed on the drop (R1073, R1472,
+                    // the R1455 pricing arm and probe) reads exactly what it read before, and the marker only ADDS the
+                    // Driver's chained disclosure.
+                    if let callee = (base.root.flatMap { depBoundLocals[$0] }.flatMap { $0.hasSuffix("[]") ? $0 : nil })
+                                    ?? (base.root == nil ? depElementFactoryCallee(b) : nil) {
+                        vbHit("R1875", "\(callee).\(member)")
+                        calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
+                                          typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil))
+                    }
                     // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
                     if !Self.r1472Off { r1472DroppedMembers.append(member) }
                     if let only = R1455.hedgeOnly {   // SOUNDNESS R1455 pricing arm — hedge only the named classes
@@ -14155,6 +14196,13 @@ final class CallCollector: SyntaxVisitor {
                         }
                     }
                 }
+            }
+            // SOUNDNESS R1875 — the BOUND spelling of an element of a dependency factory's result: `let c = makeNodes().first!`.
+            // Only where nothing above typed the binding or recorded a provenance for it.
+            if binding.typeAnnotation == nil, binding.accessorBlock == nil, let v0 = binding.initializer?.value,
+               vars[name] == nil, depBoundLocals[name] == nil, let callee = depElementFactoryCallee(v0) {
+                vbHit("R1875", "bind \(name) -> \(callee)")
+                depBoundLocals[name] = callee
             }
             // SOUNDNESS R1873 — A FUNCTION OR METHOD REFERENCE BOUND BY A `let`. `let f = shellOut; f(…)` and `let g = r.get;
             // g(p)` (`r: HTTPClient`) read no κ charge and no disclosure unchained: the binding held no identity, so the

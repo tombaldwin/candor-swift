@@ -3880,6 +3880,41 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // `R1865JOIN … walk` lines as 6.4 — but a reference cell makes the read opaque to that analysis on any toolchain.
     final class Tick { var n = 0 }
     let depApplyTick = Tick()
+    /// Reach probe for stage S2e (one line per κ term added on a `returns`-typed receiver). No kill switch: the change
+    /// only ADDS a charge.
+    let s2eProbe = Env.trace("CANDOR_S2E_PROBE")
+    /// SPEC §2 ⟨0.43⟩ (the union clause) ON A RECEIVER TYPED THROUGH `typeSurface.returns` — stage S2e of the curated-routing
+    /// design (D4; Fable review Q3, N8).
+    ///
+    /// `let r = makeClient(); r.get(p)`, `makeClient().get(p)` and `HTTPClient.make().get(p)` reach the SAME member as
+    /// `r: HTTPClient; r.get(p)`. The typed spelling is answered by κ's verb AND the chained row (R1865's marker); this
+    /// spelling was answered by the row alone, because the receiver's type is known only here, in the Driver, after the
+    /// producer's `returns` named it — the collector never saw a type to ask κ about. A row that under-reports what κ
+    /// knows (a producer whose `get` reaches a socket through code its scan could not read) then answered alone: the
+    /// chained answer was LOWER than the typed spelling's for one and the same call.
+    ///
+    /// IDENTITY, NOT SPELLING. κ is asked only when the type the producer RETURNED is the entity the κ entry describes:
+    /// the registry's `.same` for one of the producing package's modules (`kappaRelation`). A producer type that merely
+    /// shares a κ root's name (`MyLib#HTTPClient`, `Foo#URL`) is a different entity and is not charged; a platform entry
+    /// never matches, because a producer publishes `returns` only for its own types. That is stricter than the typed
+    /// route, which keys on the bare name; it is the right side to be strict on, because a fabrication here would be
+    /// a charge on a type κ does not describe.
+    ///
+    /// ADDITIVE: the effect is inserted beside whatever the row and the disclosure below add, whether the entry lookup
+    /// hit or missed. The surfaces follow the typed route's: an ESTABLISHING verb with no captured locator marks the
+    /// effect incomplete (no literal is captured here, so it always is — the fail-closed direction for `allow`), and a
+    /// model-SDK verb carries its `Net`.
+    func kappaTermOnReturnsTyped(_ ty: String, pkg: String, modules: [String], member: String, to qual: String) {
+        guard let h = ty.firstIndex(of: "#") else { return }
+        let tq = String(ty[ty.index(after: h)...])
+        guard modules.contains(where: { kappaRelation(name: tq, module: $0, owningPackage: pkg) == .same }),
+              let eff = kappaMember(root: tq, member: member) else { return }
+        if s2eProbe { FileHandle.standardError.write("S2EHIT \(qual) \(ty).\(member) -> \(eff)\n".data(using: .utf8)!) }
+        direct[qual, default: []].insert(eff)
+        if eff == "Llm" { direct[qual, default: []].insert("Net") }
+        if isEstablishingMember(effect: eff, root: tq, member: member) { incompleteD[qual, default: []].insert(eff) }
+    }
+
     func applyDepEntry(_ de: DepEntry, to qual: String) {
         depApplyTick.n += 1
         // ⟨0.39⟩ OBLIGATION 3 — THE JOIN UNIONS, PER KEY. A worklist rather than recursion because a
@@ -6784,7 +6819,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 //
                 // Same never-guess discipline as every other join on this path: only the file's OWN
                 // imports, only packages a loaded report COVERS, and only an unambiguous SINGLE hit.
-                if let callee = call.depCallee {
+                if let callee = call.depCallee, callee.hasSuffix("[]") {
+                    // SOUNDNESS R1875 — AN ELEMENT OF A DEPENDENCY FACTORY'S RESULT (`makeNodes().first!.touch(p)`; see
+                    // `CallCollector.depElementFactoryCallee`). `typeSurface.returns` names the factory's own result, not its
+                    // element, and the wire carries no element type, so nothing is asked: this site goes to the disclosure
+                    // below. Bounded as R1065's instance hop is, to a leaf someone could answer: a member a local type
+                    // declares or a chained package publishes. A leaf only the platform declares (`.first!.uppercased()` over
+                    // a `-> [String]` factory) stays as it was, which is the drop. UNCHAINED nothing changes: the defect is a
+                    // chained one (the factory call's own `invisible` answered the site unchained, and stops when its row is
+                    // read), and the unchained κ-dependency-module shape is a separate, pre-existing question (the report).
+                    if deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty
+                        || !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) { continue }
+                } else if let callee = call.depCallee {
                     // ⟨0.40⟩ `returnsProtocol`: the factory's result is ONE protocol, so the member dispatches
                     // through ⟨0.39⟩'s union whatever `types` says (PART 95 r6, o12). ADDED; the disclosure
                     // below still fires exactly as it did.
@@ -6809,7 +6855,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     var hits: [DepEntry] = []
                     var surfaced: [String] = []
                     var missedAnswer = false   // R845 — an answered type whose member is not in the report
-                    for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
+                    for (p, mods) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
                         // R832 — a static factory whose name is a keyword is published as the producer
                         // DECLARED it (`Client.\`default\``) and spelled at the call site without the
                         // backticks; ask both, the second only when the first misses.
@@ -6817,6 +6863,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                 ?? backtickedLeafKey(callee).flatMap({ deps.boundType("\(p)#\($0)") })
                         else { continue }
                         surfaced.append(ty)
+                        kappaTermOnReturnsTyped(ty, pkg: p, modules: mods, member: call.leaf, to: f.qual)
                         if let e = deps.lookup("\(ty).\(call.leaf)") { hits.append(e) } else { missedAnswer = true }
                     }
                     // THE ANSWER MUST BE UNAMBIGUOUS TOO, not only the entry lookup that follows it.
