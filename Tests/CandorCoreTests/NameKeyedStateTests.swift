@@ -478,7 +478,7 @@ final class NameKeyedStateTests: XCTestCase {
         "caseElseOut": .lexicallyScoped("the payload names an `if case`/`guard case` bound, inside that statement's `else`, where they are out of scope; saved and restored with the block"),
         // R844/R846 — output: each external member candidate with the module(s) the source spelled
         "externalCandidateModules": .notPerBinding, "externalCandidateOpen": .notPerBinding,
-        "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding,
+        "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding, "usedDepAliases": .notPerBinding,
         // `localFuncs` is a DECLARATION set, not a binding fact: a nested `func` name suppresses the
         // same-named module-level free fn for the whole unit. Its leak direction is SUPPRESSION (a
         // loss), not fabrication, and it is unmeasured — recorded here so it is not mistaken for swept.
