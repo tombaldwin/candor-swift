@@ -5622,6 +5622,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // wider question (hundreds of rows on the chained corpus) than a dependency class's subclass.
                         let extSupers = (supertypesOf[type] ?? []).filter {
                             !localTypes.contains($0) || (!declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0)
+                                && !STDLIB_NOMINALS.contains($0) && !RAW_VALUE_BASE_TYPES.contains($0) && !STD_PURE_PROTOCOLS.contains($0)
                                 && dependencyDeclaresType($0, f))
                         }.sorted()
                         let hedgeSupers: [String] = {
