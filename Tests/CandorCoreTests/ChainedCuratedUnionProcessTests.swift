@@ -179,7 +179,9 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         XCTAssertNil(nc["plainLocal"], "BOUND — a function with no dependency receiver gains nothing")
         XCTAssertEqual(nc["typedGet"]?.inferred, ["Net"], "BOUND — a TYPED call is answered by the classifier, not hedged")
         let off = try scan(fx, chained: false, env: ["CANDOR_R1866_OFF": "1"], "off")
-        XCTAssertNil(off["untypedGet"], "§1b — the silence, reproduced with the fix switched off")
+        // S3a (R1868(iii) F5): `makeClient()` is an unresolved free function of the κ module, so with the R1866 hedge off the
+        // unit is no longer ABSENT — it carries the ledger's `invisible` — but it still carries no `Unknown`.
+        XCTAssertEqual(off["untypedGet"]?.inferred ?? [], [], "§1b — no `Unknown` with the fix switched off (the hedge is R1866's)")
     }
 
     // ── R1865, the spellings PART 110 does not measure (Fable R1865 merge review) ──

@@ -3343,6 +3343,97 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return unread
     }
+    // ── SOUNDNESS R1868(iii) / R1879 / SPEC §2 ⟨0.43⟩ — THE Q1 FLOOR: A κ ANSWER FOR A THIRD-PARTY ENTITY IS A LOWER BOUND ──
+    //
+    // "A curated entry claims the call performs E, not that it performs nothing else." For a PLATFORM entry that is the
+    // whole answer (`authority: complete`: no dependency report can describe the OS). For a third-party package it is a
+    // floor — a body exists that a report could read — and where NO chained report covers the package nothing says what
+    // κ is missing: an executed `Fs` beside κ's `Net` on `HTTPClient.get` read `[Net]` and no `invisible` (the unit is
+    // not pure, so §2's "an engine MUST do at least one, never silently pure" is not even asked of it, and the ledger
+    // never names a module κ counts as covered). So a unit on which κ ANSWERED a floor entity names the module that
+    // entity lives in, exactly as every other unresolved reach into an uncovered package does.
+    //
+    // WHICH MODULES. Qualified (`Mod.name(…)`): the qualifier, which names the module. Otherwise the modules the κ registry
+    // says ARE the entity (`kappaRelation == .same`, re-exports followed by `effectiveImports`), plus — for a FREE name or
+    // constructor only — the file's dependency modules whose sources nobody can read: a vendored `ShellKit.shellOut` read
+    // through an unfetched checkout answers to the κ name `shellOut`, and "unreadable proves nothing" (the R1104
+    // rule). A module a chained report covers is excluded (that report answers for it), as is the project's own.
+    //
+    // ADDITIVE BY CONSTRUCTION: it adds `invisible` and nothing else. `invisible` arms no policy form (R133), so no gate
+    // moves; the posture is the one every blind module already has. Platform entries are never recorded by the collector.
+    let q1Probe = Env.trace("CANDOR_Q1_PROBE")
+    /// module -> files that carry a floor `invisible` for it, for the κ DEPENDENCY modules the coverage ledger would not
+    /// otherwise name (`blindModules` excludes `KAPPA_MODULES`). The ledger is the scan-level image of the per-unit
+    /// `invisible` (SPEC §2: "the per-function attribution of the envelope `coverage` ledger").
+    var kappaFloorLedgerFiles: [String: Set<String>] = [:]
+    func kappaFloorModules(name: String, spelled: String? = nil, qualifier: String?, free: Bool, inFile file: String) -> Set<String> {
+        guard let e = KAPPA_REGISTRY[name], e.authority == .floor else { return [] }
+        let imports = effectiveImports(file)
+        let importable = importableByFile[file] ?? [], own = ownTargetsByFile[file] ?? []
+        func open(_ m: String) -> Bool {
+            !PLATFORM_MODULES.contains(m) && !importable.contains(m) && !own.contains(m) && !deps.coversModule(m)
+        }
+        if let q = qualifier { return imports.contains(q) && open(q) ? [q] : [] }
+        // The entity's own modules, reached from what the file imports. A module the file imports names itself when it is
+        // uncovered (the entity directly, or a blind FACADE that re-exports it — the ledger already names a facade); one a
+        // chained report covers answers for itself, so the entity behind it is named only when it is open too.
+        var out = Set<String>()
+        func same(_ m: String) -> Bool {
+            kappaRelation(name: name, module: m, owningPackage: deps.modulePkgs[m]) == .same
+        }
+        for i in fileImports[file] ?? [] where !PLATFORM_MODULES.contains(i) {
+            var closure = Set<String>(), queue = [i]
+            while let x = queue.popLast() {
+                guard closure.insert(x).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            }
+            let ents = closure.filter { same($0) && open($0) }
+            if ents.isEmpty { continue }
+            if open(i) { out.insert(i) } else { out.formUnion(ents) }
+        }
+        // …and the entities `effectiveImports` reaches through covered re-exporters.
+        out.formUnion(imports.filter { open($0) && same($0) })
+        if free {
+            // a dependency module whose sources spell the κ name as a `typealias` (`typealias Doc = Files.File`): the call
+            // lands in the module that declares the alias, which is what the file imports.
+            // Not when a chained report covers the entity itself: the join, not the floor, owns that call (an alias the
+            // join cannot resolve is a separate silence, and a chained scan must not change here).
+            let entityCovered = e.describes.contains {
+                if case .package(let p, _) = $0 { return (p.modules ?? []).contains { deps.coversModule($0) } }
+                return false
+            }
+            for m in imports where !entityCovered && open(m) && !KAPPA_MODULES.contains(m) {
+                if let al = moduleAliases(m), al.aliases[spelled ?? name]?.visible == true { out.insert(m) }
+            }
+            if e.surfaces.contains(.free) {
+                let declared = declaredByFile[file] ?? []
+                for m in imports where open(m) && !KAPPA_MODULES.contains(m) && declared.contains(m) {
+                    if let d = moduleDeclarations(m), !d.opaque { continue }   // readable and complete: its own sources answer
+                    out.insert(m)
+                }
+            }
+        }
+        return out
+    }
+    /// SOUNDNESS R1868(iii) (F5) — the κ DEPENDENCY modules of `file` (imported, re-exports followed; not this scan's own, no
+    /// chained report) that `blindModules` deliberately leaves out because κ answers part of them. κ answers a TYPED
+    /// receiver's verbs and R1866 discloses the members it does not model; a FREE FUNCTION of the module (`hcFree(p)`,
+    /// `AsyncHTTPClient.hcFree(p)`) is answered by neither, so it read pure. The unresolved-free-call arms ask this set beside
+    /// `blindModules`, and name the module exactly as they name any other uncovered import.
+    func kappaDepOpenModules(inFile file: String) -> Set<String> {
+        let importable = importableByFile[file] ?? [], own = ownTargetsByFile[file] ?? []
+        return Set(effectiveImports(file).filter {
+            KAPPA_DEPENDENCY_MODULES.contains($0) && !importable.contains($0) && !own.contains($0) && !deps.coversModule($0) })
+    }
+    func attributeKappaFloor(_ qual: String, name: String, spelled: String? = nil, qualifier: String?, free: Bool, inFile file: String) {
+        let mods = kappaFloorModules(name: name, spelled: spelled, qualifier: qualifier, free: free, inFile: file)
+        guard !mods.isEmpty else { return }
+        if q1Probe {
+            FileHandle.standardError.write("Q1FLOOR \(qual) \(qualifier.map { "\($0)." } ?? "")\(name) -> \(mods.sorted())\n".data(using: .utf8)!)
+        }
+        blindDirect[qual, default: []].formUnion(mods)
+        for m in mods where KAPPA_MODULES.contains(m) { kappaFloorLedgerFiles[m, default: []].insert(file) }
+    }
     /// SOUNDNESS R1071 — the blind dependency modules of `file` whose readable sources declare a PUBLIC member
     /// `member` in an extension of the type `spelled` names (`extension Date { public func stamp() }`), for a
     /// receiver type the dependency does not itself declare — a PLATFORM type, typically. Same candidate set,
@@ -5015,6 +5106,21 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
             for a in cc.usedDepAliases.sorted() { blindDirect[f.qual, default: []].formUnion(sourceProvenDepModules(of: a, inFile: file)) }
         }
+        if !cc.kappaFloorHits.isEmpty {   // R1879 / Q1 floor — κ answered a third-party entity
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            for h in cc.kappaFloorHits.sorted(by: { ($0.name, $0.spelled ?? "", $0.qualifier ?? "", $0.free ? 1 : 0) < ($1.name, $1.spelled ?? "", $1.qualifier ?? "", $1.free ? 1 : 0) }) {
+                attributeKappaFloor(f.qual, name: h.name, spelled: h.spelled, qualifier: h.qualifier, free: h.free, inFile: file)
+            }
+        }
+        if !cc.platformBinderModules.isEmpty {   // R1879 — a readable dependency declaration the κ platform name may mean
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let importable = importableByFile[file] ?? [], own = ownTargetsByFile[file] ?? []
+            for m in cc.platformBinderModules.sorted() where !importable.contains(m) && !own.contains(m) && !deps.coversModule(m) {
+                if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) platform-binder -> [\(m)]\n".data(using: .utf8)!) }
+                blindDirect[f.qual, default: []].insert(m)
+                if KAPPA_MODULES.contains(m) { kappaFloorLedgerFiles[m, default: []].insert(file) }
+            }
+        }
         if !cc.genericWitnessReqs.isEmpty { genericWitnessReqsByUnit[f.qual] = cc.genericWitnessReqs }   // R951
         // accessor units: a property READ/WRITE of a known accessor unit is an edge (the reader inherits
         // the getter/observer/subscript's effects — `c.data` reaching the Fs inside `var data: Data { … }`).
@@ -5784,7 +5890,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // the κ term added beside it exactly as it is for a typed receiver.
                     if !localSuperResolvedR1874 {
                         for sup in externalSuperBases(et) {
-                            if let eff = kappaMember(root: sup, member: member) { direct[f.qual, default: []].insert(eff) }
+                            if let eff = kappaMember(root: sup, member: member) {
+                                direct[f.qual, default: []].insert(eff)
+                                attributeKappaFloor(f.qual, name: sup, qualifier: nil, free: false,
+                                                    inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }))   // R1879 / Q1 floor
+                            }
                         }
                     }
                 }
@@ -7167,8 +7277,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 let blind = blindModules(inFile: file)
-                for m in effectiveImports(file) where blind.contains(m) {   // R827
+                let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
+                for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
                     blindDirect[f.qual, default: []].insert(m)
+                    if kdep.contains(m) {
+                        kappaFloorLedgerFiles[m, default: []].insert(file)
+                        if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) free \(call.leaf) -> [\(m)]\n".data(using: .utf8)!) }
+                    }
                 }
             } else if !r706iOff, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                       case let owner = f.genericBounds[raw] ?? raw,
@@ -7193,7 +7308,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
                 blindDirect[f.qual, default: []].insert(module)
             } else if !resolved, !call.typed, let owner = call.extOwner,
-                      blindModules(inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })).contains(owner) {
+                      case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                      blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
                 // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
                 // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
                 // makes typed calls carry one and this arm is not a place that should follow. It fires on
@@ -7211,6 +7327,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 if (fileImports[file] ?? []).contains(owner) {
                     blindDirect[f.qual, default: []].insert(owner)
+                    if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
+                        kappaFloorLedgerFiles[owner, default: []].insert(file)
+                        if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) modq \(owner).\(call.leaf) -> [\(owner)]\n".data(using: .utf8)!) }
+                    }
                 }
             } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                       case let owner = f.genericBounds[raw] ?? raw,
@@ -8512,6 +8632,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             return .unresolved
         },
         protocolResults: protocolResults)
+    // R1879 / Q1 floor — the κ DEPENDENCY modules a unit names in `invisible` join the coverage ledger, one import per file
+    // that carries the entry (the ledger's own unit: `import M` per file). `blindModules` never counted them.
+    for (m, files) in kappaFloorLedgerFiles { uncoveredCounts[m, default: 0] += files.count }
     return Analysis(
         allFns: allFns, conformers: conformers, declaredTypes: declaredTypes,
         protocolSupers: protocolSupers, subProtocolsOf: subProtocolsOf, protocolNames: Set(protocolMethods.keys), protocolMethods: protocolMethods,

@@ -481,6 +481,8 @@ final class NameKeyedStateTests: XCTestCase {
         // R844/R846 — output: each external member candidate with the module(s) the source spelled
         "externalCandidateModules": .notPerBinding, "externalCandidateOpen": .notPerBinding,
         "propertyEdges": .notPerBinding, "callbackInvoked": .notPerBinding, "usedDepAliases": .notPerBinding,
+        // R1879 / Q1 floor — OUTPUT sets (the κ names a unit answered; the dependency modules whose declaration a platform name may bind): they only ADD `invisible`, never suppress a charge.
+        "kappaFloorHits": .notPerBinding, "platformBinderModules": .notPerBinding,
         // `localFuncs` is a DECLARATION set, not a binding fact: a nested `func` name suppresses the
         // same-named module-level free fn for the whole unit. Its leak direction is SUPPRESSION (a
         // loss), not fabrication, and it is unmeasured — recorded here so it is not mistaken for swept.

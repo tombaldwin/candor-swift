@@ -207,8 +207,12 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
                        "`[p].map(HTTPClient.spawn)` runs the static `spawn` per element: disclosed (was ABSENT)")
         XCTAssertEqual(try gate(fx, chained: false, "deny Fs Unknown staticRef"), 1, "GATE — over an executed write")
         // TWINS — an unapplied INSTANCE method yields closures and invokes nothing.
-        XCTAssertNil(nc["unappliedRefKappa"], "`[c].map(HTTPClient.get)` performs nothing: no κ `Net`")
-        XCTAssertNil(nc["unappliedRefQuiet"], "`[c].map(HTTPClient.quiet)` performs nothing: no hedge")
+        // S3a (F5): the twins build `c` with the module's free factory, so the unit now carries the ledger's `invisible` for
+        // it; what must stay absent is any charge or hedge for the unapplied reference.
+        XCTAssertEqual(nc["unappliedRefKappa"]?.inferred ?? [], [], "`[c].map(HTTPClient.get)` performs nothing: no κ `Net`")
+        XCTAssertEqual(nc["unappliedRefKappa"]?.why ?? [], [])
+        XCTAssertEqual(nc["unappliedRefQuiet"]?.inferred ?? [], [], "`[c].map(HTTPClient.quiet)` performs nothing: no hedge")
+        XCTAssertEqual(nc["unappliedRefQuiet"]?.why ?? [], [])
         // D3 — a dependency's own `map(_ s: String)` takes a VALUE: no member call is formed on the argument.
         XCTAssertFalse(nc["depMapValue"]?.why.contains("dispatch:HTTPClient.label") ?? false,
                        "`Box().map(r.label)`: `r.label` is a value, not a reference anything invokes")

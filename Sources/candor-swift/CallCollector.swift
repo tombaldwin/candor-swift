@@ -4362,6 +4362,7 @@ final class CallCollector: SyntaxVisitor {
     /// sibling literal.
     func chargeKappaVerbR1873(_ owner: String, _ member: String, _ eff: String) {
         directEffects.insert(eff)
+        noteKappaFloor(owner)   // R1879 / Q1 floor: a reference's or a generic bound's κ answer is a floor too
         if eff == "Fs" { let ks = fsKind(root: owner, member: member)
                           if ks.isEmpty { fsKinds.insert("?") } else { for k in ks { fsKinds.insert(k) } } }
         if PRIVACY_EFFECTS_ALL.contains(eff) { for k in privacyKind(root: owner, member: member) { privacyKinds[eff, default: []].insert(k) } }
@@ -5316,6 +5317,7 @@ final class CallCollector: SyntaxVisitor {
             return false
         }
         if s1Route == .union { calls.append(s1Call) }
+        noteKappaFloor(alias, spelled: name, qualifier: module, free: true)   // R1879 / Q1 floor
         let est = isEstablishingFree(effect: eff, name: alias)
         // SOUNDNESS R385 — WITHHOLD THE LITERAL for a form whose locator the destination surface cannot
         // express. A bonjour `type:` and a `SecItem` CFDictionary are not hosts or paths, so capturing
@@ -8959,12 +8961,46 @@ final class CallCollector: SyntaxVisitor {
     /// nor extended here, not a generic parameter or associated type): `<Type>.<member>`, the producer's fn-qual
     /// spelling, for the Driver's `typeSurface.returns` ask. nil for anything local or untyped.
     static let r1065Off = Env.on("CANDOR_R1065_OFF")
+    /// SOUNDNESS R1879 / SPEC §2 ⟨0.43⟩ (the Q1 floor, curated-routing design §4.4) — A κ ANSWER FOR A THIRD-PARTY ENTITY IS A
+    /// FLOOR. "A curated entry claims the call performs E, not that it performs nothing else", and for a third-party
+    /// package a body exists that no report has read. Each site that APPLIES a κ answer records the κ name here (never a
+    /// probe that only asks); the Driver turns the record into `invisible: [M]` on the unit where no chained report covers
+    /// the module. Platform entries (`authority: complete`) are never recorded: platform κ is an authority.
+    struct KappaFloorHit: Hashable { let name: String; let spelled: String?; let qualifier: String?; let free: Bool }
+    var kappaFloorHits = Set<KappaFloorHit>()
+    /// `free`: the κ answer was a free name / ctor (`shellOut(…)`, `File(path:)`), not a member of a typed receiver.
+    /// `spelled`: the name as WRITTEN when it differs from the κ key (a dependency's `typealias Doc = Files.File`).
+    func noteKappaFloor(_ name: String, spelled: String? = nil, qualifier: String? = nil, free: Bool = false) {
+        guard let e = KAPPA_REGISTRY[name], e.authority == .floor else { return }
+        kappaFloorHits.insert(KappaFloorHit(name: name, spelled: spelled == name ? nil : spelled, qualifier: qualifier, free: free))
+    }
+    /// SOUNDNESS R1879 — A PLATFORM κ FREE NAME (`connect(fd, addr, len)`) that an UNCHAINED, READABLE dependency module ALSO
+    /// declares, with labels this call can bind. κ answers (the over-charge direction is kept — the call may well be the
+    /// POSIX one), but a call that binds the dependency's function runs ITS body, and nothing named the module: the ledger
+    /// names only modules with an UNRESOLVED call, and a κ-answered call is resolved. A chained declarer is answered by the
+    /// join (R649/R1876); an UNREADABLE module proves nothing either way and is NOT named here (a platform name such as
+    /// `Date` would then tag every file with an unreadable import). Authority stays with the platform: no platform entry
+    /// gains `invisible` — the module that DECLARES a binding callee does.
+    var platformBinderModules = Set<String>()
+    func notePlatformBinders(_ name: String, alias: String, _ node: FunctionCallExprSyntax) {
+        guard kappaIsPlatformOnly(alias) else { return }
+        let (labels, trailing) = callLabelsS1(node)
+        for m in importedModules.sorted() where !PLATFORM_MODULES.contains(m) && !projectModules.contains(m)
+            && !deps.coversModule(m) && !deps.notSwiftCoverable.contains(m) {
+            guard let src = depModuleDeclsS1(m) else { continue }
+            let sigs = src.fns[name]?.filter { $0.visible } ?? []
+            if src.nominal[name] == true || sigs.contains(where: { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }) {
+                platformBinderModules.insert(m)
+            }
+        }
+    }
     /// SOUNDNESS R1865 §1b KILL SWITCH — the `<curated>.` join marker is not emitted (curated-wins restored).
     static let r1865Off = Env.on("CANDOR_R1865_OFF")
     /// SOUNDNESS R1865 — the one place a `<curated>.` marker is minted. EVERY κ arm that charges a member call and emits
     /// no `Call` of its own calls this beside the charge: the explicit-receiver arm, the implicit-self arm inside an
     /// `extension <Type>`, and the conditional-typealias arm. The Driver answers it with the §2 join, additively.
     func curatedJoinMarker(_ owner: String, _ member: String, module: String?) {
+        noteKappaFloor(owner)   // R1879 / Q1 floor: κ answered this root, whatever the join finds (the kill switch below is not this)
         guard !Self.r1865Off else { return }
         calls.append(Call(path: "<curated>.\(member)", leaf: member, strArg: nil, typed: false,
                           args: [], argTypes: [], ownerModule: module, extOwner: owner))
@@ -10044,6 +10080,8 @@ final class CallCollector: SyntaxVisitor {
                 // the literal here for the same reason and by the same rule.
                 let lit = isOpaqueLocatorFree(aliasName) ? nil : lit
                 directEffects.insert(eff)
+                noteKappaFloor(aliasName, spelled: name, free: true)   // R1879 / Q1 floor
+                notePlatformBinders(name, alias: aliasName, node)      // R1879 — a binding unchained dependency declaration
                 // SPEC §2 `fs` — refine an Fs we just PROVED with the direction its verb implies. A verb that
                 // does not say contributes nothing, so the field stays absent rather than half-claimed.
                 if eff == "Fs" { let ks = fsKind(root: aliasName, member: "<init>")
@@ -10162,6 +10200,7 @@ final class CallCollector: SyntaxVisitor {
                                               argLabelled: node.arguments.contains { $0.label != nil }))
                         } else if let eff = kappaFree(name: arm, argCount: node.arguments.count) {
                             directEffects.insert(eff)
+                            noteKappaFloor(arm, free: true)   // R1879 / Q1 floor
                             incompleteSurfaces.insert(eff)
                         } else {
                             continue   // the lone spelling of a non-κ framework arm is no effect and no disclosure — see the member-call site
