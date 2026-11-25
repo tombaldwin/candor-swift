@@ -266,7 +266,7 @@ final class ChainedCuratedUnionProcessTests: XCTestCase {
         XCTAssertEqual(KAPPA_MODULES.subtracting(KAPPA_DEPENDENCY_MODULES), osFrameworks,
                        "R1866 DRIFT: a κ module that is neither a dependency module nor a named OS framework is "
                        + "treated as covered by `blindModules()` and NOT disclosed by R1866 — an untyped receiver into "
-                       + "it reads pure. Add it to KAPPA_DEPENDENCY_MODULES, or name it here as an OS framework")
+                       + "it reads pure. Classify it in KappaRegistry.swift (a `.curatedCovered` package, or KAPPA_PLATFORM_FRAMEWORKS)")
         XCTAssertTrue(KAPPA_DEPENDENCY_MODULES.isDisjoint(with: PLATFORM_MODULES))
     }
 

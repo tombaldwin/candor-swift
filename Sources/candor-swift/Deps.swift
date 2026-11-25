@@ -156,7 +156,10 @@ struct DepIndex {
     /// effect. A dep TYPE named `File` is deliberately NOT in here: it is published as `File.init`, a
     /// two-segment qual, so `depShadows("File")` was already false for it before this change and making
     /// it true would SUPPRESS a κ ctor — the silent direction, and not a gap this row may close on the way
-    /// past (it is R651).
+    /// past. That gap is R1870 (the κ ctor reads only the curated charge when chained; Files' `File.init` row is
+    /// never read). This pointer used to say R651, which is the consumer-`extension` silence, a different row.
+    /// Whether a dependency's `File` is the SAME entity κ describes is now recorded in the κ registry
+    /// (`KAPPA_REGISTRY`, `kappaDescribesDeclaration`); stage S1 is meant to read it here.
     var freeLeaves: Set<String> = []
     /// Does a chained dependency DECLARE this bare name as a free function or global? The predicate
     /// `depShadows` needs and `lookup(_:) != nil` is not. `CANDOR_R616_OFF=1` restores the membership

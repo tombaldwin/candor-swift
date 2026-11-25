@@ -2643,24 +2643,8 @@ public let PLATFORM_MODULES: Set<String> = ["Swift", "Foundation", "FoundationEs
     "Security", "SystemConfiguration", "UniformTypeIdentifiers", "CryptoKit", "System",
     "RegexBuilder", "Synchronization", "Testing", "XCTest", "PackageDescription", "PackagePlugin",
     "ucrt", "wasi_pthread", "string_h", "zlibng", "SwiftShims"]
-public let KAPPA_MODULES: Set<String> = ["Network", "SQLite3", "CoreData",
-    "NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL", "NIOTransportServices", "AsyncHTTPClient"]
-/// SOUNDNESS R1866 — the κ modules that are DEPENDENCY PACKAGES (SwiftPM, not an OS framework). κ's coverage of
-/// them is a curated verb table keyed on a TYPED receiver, so a value whose type this engine could not form (a
-/// dependency factory's result, `let r = makeClient()`) is answered by nothing: the module is not blind (no
-/// `invisible`), the classifier cannot key the call, and no report is chained. The Driver discloses that call.
-public let KAPPA_DEPENDENCY_MODULES: Set<String> = ["NIOCore", "NIOPosix", "NIOHTTP1", "NIOHTTP2", "NIOSSL",
-    "NIOTransportServices", "AsyncHTTPClient"]
-/// SOUNDNESS R1866 (typed) — the types `kappaMember` models that a κ DEPENDENCY module declares, with the modules that
-/// declare (or re-export) them. κ answers only its VERBS on these types; any other member is a body no scan read, and
-/// with the module counted as covered nothing else says so. Every key must be a `kappaMember` root and every module a
-/// `KAPPA_DEPENDENCY_MODULES` member (pinned by `testKappaDependencyRootsAreKappaRootsOfDependencyModules`).
-public let KAPPA_DEPENDENCY_ROOTS: [String: Set<String>] = [
-    "HTTPClient": ["AsyncHTTPClient"],
-    "ClientBootstrap": ["NIOPosix"], "ServerBootstrap": ["NIOPosix"], "DatagramBootstrap": ["NIOPosix"],
-    "NIOTSConnectionBootstrap": ["NIOTransportServices"],
-    "Channel": ["NIOCore", "NIOPosix"], "ChannelHandlerContext": ["NIOCore", "NIOPosix"],
-]
+// `KAPPA_MODULES`, `KAPPA_DEPENDENCY_MODULES` and `KAPPA_DEPENDENCY_ROOTS` are DERIVED from the κ registry
+// (KappaRegistry.swift), which records which entity each κ entry describes.
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // SQL tables — the SPEC §2 pinned extraction, token-for-token with the other three engines

@@ -10,6 +10,7 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- κ registry (curated-routing stage S0, a refactor; no report byte moves): `KappaRegistry.swift` records, for every `kappaMember` root and `kappaFree` name, which entity it describes (the platform, or a named third-party package and its modules) and whether κ is an authority or a floor for it. `KAPPA_MODULES`, `KAPPA_DEPENDENCY_MODULES` and `KAPPA_DEPENDENCY_ROOTS` are now derived from it instead of hand-kept. `KappaRegistryTests` fails when a κ name is added without a classification, and pins a census of κ names that real dependencies declare in both error directions (row-wins, R1867; κ onto a different entity, R649). The stale R651 pointer in `Deps.swift` now names R1870.
 - CI: `ci.yml` also runs on pushes to `lane/**` branches, so a lane's branch is gated by CI before it is joined.
 
 ## [0.43.0] — 2026-11-19
