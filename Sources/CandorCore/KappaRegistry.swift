@@ -258,3 +258,52 @@ public let KAPPA_DEPENDENCY_ROOTS: [String: Set<String>] = {
     }
     return out
 }()
+
+// ── stage S1: the identity question the free-name, ctor and module-qualified routes ask ──────────────────────
+
+/// How a declaration of a κ name in one module relates to the entity the κ entry describes.
+public enum KappaRelation: Hashable, Sendable {
+    /// The module is one of the package's recognised modules: the declaration IS the entity κ describes, so a
+    /// chained row and κ's charge answer the same call and are UNIONED (SPEC §2 ⟨0.43⟩).
+    case same
+    /// A different entity of the same name: a platform entry (any dependency declaration is another entity,
+    /// R649) or a package entry whose recognised modules do not include this module (a vendored copy).
+    case different
+    /// The entry names a package whose modules were never verified (`modules == nil`): no identity may be
+    /// formed through it, so a caller keeps whatever it did before the registry existed.
+    case unknown
+}
+
+/// Stage S1's reading of the registry (curated-routing design §4, Fable review §2 Q2). `nil` when `name` is no
+/// κ name. A `Logger`-shaped entry (platform AND package) is `.same` for the package's module and `.different`
+/// for every other module.
+public func kappaRelation(name: String, module: String) -> KappaRelation? {
+    guard let e = KAPPA_REGISTRY[name] else { return nil }
+    var unknown = false
+    for d in e.describes {
+        guard case .package(let p, _) = d else { continue }
+        guard let mods = p.modules else { unknown = true; continue }
+        if mods.contains(module) { return .same }
+    }
+    return unknown ? .unknown : .different
+}
+
+/// Does the κ entry for `name` describe a THIRD-PARTY package (with verified modules) at all? The routes that
+/// withdraw κ on a different entity (the vendored-copy half of R1871) act only on such entries; a platform entry
+/// keeps R649's own rule.
+public func kappaDescribesKnownPackage(_ name: String) -> Bool {
+    guard let e = KAPPA_REGISTRY[name] else { return false }
+    return e.describes.contains {
+        if case .package(let p, _) = $0 { return p.modules != nil }
+        return false
+    }
+}
+
+/// Is the κ entry for `name` a platform entry only (no package)? R1876's signature check applies to these.
+public func kappaIsPlatformOnly(_ name: String) -> Bool {
+    guard let e = KAPPA_REGISTRY[name] else { return false }
+    return !e.describes.isEmpty && e.describes.allSatisfy {
+        if case .platform = $0 { return true }
+        return false
+    }
+}

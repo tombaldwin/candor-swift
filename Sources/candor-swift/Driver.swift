@@ -4977,13 +4977,29 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                 var hits: [DepEntry] = []
                 // R565 — the key is `<PACKAGE>#<name>`, and this loop used to spell a MODULE there.
-                for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                var kappaSameEntity = false
+                for (p, mods) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                     // R847 — a bare READ denotes a dependency global, or an implicit-self member of the
                     // enclosing type's chain — never an arbitrary method sharing the leaf.
                     if let e = bareNameDepEntry(p, name, f) {
                         if joinDebug { FileHandle.standardError.write("JOINSITE global \(f.qual) \(p)#\(name) -> \(e.whyReason ?? "-")\n".data(using: .utf8)!) }
                         hits.append(e)
+                        if mods.contains(where: { kappaRelation(name: name, module: $0) == .same }) { kappaSameEntity = true }
                     }
+                }
+                // STAGE S1 (R1867, the REFERENCE spelling) — `let f = shellOut; f(…)` joins the row for the function
+                // the reference names; where that row is the entity κ describes (the registry), κ's charge is unioned
+                // with it exactly as at the bare call (SPEC §2 ⟨0.43⟩), so a producer row that under-reports κ cannot
+                // withdraw it. A reference carries no arity, so every arity κ answers is taken (the over-charge
+                // direction). Unchained, no key forms for a reference at all (stage S2's lane).
+                if kappaSameEntity {
+                    var effs = Set<String>()
+                    for k in 0...4 { if let e = kappaFree(name: name, argCount: k) { effs.insert(e) } }
+                    if effs.contains("Llm") { effs.insert("Net") }
+                    if !effs.isEmpty, CallCollector.s1Probe {
+                        FileHandle.standardError.write("S1ROUTE ref \(f.qual) \(name) -> \(effs.sorted())\n".data(using: .utf8)!)
+                    }
+                    direct[f.qual, default: []].formUnion(effs)
                 }
                 // SPEC §2 rule 1 ⟨0.25⟩ — two packages answering is an AMBIGUOUS key: UNION, never drop
                 // (see the member-call join's note below; this is the same rule at the global-read site).

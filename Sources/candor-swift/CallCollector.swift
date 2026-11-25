@@ -4576,6 +4576,188 @@ final class CallCollector: SyntaxVisitor {
         return false
     }
 
+    // ── STAGE S1 OF THE CURATED-ROUTING DESIGN: WHICH SOURCES ANSWER A κ FREE NAME, CTOR OR MODULE-QUALIFIED NAME ──
+    //
+    // SPEC §2 ⟨0.43⟩: when a curated (κ) entry and a chained row answer the SAME call, the answer is their UNION; and
+    // κ never applies to a DIFFERENT entity of the same name ("name resolution, not precedence"). The free-name side
+    // decided this by spelling, with three different precedences, none of them asking whose name it was:
+    //   • R1867 — a chained dependency declaring a κ free function SHADOWED κ (row-wins), even when the dependency IS
+    //     the package κ describes (`shellOut` / ShellOut): a producer row that under-reports κ withdrew `Exec`.
+    //   • R1870 — a κ CONSTRUCTOR (`File(path:)`) charged κ and emitted no call, so Files' own `File.init` row was
+    //     never read (curated-wins): `deny Exec` 0 over an executed spawn.
+    //   • R1871 — a MODULE-QUALIFIED κ name (`ShellOut.shellOut(…)`) answered before the join (curated-wins), and a
+    //     VENDORED module declaring the same name (`ShellKit.shellOut`) was charged as if it were ShellOut's.
+    //   • R1876 — a dependency's free `connect(host:)` shadowed the POSIX `connect(fd, addr, len)` by BASE NAME.
+    // The κ registry (`KappaRegistry.swift`, stage S0) now says whose name each κ entry is. `kappaFreeRoute` reads it
+    // once for all three spellings and returns the route the call takes.
+
+    /// The route a κ-answered free name / ctor / module-qualified name takes.
+    enum KappaFreeRoute: Equatable {
+        /// κ answers alone and no call is emitted — no chained declaration of this entity exists (or none can be
+        /// shown to be one). Today's behaviour for every unchained, undeclared spelling.
+        case kappaOnly
+        /// κ answers AND the call is emitted for the §2 join: a chained package that IS the entity κ describes
+        /// declares the name (R1867, R1870, R1871), or a platform name's chained declarer could not be read to
+        /// tell it apart (R1876's unreadable half — the over-charge direction, never the silent one).
+        case union
+        /// κ does NOT answer; the call is emitted and the dependency's own declaration answers it (or the
+        /// `invisible` ledger names its module). A declaration that is a DIFFERENT entity: R649's platform rule
+        /// on a matching signature, and R1871's vendored copy.
+        case shadow
+    }
+
+    /// SOUNDNESS R1871 §1b KILL SWITCH — the one NON-ADDITIVE half of stage S1: κ withdrawn where a declaring module is
+    /// PROVEN a different entity than the third-party package κ describes (a vendored `ShellKit.shellOut`). With it set
+    /// every such site keeps the pre-S1 route (κ fires). The union half is additive and has no switch.
+    static let r1871vOff = Env.on("CANDOR_R1871V_OFF")
+    /// Reach probe: one `S1ROUTE` line per κ free-name site whose route is not `kappaOnly`, with the reason.
+    static let s1Probe = Env.trace("CANDOR_S1_PROBE")
+
+    /// Readable dependency sources, per module: file-scope free functions (with signatures) and type names. `nil` =
+    /// the module's sources are not readable (or a macro / unread `#if` shape makes the walk incomplete), so nothing
+    /// may be concluded from silence. Cached for the whole scan (a module's sources do not change mid-scan).
+    nonisolated(unsafe) static var depDeclCacheS1: [String: (fns: [String: [FreeFnSignature]], types: [String: Bool])?] = [:]
+    func depModuleDeclsS1(_ m: String) -> (fns: [String: [FreeFnSignature]], types: [String: Bool])? {
+        if let c = Self.depDeclCacheS1[m] { return c }
+        var out: (fns: [String: [FreeFnSignature]], types: [String: Bool])? = nil
+        if !deps.notSwiftCoverable.contains(m), let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var fns: [String: [FreeFnSignature]] = [:], types: [String: Bool] = [:], ok = true
+            for path in files {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let f = topLevelFreeFunctions(source: text), t = topLevelTypeDeclarations(source: text)
+                if f.opaque || t.opaque { ok = false; break }
+                for (n, s) in f.fns { fns[n, default: []].append(contentsOf: s) }
+                for (n, v) in t.names { types[n] = (types[n] ?? false) || v }
+            }
+            if ok { out = (fns, types) }
+        }
+        Self.depDeclCacheS1[m] = out
+        return out
+    }
+
+    /// The argument labels of a call, in order (`nil` = unlabelled), and its trailing-closure count.
+    private func callLabelsS1(_ node: FunctionCallExprSyntax) -> ([String?], Int) {
+        let labels = node.arguments.map { $0.label?.text }
+        let trailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+        return (labels, trailing)
+    }
+
+    /// The route for a κ-answered free name (`name`, as written; `alias` = `dealias(name)`, the κ key), spelled bare
+    /// (`qualifier == nil`) or module-qualified (`Mod.name(…)`, `qualifier == "Mod"`).
+    func kappaFreeRoute(_ name: String, alias: String, _ node: FunctionCallExprSyntax, qualifier: String?) -> KappaFreeRoute {
+        let (labels, trailing) = callLabelsS1(node)
+        let platformOnly = kappaIsPlatformOnly(alias)
+        let knownPackage = kappaDescribesKnownPackage(alias)
+        func probe(_ r: KappaFreeRoute, _ why: String) -> KappaFreeRoute {
+            if Self.s1Probe {
+                FileHandle.standardError.write("S1ROUTE \(qualifier.map { "\($0)." } ?? "")\(name) -> \(r) (\(why))\n".data(using: .utf8)!)
+            }
+            return r
+        }
+        // A κ name no registry entry covers keeps the pre-S1 answer (the registry tests require every κ name to have
+        // one, so this is a guard, not a path).
+        guard KAPPA_REGISTRY[alias] != nil else {
+            return qualifier == nil && depShadows(name) ? .shadow : .kappaOnly
+        }
+        // Does module `m` (of chained package `p`, or unchained when `p == nil`) DECLARE this name for this call?
+        // `true` declares, `false` provably does not, `nil` cannot tell.
+        //   • PLATFORM entries keep R649's declarer set exactly — a chained report's one-segment qual
+        //     (`declaresFreeName`) — and only NARROW it: where the module's readable sources show every visible
+        //     free function of that name has a label set this call cannot bind, the declaration is another function
+        //     (R1876). Where they cannot be read, the wire carries no labels, so it is undecided.
+        //   • THIRD-PARTY entries: a declaration on the wire, or a visible file-scope function or type in the
+        //     module's readable sources (a pure function has no report row, and is still the callee).
+        func declares(chainedPkg p: String?, module m: String) -> Bool? {
+            let src = depModuleDeclsS1(m)
+            let wire = p.map { deps.declaresFreeName("\($0)#\(name)") || deps.lookup("\($0)#\(name).init") != nil
+                || deps.surface.typeKeysSeen.contains("\($0)#\(name)") } ?? false
+            let srcType = src?.types[name] == true
+            let srcSigs = src?.fns[name]?.filter { $0.visible } ?? []
+            if platformOnly {
+                guard p != nil, deps.declaresFreeName("\(p!)#\(name)") else { return false }
+                if !srcType, !srcSigs.isEmpty {
+                    let binds = srcSigs.contains { $0.couldAccept(callLabels: labels, trailingClosures: trailing) }
+                    if !binds, Self.s1Probe {
+                        FileHandle.standardError.write("S1ROUTE \(name) R1876-unbindable \(p!)/\(m)\n".data(using: .utf8)!)
+                    }
+                    return binds
+                }
+                return src == nil ? nil : true
+            }
+            if wire || srcType || !srcSigs.isEmpty { return true }
+            return (p == nil && src == nil) ? nil : false
+        }
+        // ── the module-qualified spelling: the qualifier NAMES the module ──
+        if let q = qualifier {
+            guard knownPackage, let rel = kappaRelation(name: alias, module: q) else { return .kappaOnly }
+            let chained = deps.chainedPkgs(importing: [q]).first?.pkg
+            switch rel {
+            case .same:
+                // R1871 — the same entity: κ ∪ the row. Only a chained package has a row to join.
+                if let p = chained, declares(chainedPkg: p, module: q) != false { return probe(.union, "same:\(q)") }
+                return .kappaOnly
+            case .different:
+                // The vendored copy: withdrawn only on PROOF that `q` itself declares the name (its sources, or its
+                // chained report). A module that merely RE-EXPORTS the entity's module declares nothing, and
+                // unreadable + unchained proves nothing, so κ stays (the over-charge direction).
+                if Self.r1871vOff { return .kappaOnly }
+                return declares(chainedPkg: chained, module: q) == true ? probe(.shadow, "different:\(q)") : .kappaOnly
+            case .unknown:
+                return .kappaOnly
+            }
+        }
+        // ── the bare spelling ──
+        let chained = deps.chainedPkgs(importing: Array(importedModules))
+        var same = false, different = false, undecided = false
+        var declaringModules: [String] = []
+        for (p, mods) in chained {
+            var d: Bool? = false
+            for m in mods {
+                switch declares(chainedPkg: p, module: m) {
+                case true?: d = true
+                case nil: if d != true { d = nil }
+                case false?: break
+                }
+            }
+            guard d != false else { continue }
+            if d == nil { undecided = true }
+            declaringModules.append(contentsOf: mods)
+            let rels = mods.compactMap { kappaRelation(name: alias, module: $0) }
+            if rels.contains(.same) { same = true }
+            else if rels.contains(.unknown) { return depShadows(name) ? .shadow : .kappaOnly }   // pre-S1, unchanged
+            else { different = true }
+        }
+        if same {
+            // R1867 / R1870 — the entity's own package declares it: union (a second, different declarer is unioned
+            // too, ⟨0.25⟩ — the over-charge direction).
+            return probe(.union, "same:\(declaringModules.joined(separator: ","))")
+        }
+        if different {
+            if platformOnly {
+                // R649 on a declaration whose labels can bind the call; R1876's unreadable half unions instead.
+                return undecided ? probe(.union, "platform-unreadable") : probe(.shadow, "platform-signature")
+            }
+            // A third-party κ name declared by a DIFFERENT chained package only (the vendored copy, or an unrelated
+            // `File` type). A free function was already shadowed before S1 (R649 / 0.33.0); a type's ctor is the
+            // removal half and has the switch.
+            if depShadows(name) { return probe(.shadow, "different-chained") }
+            return Self.r1871vOff || !knownPackage ? .kappaOnly : probe(.shadow, "different-chained-type")
+        }
+        // No chained declarer of this call. R1876: a platform name whose only chained declarers provably cannot bind
+        // this call is κ's alone (`depShadows` alone said "shadow" before S1).
+        // R1871 (N5) — UNCHAINED, a readable imported module that declares a third-party κ name and is NOT the entity
+        // κ describes: the call reaches that module's body, so κ must not fire; the ledger names the module.
+        guard knownPackage, !Self.r1871vOff else { return .kappaOnly }
+        let entityImported = importedModules.contains { kappaRelation(name: alias, module: $0) == .same }
+        if entityImported { return .kappaOnly }
+        let chainedMods = Set(chained.flatMap { $0.modules })
+        for m in importedModules.sorted() where !chainedMods.contains(m) && !PLATFORM_MODULES.contains(m)
+            && !projectModules.contains(m) && kappaRelation(name: alias, module: m) == .different {
+            if declares(chainedPkg: nil, module: m) == true { return probe(.shadow, "different-readable:\(m)") }
+        }
+        return .kappaOnly
+    }
+
     /// The member-call κ answer, with SPEC §1 ⟨0.32⟩'s whole-type rule applied to a receiver PROVEN to be
     /// a subprocess handle. `kappaMember`'s `Process` entry stays the verb FLOOR for every other receiver
     /// (an `extension Process`'s implicit self, a stale chain root) — see `PROCESS_MEMBERS`.
@@ -4874,7 +5056,7 @@ final class CallCollector: SyntaxVisitor {
     /// own `Process` is Foundation's. `isModuleQualifier` already refuses when the qualifier is the
     /// project's OWN module (`@testable import App` — `App.Process()` is the project's type).
     private func chargeModuleQualifiedSpelling(_ name: String, _ node: FunctionCallExprSyntax,
-                                               lit: String?) -> Bool {
+                                               lit: String?, module: String) -> Bool {
         // The `Data`/`String` content-read ctor, on the UN-dealiased name — the bare chain keys that arm
         // on the written name too, and parity with the bare spelling is the invariant here.
         if chargeContentsCtor(name, node, lit: lit, shadowable: false) { return true }
@@ -4936,6 +5118,22 @@ final class CallCollector: SyntaxVisitor {
             return true
         }
         guard let eff = kappaFree(name: alias, argCount: node.arguments.count) else { return false }
+        // STAGE S1 (R1871) — the qualifier NAMES the module, so the κ registry can say whether it is the entity κ
+        // describes. CONSEQUENCE (1) of the doc above ("when κ answers, the `extOwner` dep-join this arm preempts
+        // does not run") predates SPEC §2 ⟨0.43⟩'s union clause and is withdrawn here: the same entity gets κ AND the
+        // join; a module PROVEN to declare its own copy (a vendored `ShellKit.shellOut`) is a different entity, so κ
+        // does not answer and the call falls through to the join / ledger arms below (consequence (2), withdrawn).
+        let s1Route = kappaFreeRoute(name, alias: alias, node, qualifier: module)
+        let s1Call = Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
+                          argTypes: argTypesOf(node), unqualified: true,
+                          argLabelled: node.arguments.contains { $0.label != nil })
+        if s1Route == .shadow {
+            // A TYPE's ctor has no module-leaf key (`<pkg>#File` is not `File.init`), so the fall-through member
+            // call cannot join it; the bare spelling's call asks `<pkg>#File.init` as well.
+            if name.first?.isUppercase == true { calls.append(s1Call) }
+            return false
+        }
+        if s1Route == .union { calls.append(s1Call) }
         let est = isEstablishingFree(effect: eff, name: alias)
         // SOUNDNESS R385 — WITHHOLD THE LITERAL for a form whose locator the destination surface cannot
         // express. A bonjour `type:` and a `SecItem` CFDictionary are not hosts or paths, so capturing
@@ -9594,8 +9792,10 @@ final class CallCollector: SyntaxVisitor {
                 for e in privacyEventKitEffects(entityType: entityTypeArg(node.arguments)) { directEffects.insert(e) }
                 unionConditionalTypeEdge(name, node, lit: lit)
             } else if (!declaredShadow(name) || conditionallyShadowedTypes.contains(name)),
-                      !localFreeFns.contains(name), !depShadows(name),
-                      let eff = kappaFree(name: dealias(name), argCount: node.arguments.count) {
+                      !localFreeFns.contains(name),
+                      let eff = kappaFree(name: dealias(name), argCount: node.arguments.count),
+                      case let s1Route = kappaFreeRoute(name, alias: dealias(name), node, qualifier: nil),
+                      s1Route != .shadow {
                 // A LOCALLY-DECLARED type ctor (`Pipe()` where `class Pipe`) or free fn (`NSLog(...)` where
                 // `func NSLog`) ALWAYS shadows the platform free-call table — else a project's own
                 // `Pipe`/`NSDate`/`NSLog`/`CACurrentMediaTime` fabricates Ipc/Clock/Log (the precision failure;
@@ -9642,6 +9842,15 @@ final class CallCollector: SyntaxVisitor {
                 if conditionallyShadowedFreeFns.contains(name) || conditionallyShadowedTypes.contains(name) {
                     calls.append(Call(path: name, leaf: name, strArg: lit, typed: false,
                                       args: argKinds(node), argTypes: argTypesOf(node), unqualified: true))
+                } else if s1Route == .union {
+                    // STAGE S1 (R1867 / R1870 / R1876) — SPEC §2 ⟨0.43⟩'s UNION: the chained declaration is the entity κ
+                    // describes (or a platform name's declarer could not be told apart), so κ's charge above stands AND
+                    // the call goes to the §2 join, exactly as the shadowed spelling below emits it. The join adds the
+                    // row's effects; a miss adds nothing (κ answered). Before S1 a free function took the row alone
+                    // (R1867, row-wins) and a type's ctor took κ alone (R1870, curated-wins).
+                    calls.append(Call(path: name, leaf: name, strArg: lit, typed: false, args: argKinds(node),
+                                      argTypes: argTypesOf(node), unqualified: true,
+                                      argLabelled: node.arguments.contains { $0.label != nil }))
                 }
             } else {
                 // R32 (swift) — an UNQUALIFIED requirement call inside a PROTOCOL EXTENSION (or protocol
@@ -10414,7 +10623,7 @@ final class CallCollector: SyntaxVisitor {
                 }
             } else if let mod = ma.base?.as(DeclReferenceExprSyntax.self)?.baseName.text,
                       isModuleQualifier(mod),
-                      chargeModuleQualifiedSpelling(member, node, lit: lit) {
+                      chargeModuleQualifiedSpelling(member, node, lit: lit, module: mod) {
                 // A MODULE-QUALIFIED SPELLING OF A FREE NAME — `Foundation.Process()`, and not a member
                 // call on a value at all. MEASURED: it reported NOTHING where the bare `Process()`
                 // reported `Exec`, and the loss compounded — `let t = Foundation.Process()` left `t`
@@ -10428,11 +10637,12 @@ final class CallCollector: SyntaxVisitor {
                 // the BARE spelling would classify, so every callee κ does not know keeps the behaviour
                 // it had (the dep-join and local-resolution arms below are untouched).
                 //
-                // TWO CONSEQUENCES, stated because they are the price of matching the bare spelling
-                // rather than accidents. (1) When κ answers, the `extOwner` dep-join this arm preempts
-                // does not run — the same trade the bare spelling has always made, since κ answers there
-                // first too. (2) A dependency module that exports a type sharing a κ name is charged the
-                // κ effect; that exposure is IDENTICAL to the bare spelling's and is not created here.
+                // TWO CONSEQUENCES this used to accept, both WITHDRAWN by stage S1 (SOUNDNESS R1871, SPEC §2
+                // ⟨0.43⟩): (1) when κ answered, the `extOwner` dep-join this arm preempts did not run — now a
+                // module the κ registry says IS the entity gets κ AND the join (`kappaFreeRoute` → union);
+                // (2) a dependency module exporting its own copy of a third-party κ name was charged the κ
+                // effect — now a module PROVEN to declare it is a different entity and the call falls through
+                // to the arms below. Platform κ names keep the old behaviour.
                 // What is NOT covered: the ctor arms keyed directly on a `DeclReferenceExpr` callee
                 // earlier in this visitor (`Data`/`String(contentsOf:)`). Pinned as an expected-failure
                 // ratchet in `ExecCapabilityProcessTests`, with the reason the fix belongs one level up.

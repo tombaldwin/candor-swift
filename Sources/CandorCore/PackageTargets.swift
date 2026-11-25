@@ -1087,3 +1087,75 @@ public func dependencyModuleOwnership(rootDir: String,
     // (above, if two packages claim it) and uncoverable (here), which is the disclosing direction.
     return out
 }
+
+/// SOUNDNESS R1876 — one FILE-SCOPE free function's call signature: each parameter's argument LABEL (`nil` for
+/// `_`), whether it has a default, and whether it is variadic. Enough to say whether a call site's argument labels
+/// could bind to it — the part of Swift's name resolution that tells a dependency's `connect(host:)` from POSIX
+/// `connect(_:_:_:)`, which the wire key (`connect`) cannot.
+public struct FreeFnSignature: Hashable, Sendable {
+    public let labels: [String?]
+    public let defaults: [Bool]
+    public let variadic: [Bool]
+    /// `public`/`open` — visible to an importer.
+    public let visible: Bool
+    public init(labels: [String?], defaults: [Bool], variadic: [Bool], visible: Bool) {
+        self.labels = labels; self.defaults = defaults; self.variadic = variadic; self.visible = visible
+    }
+    /// Could a call whose arguments carry `callLabels` (in order; `nil` = unlabelled) and `trailingClosures`
+    /// trailing closures bind to this signature? Conservative in the "could" direction: a trailing closure, a
+    /// variadic parameter or anything this does not model answers TRUE, so the only FALSE is a label set that
+    /// provably cannot bind.
+    public func couldAccept(callLabels: [String?], trailingClosures: Int) -> Bool {
+        if trailingClosures > 0 || variadic.contains(true) { return true }
+        // Backtracking bind: each parameter either takes the next argument (labels equal) or is skipped (it has
+        // a default). Every argument must be taken.
+        func bind(_ p: Int, _ a: Int) -> Bool {
+            if p == labels.count { return a == callLabels.count }
+            if a < callLabels.count, labels[p] == callLabels[a], bind(p + 1, a + 1) { return true }
+            return defaults[p] && bind(p + 1, a)
+        }
+        return bind(0, 0)
+    }
+}
+
+/// SOUNDNESS R1876 / R1871 — the FREE FUNCTIONS one source file declares at file scope, by base name, and whether
+/// any `#if` or macro shape made the walk incomplete (`opaque`, as in `topLevelTypeDeclarations`). `private` and
+/// `fileprivate` functions are not recorded (an importer cannot call them). Every `#if` branch is walked.
+public func topLevelFreeFunctions(source: String) -> (fns: [String: [FreeFnSignature]], opaque: Bool) {
+    var out: [String: [FreeFnSignature]] = [:]
+    var opaque = false
+    func walk(_ items: CodeBlockItemListSyntax) {
+        for item in items {
+            guard let d = item.item.as(DeclSyntax.self) else { continue }
+            walkDecl(d)
+        }
+    }
+    func walkDecl(_ d: DeclSyntax) {
+        if let f = d.as(FunctionDeclSyntax.self) {
+            let mods = f.modifiers
+            if mods.contains(where: { ["private", "fileprivate"].contains($0.name.text) }) { return }
+            let vis = mods.contains { ["public", "open"].contains($0.name.text) }
+            var labels: [String?] = [], defs: [Bool] = [], vars: [Bool] = []
+            for p in f.signature.parameterClause.parameters {
+                let first = p.firstName.text
+                labels.append(first == "_" ? nil : first)
+                defs.append(p.defaultValue != nil)
+                vars.append(p.ellipsis != nil)
+            }
+            out[f.name.text, default: []].append(FreeFnSignature(labels: labels, defaults: defs, variadic: vars, visible: vis))
+        } else if d.is(MacroExpansionDeclSyntax.self) {
+            opaque = true
+        } else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl) }
+                case nil: break
+                default: opaque = true
+                }
+            }
+        }
+    }
+    walk(Parser.parse(source: source).statements)
+    return (out, opaque)
+}
