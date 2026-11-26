@@ -45,7 +45,7 @@ def strip(s):
     return QUAL.sub("", s).strip()
 
 
-def split_top(s, sep=",", arrow_aware=False):
+def split_top(s, sep=",", arrow_aware=True):
     out, depth, cur, prev = [], 0, "", ""
     for ch in s:
         if ch in "<([":
@@ -89,7 +89,7 @@ FUNC = re.compile(r"\b(?:public|open)\s+(?:[a-z_]+\s+)*func\s+(?P<name>[A-Za-z_]
 PROP = re.compile(r"\b(?:public|open)\s+(?:[a-z_]+\s+)*var\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 
-def params_of(text, start, arrow_aware=False):
+def params_of(text, start, arrow_aware=True):
     """The parenthesised parameter clause starting at text[start] == '(' -> external label specs."""
     depth, i = 0, start
     while i < len(text):
