@@ -633,6 +633,14 @@ final class DeclCollector: SyntaxVisitor {
     // fabricates and ordering can't matter.
     var propertyWrapperTypes: Set<String> = []
     var wrappedProps: [String: [String: String]] = [:]
+    /// SOUNDNESS R1905 — the QUALIFIED twin of `wrappedProps`: the declaring type's FULL nested path (`Q.Own`), not its simple
+    /// name, so two types that share a simple name cannot be merged into one. `wrappedProps` stays as it was for its other
+    /// readers; only the `$n` projected-value resolution reads this one.
+    var wrappedPropsQ: [String: [String: String]] = [:]
+    /// SOUNDNESS R1904 — a wrapper type (simple name) -> the type its `projectedValue` is DECLARED to be. "?" when the
+    /// declaration states no usable type (no annotation, `Self`, a generic parameter, a function or tuple type) or two
+    /// declarations disagree: those are never typed from here, only hedged.
+    var projectedValueTypes: [String: String] = [:]
     let moduleScopeOwner = "<module>"
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var resultBuilderTypes: Set<String> = []   // `@resultBuilder`-annotated local types
@@ -1462,7 +1470,7 @@ final class DeclCollector: SyntaxVisitor {
         // type-keyed reader of the map is unaffected.
         if typeStack.isEmpty,
            node.attributes.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "TaskLocal" }) {
-            for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { wrappedProps[moduleScopeOwner, default: [:]][n] = "TaskLocal" } }
+            for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { wrappedProps[moduleScopeOwner, default: [:]][n] = "TaskLocal"; wrappedPropsQ[moduleScopeOwner, default: [:]][n] = "TaskLocal" } }
         }
         if let ty = typeStack.last {
             let tyPath = typeStack.joined(separator: ".")
@@ -1491,6 +1499,15 @@ final class DeclCollector: SyntaxVisitor {
                 }
                 let qual = "\(tyPath).\(name)"          // fully-qualified nested path
                 let simpleQual = "\(ty).\(name)"
+                if name == "projectedValue" {   // SOUNDNESS R1904
+                    var pv = "?"
+                    if let ann = binding.typeAnnotation {
+                        let i = typeName(ann.type)
+                        if let tn = i.name, !i.isFunction, tn != "Self", typeGenericParamNames[ty]?.contains(tn) != true,
+                           !isOpaqueParam(ann.type) { pv = tn }
+                    }
+                    if let old = projectedValueTypes[ty], old != pv { projectedValueTypes[ty] = "?" } else { projectedValueTypes[ty] = pv }
+                }
                 if !CallCollector.r1490r2Off, !isStatic, binding.accessorBlock.map({ ab -> Bool in
                     guard case .accessors(let list) = ab.accessors else { return false }   // a getter body
                     return list.allSatisfy { ["willSet", "didSet"].contains($0.accessorSpecifier.text) }
@@ -1651,6 +1668,10 @@ final class DeclCollector: SyntaxVisitor {
                         let an = a.attributeName.trimmedDescription
                         if an.first?.isUppercase == true {
                             wrappedProps[ty, default: [:]][name] = an
+                            // an extension adds to the type it extends, so the key is the path as the extension spells it; a
+                            // redeclaration with a DIFFERENT wrapper makes the pair ambiguous ("?"), never first-wins
+                            if let old = wrappedPropsQ[tyPath]?[name], old != an { wrappedPropsQ[tyPath, default: [:]][name] = "?" }
+                            else { wrappedPropsQ[tyPath, default: [:]][name] = an }
                             break
                         }
                     }

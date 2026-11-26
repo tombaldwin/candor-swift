@@ -1532,6 +1532,9 @@ final class CallCollector: SyntaxVisitor {
     let dynamicMemberTypes: Set<String>   // `@dynamicMemberLookup` types — dynamic access is Unknown
     let propertyWrapperTypes: Set<String> // `@propertyWrapper` types — confirm a wrapped-property edge
     let wrappedProps: [String: [String: String]]  // Type -> property -> wrapper type (`S.count -> Logged`)
+    /// SOUNDNESS R1905 — the same, keyed by the declaring type's FULL path (`Q.Own`); "?" = declared with two wrappers.
+    let wrappedPropsQ: [String: [String: String]]
+    let projectedValueTypes: [String: String]   // SOUNDNESS R1904 — wrapper -> its declared `projectedValue` type ("?" = none usable)
     let typeAliases: [String: String]     // `typealias Proc = Process` — name -> underlying simple type
     /// R429 — every arm recorded for an alias name. Read ONLY at the typed member-call edge, to
     /// emit one edge per arm instead of one for whichever arm was written last.
@@ -1605,7 +1608,7 @@ final class CallCollector: SyntaxVisitor {
          /// metatype — the fabrication `testARebindDropsTheMetatypeBinding` exists to catch.
          metatypeParamsForeign: [String: String] = [:],
          dynamicMemberTypes: Set<String>,
-         propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]],
+         propertyWrapperTypes: Set<String>, wrappedProps: [String: [String: String]], wrappedPropsQ: [String: [String: String]] = [:], projectedValueTypes: [String: String] = [:],
          localFreeFns: Set<String>, conditionallyShadowedFreeFns: Set<String> = [],
          conditionallyShadowedTypes: Set<String> = [], mixedArmNamesR1714: Set<String> = [], typeAliases: [String: String],
          typeAliasArms: [String: Set<String>] = [:],
@@ -1654,6 +1657,8 @@ final class CallCollector: SyntaxVisitor {
         self.enclosingMembers = enclosingMembers
         self.propertyWrapperTypes = propertyWrapperTypes
         self.wrappedProps = wrappedProps
+        self.wrappedPropsQ = wrappedPropsQ
+        self.projectedValueTypes = projectedValueTypes
         self.dynamicMemberTypes = dynamicMemberTypes
         self.enumCaseValueType = enumCaseValueType
         self.metatypeEnumCaseValueType = metatypeEnumCaseValueType   // R585 (b10)
@@ -10376,6 +10381,37 @@ final class CallCollector: SyntaxVisitor {
                 calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node),
                                   argTypes: argTypesOf(node), extOwner: c))
             }
+            // SOUNDNESS R1904 — A `$n` PROJECTED-VALUE RECEIVER (`projectedReceiver`), answered BEFORE the receiver's root picks an arm,
+            // because the root of `T.$n` / `x.$n` is the DECLARING type and every arm below keys a member that type does not have.
+            // Typed through the wrapper's declared `projectedValue`, the call is a typed call on THAT type: a resolution, added
+            // BESIDE whatever the arms below form (the release's keys stay). Not identified, and spelled with an owner (`T.$n`,
+            // `x.$n`), it gets the C12 site marker a bare `$n` already gets — those spellings never reached it, so the call was
+            // silent over a dependency body of the same name. A bare `$n` keeps its own C12 arm in the drop branch below.
+            var projSkipC12R1904 = false
+            if !Self.r1904Off, let b = ma.base, let pr = projectedReceiver(b) {
+                switch pr.kind {
+                case .typed(let pv):
+                    projSkipC12R1904 = true
+                    vbHit("R1904", "\(pv).\(member)")
+                    if declaredTypes.contains(pv) {
+                        // a type THIS scan declares: the local unit's own member, exactly as a typed local receiver keys it
+                        calls.append(Call(path: "\(pv).\(member)", leaf: member, strArg: lit, typed: true, args: argKinds(node), argTypes: argTypesOf(node),
+                                          holdsHop: holdsHop))
+                    } else {
+                        // a type a DEPENDENCY (or the platform) declares: the §2 join's owner, as for any typed external receiver
+                        calls.append(Call(path: member, leaf: member, strArg: lit, typed: false, args: argKinds(node), argTypes: argTypesOf(node),
+                                          opaqueRecv: false, ownerModule: nil, extOwner: pv, holdsHop: holdsHop, guessHop: false))
+                    }
+                case .unknown where pr.qualified && !Self.c12Off:
+                    projSkipC12R1904 = true
+                    vbHit("R1904H", "\(member)")
+                    var c = Call(path: "<site>.c12.\(member)", leaf: member, strArg: nil, typed: false, args: [], argTypes: [])
+                    c.platextLabels = node.arguments.map { $0.label?.text }
+                    c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+                    calls.append(c)
+                default: break
+                }
+            }
             let baseIsConventionVar = ma.base.map(Self.peel)?.as(DeclReferenceExprSyntax.self)
                 .map { conventionVars.contains($0.baseName.text) } ?? false
             // SOUNDNESS R832 — THE STATIC FACTORY THAT A LOCAL LEAF MIS-TYPED. `rootOf` types
@@ -11159,11 +11195,11 @@ final class CallCollector: SyntaxVisitor {
                     // The marker is emitted BESIDE the drop, never instead of it: `droppedMember` and every fence keyed on
                     // it (R1073, R1472, the R1455 probe and pricing arm) read what they read before. The Driver decides
                     // whether anything is disclosed (`terminalUnidentifiedMember`); the marker itself carries no effect.
-                    if !Self.c12Off {
+                    if !Self.c12Off, !projSkipC12R1904 {
                         var c = Call(path: "<site>.c12.\(member)", leaf: member, strArg: nil, typed: false, args: [], argTypes: [])
                         c.platextLabels = node.arguments.map { $0.label?.text }
                         c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
-                        c.projectedTaskLocal = taskLocalProjectedReceiver(b)
+                        c.projectedTaskLocal = projectedReceiver(b)?.kind == .taskLocal
                         calls.append(c)
                     }
                     // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
@@ -12805,31 +12841,71 @@ final class CallCollector: SyntaxVisitor {
     /// Curated-routing S3 (lane L8) kill switch: no `<site>.c12.` marker at the R1455 drop, so the terminal is never asked.
     static let c12Off = Env.on("CANDOR_C12_OFF")
 
-    /// SOUNDNESS R1895 — is `recv` the projected value of a `@TaskLocal` this scan declares: `$n` inside the type that
-    /// declares `@TaskLocal static var n`, or `T.$n` (`Self.$n`) for a type `T` that does? Both halves are read from
-    /// the SOURCE (`wrappedProps` records the declaring type and the wrapper attribute), so a `$n` of any other
-    /// wrapper, of a `@TaskLocal` a dependency declares (no declaration in this scan), or of a name no type here
-    /// declares as `@TaskLocal` is NOT one — it stays an unidentified receiver and the C12 hedge keeps its say.
-    func taskLocalProjectedReceiver(_ recv: ExprSyntax) -> Bool {
-        func declared(_ owner: String?, _ n: String) -> Bool {
-            guard let o = owner else { return false }
-            return wrappedProps[o]?[n] == "TaskLocal"
+    /// SOUNDNESS R1904 / R1905 — WHAT A `$n` PROJECTED-VALUE RECEIVER IS. `$n` / `T.$n` / `self.$n` / `x.$n` call whatever
+    /// the wrapper's `projectedValue` is, so the receiver's type is not the declaring type's: it is the wrapper's DECLARED
+    /// `projectedValue` type (`projectedValueTypes`). Three answers, each read from the SOURCE:
+    ///   `.taskLocal` — the wrapper is the platform's `TaskLocal` (R1895): its members are `STDLIB_PROJECTED_VALUE_MEMBER_LABELS`;
+    ///   `.typed(T)`  — a wrapper of this scan whose `projectedValue` is declared `T`: the call is a typed call on `T`;
+    ///   `.unknown`   — anything else (no such wrapped property here, a dependency's wrapper, a `projectedValue` with no usable
+    ///                  declared type, a local or parameter wrapper that shadows a module `@TaskLocal`, a name two types
+    ///                  declare differently): NOT identified, so the C12 hedge keeps its say.
+    /// The declaring type is found by its FULL path (`wrappedPropsQ`), never by its simple name, so a dependency type or a second
+    /// scan type that shares the simple name cannot be read as the one that declares the TaskLocal (R1905).
+    enum ProjectedRecvR1904: Equatable { case taskLocal, typed(String), unknown }
+    func projectedReceiver(_ recv: ExprSyntax) -> (qualified: Bool, kind: ProjectedRecvR1904)? {
+        let e = Self.peel(recv).trimmed
+        func classify(_ wrapper: String?) -> ProjectedRecvR1904 {
+            guard let w = wrapper, w != "?" else { return .unknown }
+            // a TaskLocal this scan declares ITSELF is a scan wrapper, not the platform's
+            if w == "TaskLocal", !propertyWrapperTypes.contains("TaskLocal") { return .taskLocal }
+            if !Self.r1904Off, propertyWrapperTypes.contains(w), let pv = projectedValueTypes[w], pv != "?" { return .typed(pv) }
+            return .unknown
         }
-        let e = recv.trimmed
+        let encPath = ai.enclosingTypePath ?? enclosingType
         if let d = e.as(DeclReferenceExprSyntax.self), d.baseName.text.hasPrefix("$"), d.baseName.text.count > 1 {
             let n = String(d.baseName.text.dropFirst())
-            // a member of the enclosing type shadows a module-scope name; only when it declares no `n` is `$n` the global's
-            if let et = enclosingType, wrappedProps[et]?[n] != nil || fields[et]?[n] != nil { return declared(et, n) }
-            return wrappedProps["<module>"]?[n] == "TaskLocal"
+            if n.allSatisfy({ $0.isNumber }) { return nil }   // `$0`: an anonymous closure argument
+            // a closure binder, local or parameter of that name (`@W var n` / `@W _ n`) is the wrapper's own `$n` and shadows both
+            // the member and the module-scope name — not modelled, so not identified
+            if binderShadow.contains(n) || isBoundLocal(n) || paramNamesR851.contains(n) { return (false, .unknown) }
+            if let et = enclosingType, wrappedProps[et]?[n] != nil || fields[et]?[n] != nil {
+                return (false, classify(encPath.flatMap { wrappedPropsQ[$0]?[n] }))
+            }
+            // a member the enclosing type INHERITS from a type this scan cannot see is not a module-scope name
+            if let et = enclosingType,
+               (supertypesAll[et] ?? []).contains(where: { !localTypes.contains($0) && !STDLIB_PROTOCOLS.contains($0) }) {
+                return (false, .unknown)
+            }
+            return (false, classify(wrappedPropsQ["<module>"]?[n]))
         }
         if let m = e.as(MemberAccessExprSyntax.self), let base = m.base, m.declName.baseName.text.hasPrefix("$"),
            m.declName.baseName.text.count > 1 {
             let n = String(m.declName.baseName.text.dropFirst())
-            let t = base.trimmedDescription.split(separator: ".").last.map(String.init)
-            return declared(t == "Self" ? enclosingType : t, n)
+            if n.allSatisfy({ $0.isNumber }) { return nil }
+            guard let spelled = dottedTypePath(Syntax(Self.peel(base))) else { return (true, .unknown) }
+            if spelled == "Self" || spelled == "self" { return (true, classify(encPath.flatMap { wrappedPropsQ[$0]?[n] })) }
+            if spelled.contains("."), let head = spelled.split(separator: ".").first, !localTypes.contains(String(head)) {
+                return (true, .unknown)   // module-qualified: a type of ANOTHER module, never this scan's
+            }
+            var segs = (encPath ?? "").split(separator: ".").map(String.init)
+            while !segs.isEmpty {   // innermost enclosing nest first, as Swift resolves a bare type name
+                let k = segs.joined(separator: ".") + "." + spelled
+                if wrappedPropsQ[k] != nil { return (true, classify(wrappedPropsQ[k]?[n])) }
+                if ai.enabled, ai.localTypePaths.contains(k) { return (true, .unknown) }   // a nested type of that name declares no wrapped property: it SHADOWS a top-level one
+                segs.removeLast()
+            }
+            if wrappedPropsQ[spelled] != nil { return (true, classify(wrappedPropsQ[spelled]?[n])) }
+            // an INSTANCE of a scan type (`obj.$n`): typed, and only when that simple name is declared exactly once
+            let r = rootOf(base)
+            if let root = r.root, r.isVar, !r.opaqueHop, ai.enabled, ai.pathsByLeaf[root]?.count == 1,
+               let only = ai.pathsByLeaf[root]?.first {
+                return (true, classify(wrappedPropsQ[only]?[n]))
+            }
+            return (true, .unknown)
         }
-        return false
+        return nil
     }
+    static let r1904Off = Env.on("CANDOR_R1904_OFF")
     private func siteFallback(_ cls: String, _ member: String) {
         guard let opt = Self.ct2Fallback else { return }
         let optionAOnly = cls == "format" || cls == "eq"

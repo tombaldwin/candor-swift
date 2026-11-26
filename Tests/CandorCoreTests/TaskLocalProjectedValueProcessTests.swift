@@ -40,8 +40,7 @@ final class TaskLocalProjectedValueProcessTests: XCTestCase {
     // the second fixture: a dependency's `withValue` on a receiver nothing types — must stay disclosed
     public func untyped_w(_ p: Int) -> Int { let b = makeBoxes().first!; return b.withValue(p) { 1 } }
     public func untyped_shorthand_w(_ p: Int) -> Int { var n = 0; makeBoxes().forEach { n += $0.withValue(p) { 1 } }; return n }
-    // `$other` / `$missing` are NOT `@TaskLocal`s of this scan. They never reach the C12 drop (a typed static owner), so they
-    // read EXACTLY what they read on 3f72e1e — silent over a dependency `withValue` (an unnumbered finding, pre-existing)
+    // `$other` is a scan wrapper (typed through its `projectedValue`, R1904); `$missing` names no wrapped property, so it is hedged
     public func otherwrapper_w(_ p: Int) -> Int { Ctx.$other.withValue(p) { 1 } }
     public func undeclared_w(_ p: Int) -> Int { Ctx.$missing.withValue(p) { 1 } }
     public func wrongowner_w(_ p: Int) -> Int { Elsewhere.$current.withValue(p) { 1 } }
@@ -101,10 +100,13 @@ final class TaskLocalProjectedValueProcessTests: XCTestCase {
         let tok = "dispatch:<untyped>.withValue"
         for chained in [true, false] {
             let rows = try why(fx, chained: chained)
-            for c in ["untyped_w", "untyped_shorthand_w", "Ctx.insideOther", "notlocal_w"] {
+            for c in ["untyped_w", "untyped_shorthand_w", "notlocal_w", "undeclared_w"] {
                 XCTAssertTrue(rows[c]?.contains(tok) ?? false,
                               "chained=\(chained) \(c): a `withValue` the dependency could answer, on a receiver that is NOT a `@TaskLocal` of this scan, stays disclosed — rows: \(rows)")
             }
+            // R1904: `$other` is a scan wrapper whose `projectedValue` is a declared `Box`, so the call is TYPED, not the C12 hedge
+            // (ProjectedValueWrapperProcessTests asserts what it charges)
+            XCTAssertFalse(rows["Ctx.insideOther"]?.contains(tok) ?? false, "chained=\(chained) Ctx.insideOther: typed through `Mirror2.projectedValue`")
             XCTAssertFalse(rows["wrongowner_w"]?.isEmpty ?? true,
                            "chained=\(chained): `Elsewhere.$current` — no scan type declares it — keeps the Unknown it had")
             for c in ["tl_qualified_p", "tl_labelled_p", "Ctx.inside", "Ctx.viaSelf", "tl_global_p"] {

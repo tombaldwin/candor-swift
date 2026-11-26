@@ -394,7 +394,7 @@ final class NameKeyedStateTests: XCTestCase {
         "globalMetatypes": .immutableIndex, "globalMetatypeArrayElem": .immutableIndex,
         "fieldMetatypes": .immutableIndex, "fieldMetatypeArrayElem": .immutableIndex,
         "dynamicMemberTypes": .immutableIndex, "propertyWrapperTypes": .immutableIndex,
-        "wrappedProps": .immutableIndex, "typeAliases": .immutableIndex,
+        "wrappedProps": .immutableIndex, "wrappedPropsQ": .immutableIndex, "projectedValueTypes": .immutableIndex, "typeAliases": .immutableIndex,
         "opaqueSeqBuilders": .immutableIndex, "seqBuilderConcrete": .immutableIndex,
         "closureFields": .immutableIndex,
         // R96 — the REASSIGNABLE (`var`) subset of the row above, keyed by TYPE + property name and

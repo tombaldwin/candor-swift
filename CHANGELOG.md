@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ `$n` projected-value receivers: typed through the wrapper, or hedged (SOUNDNESS R1904, R1905)
+
+`$n.m()`, `T.$n.m()`, `self.$n.m()` and `x.$n.m()` call whatever the wrapper's `projectedValue` is, not a member of the declaring
+type. A wrapper of this scan whose `projectedValue` is declared `P` now makes the call a typed call on `P` (a scan type's body
+charges; a dependency's charges when chained and is disclosed `invisible` standalone, as for any typed dependency receiver).
+Before, `T.$n.m()` and `x.$n.m()` keyed a member the declaring type does not have and read silent, and a bare `$n.m()` over such a
+wrapper was only the C12 `Unknown` (which a typed answer replaces: this REMOVES that `Unknown`). A wrapper the scan cannot read, a
+`projectedValue` with no usable declared type (generic, `Self`, none), and any other `T.$n`/`x.$n` now get the C12 site hedge.
+R1905: `@TaskLocal` is looked up by the declaring type's FULL path (`wrappedPropsQ`), never its simple name; a local or parameter
+wrapper that shadows a module `@TaskLocal`, a module-qualified spelling, and a `$n` inherited from a dependency class are no longer
+read as the TaskLocal, so their C12 hedge is back (R1895 had dropped it). Kill switch `CANDOR_R1904_OFF` restores the old routing
+of the typed resolution and the qualified hedge only.
+
 ### Stdlib table generator: `->` is not a closing bracket (SOUNDNESS R1903)
 
 `tools/gen-stdlib-conformances.py`'s `split_top` read the `>` of `->` as a closing bracket, so a platform member with a

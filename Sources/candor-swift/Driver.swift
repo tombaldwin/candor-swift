@@ -542,6 +542,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // see that field's doc). Consulted per-function below, keyed on `FnInfo.enclosingType`.
     var typeMacroAttrs: [String: [String]] = [:]
     var wrappedProps: [String: [String: String]] = [:]
+    var projectedValueTypes: [String: String] = [:]       // R1904 — wrapper -> declared projectedValue type
+    var wrappedPropsQ: [String: [String: String]] = [:]   // R1905 — keyed by the declaring type's FULL path
     var returnsIdx: [String: String] = [:]
     /// SOUNDNESS R585 (b9) — the metatype half of `returnsIdx`: fn leaf -> the type whose METATYPE it
     /// returns. Separate map for `globalMetatypes`' reason — `returnsIdx` answers "what VALUE type does
@@ -1132,6 +1134,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalActorTypes.formUnion(c.globalActorTypes)
         for (t, attrs) in c.typeMacroAttrs { typeMacroAttrs[t, default: []].append(contentsOf: attrs) }
         for (t, ps) in c.wrappedProps { wrappedProps[t, default: [:]].merge(ps) { a, _ in a } }
+        for (w, t) in c.projectedValueTypes { projectedValueTypes[w] = (projectedValueTypes[w].map { $0 == t } ?? true) ? t : "?" }
+        for (t, ps) in c.wrappedPropsQ { wrappedPropsQ[t, default: [:]].merge(ps) { a, b in a == b ? a : "?" } }
         for m in c.imports { importCounts[m, default: 0] += 1 }
         fileImports[c.file] = c.imports
         staticFactoryFields.append(contentsOf: c.staticFactoryFields)
@@ -5468,7 +5472,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                metatypeEnumCaseValueType: metatypeEnumCaseValueType,   // R585
                                metatypeParamsForeign: metatypeParamsForeign,            // R704 (b1)
                                dynamicMemberTypes: dynamicMemberTypes,
-                               propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps,
+                               propertyWrapperTypes: propertyWrapperTypes, wrappedProps: wrappedProps, wrappedPropsQ: wrappedPropsQ, projectedValueTypes: projectedValueTypes,
                                localFreeFns: localFreeFnNames.union(localFreeFnBaseNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedFreeFns: conditionalOnlyFreeFnNames.union(conditionalOnlyFreeFnNamesByModule[swiftModuleOf(f.loc)] ?? []),
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
