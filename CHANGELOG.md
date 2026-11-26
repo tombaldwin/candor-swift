@@ -14,14 +14,18 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 `$n.m()`, `T.$n.m()`, `self.$n.m()` and `x.$n.m()` call whatever the wrapper's `projectedValue` is, not a member of the declaring
 type. A wrapper of this scan whose `projectedValue` is declared `P` now makes the call a typed call on `P` (a scan type's body
-charges; a dependency's charges when chained and is disclosed `invisible` standalone, as for any typed dependency receiver).
-Before, `T.$n.m()` and `x.$n.m()` keyed a member the declaring type does not have and read silent, and a bare `$n.m()` over such a
-wrapper was only the C12 `Unknown` (which a typed answer replaces: this REMOVES that `Unknown`). A wrapper the scan cannot read, a
+charges; a dependency's charges when chained and is disclosed `invisible` standalone, as for any typed dependency receiver). The bare
+`$n` C12 `Unknown` is replaced ONLY where the typed call lands, a type this scan declares; for a dependency or platform type, and above
+all one the scan only EXTENDS (the §2 join reads neither the scan's extension bodies nor the platform table), the hedge stays beside
+the typed call. Before, `T.$n.m()` and `x.$n.m()` keyed a member the declaring type does not have and read silent, and a bare `$n.m()` over such a
+wrapper was only the C12 `Unknown` (removed only for a type this scan declares). A wrapper the scan cannot read, a
 `projectedValue` with no usable declared type (generic, `Self`, none), and any other `T.$n`/`x.$n` now get the C12 site hedge.
 R1905: `@TaskLocal` is looked up by the declaring type's FULL path (`wrappedPropsQ`), never its simple name; a local or parameter
 wrapper that shadows a module `@TaskLocal`, a module-qualified spelling, and a `$n` inherited from a dependency class are no longer
-read as the TaskLocal, so their C12 hedge is back (R1895 had dropped it). Kill switch `CANDOR_R1904_OFF` restores the old routing
-of the typed resolution and the qualified hedge only.
+read as the TaskLocal, so their C12 hedge is back (R1895 had dropped it). Kill switch `CANDOR_R1904_OFF` restores main's routing of the
+typed resolution and the qualified hedge ONLY: it does not restore main exactly (the R1905 full-path/shadow lookup is not gated, so
+a local or parameter wrapper, a dependency-inherited `$n` and a module-qualified spelling keep their hedge, and a genuine platform
+`TaskLocal` whose simple name collided with another type, `Own` against `Q.Own`, no longer carries main's false hedge).
 
 ### Stdlib table generator: `->` is not a closing bracket (SOUNDNESS R1903)
 

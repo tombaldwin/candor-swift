@@ -10391,7 +10391,12 @@ final class CallCollector: SyntaxVisitor {
             if !Self.r1904Off, let b = ma.base, let pr = projectedReceiver(b) {
                 switch pr.kind {
                 case .typed(let pv):
-                    projSkipC12R1904 = true
+                    // The C12 hedge is dropped ONLY where the typed call is shown to land: a type THIS scan declares, whose body
+                    // the local arm resolves. A type a dependency or the platform declares — and above all one the scan only
+                    // EXTENDS (`declaredTypes` excludes it) — goes to the §2 join, which reads neither the scan's own extension
+                    // bodies nor the platform table; the hedge stays beside the join (executed: `$fm.go()` over `extension
+                    // FileManager`, and `$bx.go2()` over `extension Box`, both read absent with the hedge dropped).
+                    projSkipC12R1904 = declaredTypes.contains(pv)
                     vbHit("R1904", "\(pv).\(member)")
                     if declaredTypes.contains(pv) {
                         // a type THIS scan declares: the local unit's own member, exactly as a typed local receiver keys it

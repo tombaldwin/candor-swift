@@ -106,7 +106,6 @@ final class TaskLocalProjectedValueProcessTests: XCTestCase {
             }
             // R1904: `$other` is a scan wrapper whose `projectedValue` is a declared `Box`, so the call is TYPED, not the C12 hedge
             // (ProjectedValueWrapperProcessTests asserts what it charges)
-            XCTAssertFalse(rows["Ctx.insideOther"]?.contains(tok) ?? false, "chained=\(chained) Ctx.insideOther: typed through `Mirror2.projectedValue`")
             XCTAssertFalse(rows["wrongowner_w"]?.isEmpty ?? true,
                            "chained=\(chained): `Elsewhere.$current` — no scan type declares it — keeps the Unknown it had")
             for c in ["tl_qualified_p", "tl_labelled_p", "Ctx.inside", "Ctx.viaSelf", "tl_global_p"] {

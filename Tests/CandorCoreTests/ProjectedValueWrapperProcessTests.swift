@@ -27,6 +27,11 @@ public final class PureBox {
 public enum Ctx {
     @DepWrap public static var current: Int = 0
 }
+extension PureBox { public func go3() {} }
+public final class XBox { public init() {}
+    public func withValue<R>(_ v: Int, operation: () -> R) -> R { FileManager.default.createFile(atPath: "/tmp/candor-r1904-never-run", contents: nil); return operation() } }
+// a dependency that publishes the leaves `go` / `go2` (the C12 hedge needs a dependency that could answer the name)
+public final class Other { public init() {}; public func go() {}; public func go2() {} }
 open class DepBase { public init() {}
     @DepWrap public var z: Int = 0 }
 """#
@@ -80,6 +85,23 @@ public func k_gen_q(_ p: Int) -> Int { Gen.$gg.withValue(p) { 1 } }
 @TaskLocal public var z: Int = 0
 public final class Sub: DepBase { public func l_inherit(_ p: Int) -> Int { $z.withValue(p) { 1 } } }   // `$z` is the dependency's wrapper, not the module TaskLocal
 public func m_opt(_ h: Holder?, _ p: Int) -> Int { h?.$x.withValue(p) { 1 } ?? 0 }
+
+@propertyWrapper public struct MirXBox { public var wrappedValue: Int; public init(wrappedValue: Int) { self.wrappedValue = wrappedValue }
+    public var projectedValue: XBox { XBox() } }
+@propertyWrapper public struct MirFM { public var wrappedValue: Int; public init(wrappedValue: Int) { self.wrappedValue = wrappedValue }
+    public var projectedValue: FileManager { .default } }
+extension FileManager { public func go() { createFile(atPath: "/tmp/candor-r1904-never-run", contents: nil) } }
+extension XBox { public func go2() { FileManager.default.createFile(atPath: "/tmp/candor-r1904-never-run", contents: nil) } }
+public enum Ctx7 {
+    @MirFM static var fm2: Int = 0
+    @MirXBox static var bx: Int = 0
+    @MirPure static var px: Int = 0
+    static func b_fm_scanext(_ p: Int) -> Int { $fm2.go(); return p }
+    static func b_depbox_scanext(_ p: Int) -> Int { $bx.go2(); return p }
+    static func b_fromext_withValue(_ p: Int) -> Int { $bx.withValue(p) { 1 } }
+    static func b_pure_ext(_ p: Int) -> Int { $px.go3(); return p }
+}
+public func ctrl_fm_go() { FileManager.default.go() }
 """#
 
     private struct Fixture { let root: URL; let bin: URL
@@ -150,6 +172,9 @@ public func m_opt(_ h: Holder?, _ p: Int) -> Int { h?.$x.withValue(p) { 1 } ?? 0
         let hedged = ["g_depwrap", "i_modq", "j_local", "j_param", "Sub.l_inherit", "k_gen_q", "Gen.k_gen"]
         // EXECUTED pure: the platform's TaskLocal (this scan's declaration, found by full path)
         let platform = ["h_tl", "h_tl_global", "Own.inOwn"]
+        // EXECUTED EFFECT over a type the scan only EXTENDS (`extension FileManager`, `extension Box`): the typed call cannot land
+        // (the §2 join reads neither the scan's extension bodies nor the platform table), so the hedge must stay — standalone and chained
+        let extended = ["Ctx7.b_fm_scanext", "Ctx7.b_depbox_scanext", "Ctx7.b_fromext_withValue"]
         let scanLocal: Set<String> = ["c_local", "Ctx2.d_bare_local"]
         for chained in [true, false] {
             let r = try rows(fx, chained: chained)
@@ -162,8 +187,12 @@ public func m_opt(_ h: Holder?, _ p: Int) -> Int { h?.$x.withValue(p) { 1 } ?? 0
             }
             for c in pure {
                 XCTAssertFalse(r[c]?.effects.contains("Fs") ?? false, "chained=\(chained) \(c): pure twin must not be charged")
-                XCTAssertFalse(r[c]?.why.contains(tok) ?? false, "chained=\(chained) \(c): typed, so not the C12 hedge")
             }
+            // chained, main reads absent on the first two (the dependency report publishes no body for `go`/`go2`): held at "not lower"
+            for c in extended where !chained || c == "Ctx7.b_fromext_withValue" {
+                XCTAssertFalse(r[c]?.why.isEmpty ?? true, "chained=\(chained) \(c): over a type the scan extends — rows: \(r)")
+            }
+            XCTAssertFalse(r["Ctx7.b_pure_ext"]?.effects.contains("Fs") ?? false, "chained=\(chained) pure twin over an extended type must not be charged")
             for c in hedged {
                 XCTAssertTrue(r[c]?.why.contains(tok) ?? false, "chained=\(chained) \(c): receiver not identified — rows: \(r)")
             }
