@@ -258,6 +258,11 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// declaration those labels can call; `platextLabels == nil` is the PROPERTY spelling (no call).
               var platextLabels: [String?]? = nil
               var platextTrailing: Int = 0
+              /// SOUNDNESS R1895 — on a `<site>.c12.` marker: the receiver is `$n` / `T.$n` where `n` is declared
+              /// `@TaskLocal` by a type of THIS scan (`taskLocalProjectedReceiver`), so it is a `TaskLocal` and its
+              /// platform members (`STDLIB_PROJECTED_VALUE_MEMBER_LABELS`) are what the call may bind. `false` (the
+              /// default) is the DISCLOSING direction: the name-keyed platform table alone decides.
+              var projectedTaskLocal: Bool = false
               /// SOUNDNESS R1463 — the receiver's owner was read from its own SPELLING (a literal, a stdlib container
               /// binding, a specialised type reference — `spelledReceiverRoot`), so it names a platform nominal this
               /// package does not own: no ⟨0.39⟩ obligation-1 key is minted for it (`DepLib#Array.makeIterator`
@@ -11158,6 +11163,7 @@ final class CallCollector: SyntaxVisitor {
                         var c = Call(path: "<site>.c12.\(member)", leaf: member, strArg: nil, typed: false, args: [], argTypes: [])
                         c.platextLabels = node.arguments.map { $0.label?.text }
                         c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+                        c.projectedTaskLocal = taskLocalProjectedReceiver(b)
                         calls.append(c)
                     }
                     // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
@@ -12798,6 +12804,32 @@ final class CallCollector: SyntaxVisitor {
     static let ct2FallbackProbe = Env.trace("CANDOR_CT2_FALLBACK_PROBE")
     /// Curated-routing S3 (lane L8) kill switch: no `<site>.c12.` marker at the R1455 drop, so the terminal is never asked.
     static let c12Off = Env.on("CANDOR_C12_OFF")
+
+    /// SOUNDNESS R1895 — is `recv` the projected value of a `@TaskLocal` this scan declares: `$n` inside the type that
+    /// declares `@TaskLocal static var n`, or `T.$n` (`Self.$n`) for a type `T` that does? Both halves are read from
+    /// the SOURCE (`wrappedProps` records the declaring type and the wrapper attribute), so a `$n` of any other
+    /// wrapper, of a `@TaskLocal` a dependency declares (no declaration in this scan), or of a name no type here
+    /// declares as `@TaskLocal` is NOT one — it stays an unidentified receiver and the C12 hedge keeps its say.
+    func taskLocalProjectedReceiver(_ recv: ExprSyntax) -> Bool {
+        func declared(_ owner: String?, _ n: String) -> Bool {
+            guard let o = owner else { return false }
+            return wrappedProps[o]?[n] == "TaskLocal"
+        }
+        let e = recv.trimmed
+        if let d = e.as(DeclReferenceExprSyntax.self), d.baseName.text.hasPrefix("$"), d.baseName.text.count > 1 {
+            let n = String(d.baseName.text.dropFirst())
+            // a member of the enclosing type shadows a module-scope name; only when it declares no `n` is `$n` the global's
+            if let et = enclosingType, wrappedProps[et]?[n] != nil || fields[et]?[n] != nil { return declared(et, n) }
+            return wrappedProps["<module>"]?[n] == "TaskLocal"
+        }
+        if let m = e.as(MemberAccessExprSyntax.self), let base = m.base, m.declName.baseName.text.hasPrefix("$"),
+           m.declName.baseName.text.count > 1 {
+            let n = String(m.declName.baseName.text.dropFirst())
+            let t = base.trimmedDescription.split(separator: ".").last.map(String.init)
+            return declared(t == "Self" ? enclosingType : t, n)
+        }
+        return false
+    }
     private func siteFallback(_ cls: String, _ member: String) {
         guard let opt = Self.ct2Fallback else { return }
         let optionAOnly = cls == "format" || cls == "eq"

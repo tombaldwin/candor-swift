@@ -45,13 +45,14 @@ def strip(s):
     return QUAL.sub("", s).strip()
 
 
-def split_top(s, sep=","):
-    out, depth, cur = [], 0, ""
+def split_top(s, sep=",", arrow_aware=False):
+    out, depth, cur, prev = [], 0, "", ""
     for ch in s:
         if ch in "<([":
             depth += 1
-        elif ch in ">)]":
+        elif ch in ">)]" and not (arrow_aware and ch == ">" and prev == "-"):
             depth -= 1
+        prev = ch
         if ch == sep and depth == 0:
             out.append(cur); cur = ""
         else:
@@ -88,7 +89,7 @@ FUNC = re.compile(r"\b(?:public|open)\s+(?:[a-z_]+\s+)*func\s+(?P<name>[A-Za-z_]
 PROP = re.compile(r"\b(?:public|open)\s+(?:[a-z_]+\s+)*var\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:")
 
 
-def params_of(text, start):
+def params_of(text, start, arrow_aware=False):
     """The parenthesised parameter clause starting at text[start] == '(' -> external label specs."""
     depth, i = 0, start
     while i < len(text):
@@ -101,13 +102,13 @@ def params_of(text, start):
         i += 1
     clause = text[start + 1:i]
     specs = []
-    for prm in split_top(clause):
+    for prm in split_top(clause, ",", arrow_aware):
         prm = prm.strip()
         if not prm or ":" not in prm:
             continue
         head, rest = prm.split(":", 1)
         label = head.split()[0] if head.split() else "_"
-        defaulted = "=" in "".join(split_top(rest, "="))[0:0] or len(split_top(rest, "=")) > 1
+        defaulted = "=" in "".join(split_top(rest, "="))[0:0] or len(split_top(rest, "=", arrow_aware)) > 1
         variadic = rest.split("=")[0].strip().endswith("...")
         specs.append(label + ("=" if defaulted else "") + ("..." if variadic else ""))
     return specs
@@ -280,6 +281,53 @@ def protocol_requirements(path, reqs):
             reqs[cur].add(name)
 
 
+# ── SOUNDNESS R1895 — THE MEMBERS OF A PROJECTED-VALUE TYPE ──────────────────────────────────────────────────
+# `$taskLocal.withValue(v) { … }` calls a member of `TaskLocal`, the type the `@TaskLocal` wrapper's
+# `projectedValue` returns. The name-keyed `STDLIB_MEMBER_LABELS` above lacks it, and CANNOT simply gain it: that
+# table is keyed by NAME ALONE, so a `withValue` in it would bind every untyped `.withValue(…)` call, including a
+# dependency's own member (a silence). The members of a projected-value type are reached ONLY through a `$x`
+# receiver, so they are kept in a separate table the engine consults only for a receiver it has shown to be a
+# `@TaskLocal` projected value. Which types are projected-value types is READ (`var projectedValue: T` declared in
+# a platform type's body), and each such `T`'s members are read from its own body — by BRACE depth, because the
+# printer emits some members' attribute lines at column 0 inside a type body (an indentation rule loses every
+# later member of `TaskLocal`), and the declaration may spell `final public class` (the `DECL` above misses it).
+TYPED_DECL = re.compile(r"^(?:@[^\s(]+(?:\([^)]*\))?\s+)*(?:final\s+)?(?:public|open)\s+(?:final\s+)?(?:indirect\s+)?"
+                        r"(?:struct|enum|class|actor)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b.*\{\s*$")
+TYPED_PROJECTED = re.compile(r"\bpublic\s+(?:[a-z_]+\s+)*var\s+projectedValue\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*::)?(?P<t>[A-Za-z_][A-Za-z0-9_]*)")
+STR_LIT = re.compile(r'"(?:\\.|[^"\\])*"')
+
+
+def brace_delta(line):
+    code = STR_LIT.sub('""', line).split("//")[0]
+    return code.count("{") - code.count("}")
+
+
+def projected_value_members(path, members, projected):
+    """members[type][name] -> label specs of every public method declared DIRECTLY in `type`'s body;
+    projected[type] = the type its `projectedValue` returns."""
+    stack, depth = [], 0          # (type name, brace depth inside its body)
+    for raw in open(path, encoding="utf-8"):
+        line = raw.rstrip("\n")
+        if not line.strip() or line.lstrip().startswith("//") or line.lstrip().startswith("#"):
+            continue
+        while stack and depth < stack[-1][1]:
+            stack.pop()
+        direct = stack and depth == stack[-1][1]
+        if direct:
+            ty = stack[-1][0]
+            fm = FUNC.search(line)
+            if fm:
+                members.setdefault(ty, {}).setdefault(fm.group("name"), set()).add(
+                    ",".join(params_of(line, fm.end() - 1, True)))
+            pm = TYPED_PROJECTED.search(line)
+            if pm:
+                projected[ty] = pm.group("t")
+        depth += brace_delta(line)
+        m = TYPED_DECL.match(strip(line))
+        if m and depth > 0 and brace_delta(line) > 0:
+            stack.append((m.group("name"), depth))
+
+
 def main():
     sdk = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
     sdkver = subprocess.check_output(["xcrun", "--show-sdk-version"], text=True).strip()
@@ -359,6 +407,21 @@ def main():
               "let STDLIB_PROTOCOL_REQUIREMENTS: [String: [String]] = ["]
     for k in sorted(x for x in reqs if keep(x) and reqs[x]):
         lines.append(f'    "{k}": [' + ", ".join(f'"{x}"' for x in sorted(reqs[k])) + "],")
+    lines += ["]", ""]
+    pv_members, pv_types = {}, {}
+    for mod in MODULES:
+        projected_value_members(interface(sdk, mod), pv_members, pv_types)
+    lines += ["/// SOUNDNESS R1895 — the public methods of each type a platform PROPERTY WRAPPER's `projectedValue` returns",
+              "/// (`TaskLocal` for `@TaskLocal`), keyed by NAME like `STDLIB_MEMBER_LABELS` but consulted ONLY for a receiver",
+              "/// shown to be such a projected value (`$x`, `T.$x`): a name-only entry would bind every untyped call.",
+              "let STDLIB_PROJECTED_VALUE_MEMBER_LABELS: [String: [String]] = ["]
+    pv = {}
+    for t in sorted(set(pv_types.values())):
+        for n, specs in pv_members.get(t, {}).items():
+            if not n.startswith("_"):
+                pv.setdefault(n, set()).update(specs)
+    for n in sorted(pv):
+        lines.append(f'    "{n}": [' + ", ".join(f'"{x}"' for x in sorted(pv[n])) + "],")
     lines += ["]", ""]
     text = "\n".join(lines)
     if "--check" in sys.argv:

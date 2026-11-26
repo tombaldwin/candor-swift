@@ -5005,8 +5005,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         var p = TerminalPosture()
         let leaf = call.leaf
         let labels = call.platextLabels ?? []
-        let platformNamed = (STDLIB_MEMBER_LABELS[leaf] ?? []).contains {
-            r1071LabelsAdmit(labels, call.platextTrailing, $0.isEmpty ? [] : $0.split(separator: ",").map(String.init)) }
+        func admits(_ table: [String: [String]]) -> Bool {
+            (table[leaf] ?? []).contains {
+                r1071LabelsAdmit(labels, call.platextTrailing, $0.isEmpty ? [] : $0.split(separator: ",").map(String.init)) }
+        }
+        // SOUNDNESS R1895 — the members of `TaskLocal` bind ONLY a receiver shown to be a `@TaskLocal` projected value
+        // (`$n.withValue(…)`); the name-keyed table lacks them on purpose, so an untyped `.withValue(…)` a dependency
+        // could answer is still disclosed.
+        let platformNamed = admits(STDLIB_MEMBER_LABELS) || (call.projectedTaskLocal && admits(STDLIB_PROJECTED_VALUE_MEMBER_LABELS))
         if platformNamed { return p }
         var evidence: String? = nil
         if deps.anyChainedPackagePublishesLeaf(leaf) { evidence = "chained" }

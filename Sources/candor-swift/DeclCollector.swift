@@ -633,6 +633,7 @@ final class DeclCollector: SyntaxVisitor {
     // fabricates and ordering can't matter.
     var propertyWrapperTypes: Set<String> = []
     var wrappedProps: [String: [String: String]] = [:]
+    let moduleScopeOwner = "<module>"
     var dynamicMemberTypes: Set<String> = []   // `@dynamicMemberLookup`-annotated local types
     var resultBuilderTypes: Set<String> = []   // `@resultBuilder`-annotated local types
     var globalActorTypes: Set<String> = []     // `@globalActor`-annotated local types (e.g. a custom `@DBActor`)
@@ -1455,6 +1456,13 @@ final class DeclCollector: SyntaxVisitor {
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         if !typeStack.isEmpty, !CallCollector.r1499Off {   // SOUNDNESS R1499
             for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { memberVarNamesR1499.insert(n) } }
+        }
+        // SOUNDNESS R1895 — a MODULE-SCOPE `@TaskLocal var n` (the only other place the macro may sit): recorded in
+        // `wrappedProps` under the sentinel owner `moduleScopeOwner`, which no type name can equal, so every
+        // type-keyed reader of the map is unaffected.
+        if typeStack.isEmpty,
+           node.attributes.contains(where: { $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "TaskLocal" }) {
+            for b in node.bindings { for n in CallCollector.patternNames(b.pattern) { wrappedProps[moduleScopeOwner, default: [:]][n] = "TaskLocal" } }
         }
         if let ty = typeStack.last {
             let tyPath = typeStack.joined(separator: ".")
