@@ -114,7 +114,7 @@ final class CrossModuleGlobalReceiverProcessTests: XCTestCase {
         let (by, _) = try scan(root)
         XCTAssertEqual(ProcessHarness.inferred(by, "SharedWorker.doWork"), ["Fs"],
                        "the callee is still classified correctly on its own: \(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "<main>"),
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "<main>"),
                      "an internal (non-public) cross-module global must keep missing — resolving it "
                      + "would fabricate visibility real Swift access control refuses. This is the SAME "
                      + "silent-absence R79 reports as a bug when the global IS public; here it is correct, "

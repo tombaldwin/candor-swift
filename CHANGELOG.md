@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A global initialised by a member-call chain is typed; the rest of the own-leaf C12 residue is hedged where the member has effects (SOUNDNESS R1931)
+
+`private let library = toolchainLoader.load(path: p)` recorded no type: a module-scope global was typed only by an annotation, a bare
+constructor, a free factory or `T.shared`, so every `library.load(symbol:)` was R1455's dropped member call. A global initialised by
+`head.m1(…).m2(…)` (head a typed global, a type this scan declares, or its constructor) is now typed hop by hop from the RECEIVER's own
+declared return (`Owner.member`, or `-> Self`), only where every hop lands on a type this scan declares and every declaration of the
+name in its module agrees; a hop answered by a protocol extension, a generic-specialised head, a hop returning a generic parameter and
+an uppercase free-function head stay untyped. Kill switch `CANDOR_R1931_GLOBAL_OFF` (it can replace a chained C12 `Unknown` with the
+resolved member's own row). And a C12 drop the hedge did not reach whose leaf only THIS package declares (a closure parameter, a `$0`,
+a pattern binder, a local bound from a call, a generic-typed parameter) now reads `Unknown {dispatch:<untyped>.<m>}` when some
+same-named member this scan has a body for carries an effect, decided after the call graph (R1071's fixpoint), so a leaf whose every
+declaration is pure costs nothing. Additive, no switch.
+
 ### ⚠ An unannotated field initialised by a path-qualified constructor is typed; an untyped field head is hedged (SOUNDNESS R1896)
 
 `public var unknownFields = SwiftProtobuf.UnknownStorage()` and `var n = Outer.Inner()` recorded no type: the constructor arm read only a

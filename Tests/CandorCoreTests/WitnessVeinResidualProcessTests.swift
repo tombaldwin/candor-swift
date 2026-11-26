@@ -409,7 +409,7 @@ final class LoopTupleAndFieldElementProcessTests: XCTestCase {
     func testEachKillSwitchRestoresItsSilence() throws {
         for sw in Set(Self.charged.map(\.sw)).sorted() {
             let by = try scan([sw: "1"])
-            for c in Self.charged where c.sw == sw { XCTAssertNil(ProcessHarness.inferred(by, c.fn), "\(sw): \(c.fn) — \(by[c.fn] ?? [:])") }
+            for c in Self.charged where c.sw == sw { XCTAssertNil(ProcessHarness.noConcreteEffect(by, c.fn), "\(sw): \(c.fn) — \(by[c.fn] ?? [:])") }
         }
     }
 }

@@ -147,7 +147,7 @@ func m3<T: Sendable>(_ v: T) where T: DP { v.todata() }
         defer { try? FileManager.default.removeItem(at: root) }
         let off = try scan(root, env: ["CANDOR_R1677_OFF": "1", "CANDOR_R1686_OFF": "1"])
         for fn in ["m1", "M2.m2", "c1q", "c2p", "c3p", "c3bp", "c4p", "c4q", "c4r", "c5q", "c5aq", "c6yq", "H.hq", "W.wp", "Box.ep", "Box.eq2", "l1", "l2", "a1", "o1", "s1", "cl1", "df1", "S1.sq", "F1.fq", "F2.f2q", "lt1", "lt2"] {
-            XCTAssertNil(ProcessHarness.chargedNothing(off, fn), "the R1676 reading was silent: \(fn) \(off[fn] ?? [:])")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(off, fn), "the R1676 reading was silent: \(fn) \(off[fn] ?? [:])")
             XCTAssertNotEqual(ProcessHarness.inferred(off, fn), ["Fs"], "\(fn) under the switch")
         }
         for fn in ["c1q", "c3p", "c4p", "c5q", "c6yq", "H.hq", "o1", "F2.f2q"] {

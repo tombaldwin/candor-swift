@@ -135,7 +135,7 @@ final class LocalProtocolOperatorHedgeProcessTests: XCTestCase {
         let by = try ProcessHarness.fns(ofJson: ProcessHarness.run(bin, [root.path, "--json"]).out)
         XCTAssertNil(ProcessHarness.chargedNothing(by, "ctlMod"), "R1073: stdlib `%` on Int; got \(by["ctlMod"] ?? [:])")
         XCTAssertEqual(inf(by, "droppedMod"), ["Unknown"], "the fence keeps the hedge; got \(by["droppedMod"] ?? [:])")
-        XCTAssertEqual(by["droppedMod"]?["unknownWhy"] as? [String], ["dispatch:Prim.%"])
+        XCTAssertEqual((by["droppedMod"]?["unknownWhy"] as? [String])?.filter { !$0.hasPrefix("dispatch:<untyped>.") }, ["dispatch:Prim.%"])
         let pf = root.appendingPathComponent("p.policy")
         try "deny Unknown droppedMod\n".write(to: pf, atomically: true, encoding: .utf8)
         XCTAssertEqual(try ProcessHarness.run(bin, [root.path, "--policy", pf.path, "--json"]).code, 1, "the unit is not silent")

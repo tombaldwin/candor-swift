@@ -68,7 +68,7 @@ final class PlatformProtocolExtensionProcessTests: XCTestCase {
             XCTAssertTrue(inf(by, f).contains("Fs"), "R1071: \(f)'s receiver conforms, so it runs the extension; got \(by[f] ?? [:])")
         }
         XCTAssertEqual(inf(by, "untyped"), ["Unknown"], "an unstated receiver type discloses; got \(by["untyped"] ?? [:])")
-        XCTAssertEqual(by["untyped"]?["unknownWhy"] as? [String], ["dispatch:Sequence.stampAll"])
+        XCTAssertEqual((by["untyped"]?["unknownWhy"] as? [String])?.filter { !$0.hasPrefix("dispatch:<untyped>.") }, ["dispatch:Sequence.stampAll"])
         XCTAssertNil(by["untypedPure"], "a PURE extension body costs nothing to an unstated receiver; got \(by["untypedPure"] ?? [:])")
         XCTAssertNil(by["ownMember"], "the concrete type's own member is the one Swift runs; got \(by["ownMember"] ?? [:])")
         XCTAssertNil(by["stdlibAppend"], "`append(_:)` is not `append(contentsOf:)`: the labels refuse it; got \(by["stdlibAppend"] ?? [:])")

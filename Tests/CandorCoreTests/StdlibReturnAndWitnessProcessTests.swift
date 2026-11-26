@@ -117,7 +117,7 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         }
         XCTAssertEqual(try gate(Self.pickSilent, "deny Fs useChainE"), 1, "R1044: the gate must flip")
         let off = try scan(Self.pickSilent, env: ["CANDOR_R1044_OFF": "1"])
-        XCTAssertNil(ProcessHarness.chargedNothing(off, "useChainE"), "R1044 kill switch restores the release silence")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(off, "useChainE"), "R1044 kill switch restores the release silence")
         let offFab = try scan(Self.pickFab, env: ["CANDOR_R1010_OFF": "1", "CANDOR_R1044_OFF": "1"])
         XCTAssertEqual(inf(offFab, "useChain"), ["Fs"], "R1010 kill switch restores the release fabrication")
     }
@@ -198,7 +198,7 @@ final class StdlibReturnAndWitnessProcessTests: XCTestCase {
         XCTAssertNil(ProcessHarness.chargedNothing(by, "Holder.countOnly"), "R905: `count` is not the element")
         XCTAssertEqual(try gate(Self.platform, "deny Fs Holder.viaHash"), 1, "R905: the gate must flip")
         let off = try scan(Self.platform, env: ["CANDOR_R905H_OFF": "1"])
-        XCTAssertNil(ProcessHarness.chargedNothing(off, "Holder.viaHash"), "kill switch restores the release silence")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(off, "Holder.viaHash"), "kill switch restores the release silence")
     }
 
     // ── R1047 — an init this scan only ADDS to a platform type is not every constructor of that type ─────

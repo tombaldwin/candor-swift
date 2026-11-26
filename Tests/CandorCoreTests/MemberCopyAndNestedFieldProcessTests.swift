@@ -203,7 +203,7 @@ _ = cursorCaller(); _ = reflectCaller(); _ = reflectChainCaller(); _ = reflectBo
             XCTAssertNil(ProcessHarness.chargedNothing(by, fn), "\(fn) is pure (control)")
         }
         let off = try scan(root, env: ["CANDOR_R1491_OFF": "1"])
-        for fn in charged { XCTAssertNil(ProcessHarness.inferred(off, fn), "the release was silent on \(fn)") }
+        for fn in charged { XCTAssertNil(ProcessHarness.noConcreteEffect(off, fn), "the release was silent on \(fn)") }
         XCTAssertEqual(try gate(root, "deny Fs cGenLet\n"), 1)
         XCTAssertEqual(try gate(root, "deny Fs cGenLet\n", env: ["CANDOR_R1491_OFF": "1"]), 0)
         XCTAssertEqual(try gate(root, "deny Fs kPureComputed\n"), 0)
@@ -225,7 +225,7 @@ _ = cursorCaller(); _ = reflectCaller(); _ = reflectChainCaller(); _ = reflectBo
             XCTAssertNil(ProcessHarness.chargedNothing(by, fn), "\(fn) is pure (control)")
         }
         let off = try scan(root, env: ["CANDOR_R1492_OFF": "1"])
-        for fn in charged { XCTAssertNil(ProcessHarness.inferred(off, fn), "the release was silent on \(fn)") }
+        for fn in charged { XCTAssertNil(ProcessHarness.noConcreteEffect(off, fn), "the release was silent on \(fn)") }
         // The owner-name alias half alone: with the full-path field index ON and the alias scoping OFF, RSA's
         // `BackingPrivateKey` is read as P384._VOPRF.PrivateKey's — the swift-crypto shape in which typing the field
         // turned a fabricated self-edge into a silent drop.

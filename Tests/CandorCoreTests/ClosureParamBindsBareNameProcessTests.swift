@@ -137,7 +137,7 @@ final class ClosureParamBindsBareNameProcessTests: XCTestCase {
             let why = { (b: [String: [String: Any]]) in (b[fn]?["unknownWhy"] as? [String]) ?? [] }
             XCTAssertTrue(ProcessHarness.inferred(by, fn)?.contains("Unknown") == true, "\(fn): \(by[fn] ?? [:])")
             XCTAssertTrue(why(by).contains("dispatch:<untyped>.connect"), "\(fn): the dropped call must disclose: \(why(by))")
-            XCTAssertFalse(why(off).contains("dispatch:<untyped>.connect"), "\(fn): the release carries no such disclosure: \(why(off))")
+            // SOUNDNESS R1931: with the switch off, the R1455 drop is now disclosed by the own-leaf hedge as well (`connect` has effects).
             XCTAssertTrue(ProcessHarness.inferred(off, fn)?.contains("Fs") == true, "\(fn): release charges Fs via the false edge")
         }
     }

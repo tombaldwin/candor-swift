@@ -197,7 +197,7 @@ final class CopiedContainerBinderTests: XCTestCase {
         XCTAssertEqual(ProcessHarness.inferred(by, "H.ctlCallReturn"), ["Fs"],
                        "R991 — `makeStores() -> [Store]` DECLARES its element; the forEach really writes the file")
         let off = try scan(Self.copyFixture, "Copy", env: ["CANDOR_R991_OFF": "1"])
-        XCTAssertNil(off["H.ctlCallReturn"], "§1b — the release's accepted under-report, restored by the switch")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(off, "H.ctlCallReturn"), "§1b — the release's accepted under-report, restored by the switch")
         // THE FABRICATION CONTROL: a local type NAMED like a generic parameter, with an effectful method
         // of the name the program calls. Typing `t` as that local `T` would charge `Fs` to a call that
         // really runs the PURE `Q.eff`. Compiles; `t.eff()` is `Q.eff`.
@@ -225,7 +225,7 @@ final class CopiedContainerBinderTests: XCTestCase {
             XCTAssertFalse(ProcessHarness.inferred(gen, fn)?.contains("Fs") ?? false,
                            "\(fn): a generic return names no type — `Fs` would be the local namesake's; got \(gen[fn] ?? [:])")
         }
-        XCTAssertNil(gen["H.genericLeafStaysUntyped"], "`-> T` must not resolve to the local type `T`")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(gen, "H.genericLeafStaysUntyped"), "`-> T` must not resolve to the local type `T`")
     }
 
     // ────────────────────────────────────────────────────────────────────────────────────────────────

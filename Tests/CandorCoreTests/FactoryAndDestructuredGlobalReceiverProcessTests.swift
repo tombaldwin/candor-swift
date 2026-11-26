@@ -130,11 +130,11 @@ final class FactoryAndDestructuredGlobalReceiverProcessTests: XCTestCase {
         let (by, _) = try scan(root)
         XCTAssertEqual(ProcessHarness.inferred(by, "Worker.doWork"), ["Fs"],
                        "the callee is still classified correctly on its own: \(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "run"),
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "run"),
                      "an internal (non-public) factory-initialized cross-module global must keep "
                      + "missing — resolving it would fabricate visibility real Swift access control "
                      + "refuses: \(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "<main>"), "\(by)")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "<main>"), "\(by)")
     }
 
     // ── 1b. DESTRUCTURED FIX — the caller gains the callee's real effect ──────────────────────────
@@ -204,9 +204,9 @@ final class FactoryAndDestructuredGlobalReceiverProcessTests: XCTestCase {
         let (by, _) = try scan(root)
         XCTAssertEqual(ProcessHarness.inferred(by, "Worker.doWork"), ["Fs"],
                        "the callee is still classified correctly on its own: \(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "run"),
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "run"),
                      "an internal (non-public) destructured cross-module global must keep missing — "
                      + "resolving it would fabricate visibility real Swift access control refuses: \(by)")
-        XCTAssertNil(ProcessHarness.inferred(by, "<main>"), "\(by)")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "<main>"), "\(by)")
     }
 }

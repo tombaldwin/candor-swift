@@ -46,7 +46,7 @@ final class SingletonFieldTypeProcessTests: XCTestCase {
         }
         User().run()
         """)
-        XCTAssertNil(ProcessHarness.inferred(by, "User.run"),
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "User.run"),
                      "`Service.helper` is a Helper — typing the field as Service would fabricate Service.go's Fs")
     }
 
@@ -64,7 +64,7 @@ final class SingletonFieldTypeProcessTests: XCTestCase {
         }
         User().run()
         """)
-        XCTAssertNil(ProcessHarness.inferred(by, "User.run"),
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "User.run"),
                      "the root of `Outer.Inner.shared` is not `Outer` as far as this rule can prove")
     }
 
@@ -80,7 +80,7 @@ final class SingletonFieldTypeProcessTests: XCTestCase {
         }
         User().run()
         """)
-        XCTAssertNil(ProcessHarness.inferred(by, "User.run"))
+        XCTAssertNil(ProcessHarness.noConcreteEffect(by, "User.run"))
     }
 
     // ── THE GAINS ───────────────────────────────────────────────────────────────────────────────────

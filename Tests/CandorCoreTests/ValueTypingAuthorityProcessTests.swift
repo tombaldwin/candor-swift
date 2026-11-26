@@ -384,7 +384,7 @@ CUR = "ctl974pureArray"; HITS.remove("WRAP"); _ = ctl974pureArray([1]); print((H
         for (cell, fn) in Self.controls {
             XCTAssertFalse(ProcessHarness.inferred(by, fn)?.contains("Env") ?? false,
                            "\(cell): `\(fn)` performs nothing (executed) — Env is a fabrication; got \(by[fn] ?? [:])")
-            XCTAssertEqual(ProcessHarness.inferred(by, fn), ProcessHarness.inferred(off, fn),
+            XCTAssertEqual((ProcessHarness.inferred(by, fn) ?? []).filter { $0 != "Unknown" }, (ProcessHarness.inferred(off, fn) ?? []).filter { $0 != "Unknown" },
                            "\(cell): a control's row must be the release's")
         }
     }

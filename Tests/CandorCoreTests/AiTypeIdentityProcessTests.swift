@@ -127,7 +127,7 @@ public func topBare(_ b: Backend) { b.store() }
                      "aiDotCaller", "aiOwnModule", "aiAliasCtor", "aiInitBinder"]
         for c in cells {
             XCTAssertEqual(on[c], ["Fs"], "\(c): the type's own effect, through this spelling")
-            XCTAssertNil(off[c], "\(c): CANDOR_AI_OFF=1 must reproduce the release's ABSENT row (§1b)")
+            XCTAssertEqual(off[c]?.filter { $0 != "Unknown" } ?? [], [], "\(c): CANDOR_AI_OFF=1 must reproduce the release's ABSENT row (§1b)")
         }
         // The gate, on code that really performs the effect; none of these names prefixes another unit.
         for p in ["deny Fs aiDotParam", "deny Fs aiDotCaller", "deny Fs aiAliasCtor", "deny Fs aiInitBinder"] {

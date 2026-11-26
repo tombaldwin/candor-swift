@@ -57,12 +57,12 @@ final class NestedInstantiationProcessTests: XCTestCase {
             XCTAssertEqual(inf(by, f), ["Fs"], "R1044 nested: \(f) runs E.go; got \(by[f] ?? [:])")
         }
         for f in ["ctlPure", "ctlFirst", "ctlGen"] {
-            XCTAssertNil(ProcessHarness.chargedNothing(by, f), "R1044 nested: \(f) must charge nothing; got \(by[f] ?? [:])")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(by, f), "R1044 nested: \(f) must charge nothing; got \(by[f] ?? [:])")
         }
         XCTAssertEqual(try gate("deny Fs viaGG"), 1, "the gate must flip")
         XCTAssertNotEqual(try gate("deny Fs ctlPure"), 1, "the pure nested instantiation passes")
         let off = try scan(["CANDOR_R1044N_OFF": "1"])
-        XCTAssertNil(ProcessHarness.chargedNothing(off, "viaGG"), "kill switch restores the residual fix's silence")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(off, "viaGG"), "kill switch restores the residual fix's silence")
         XCTAssertEqual(inf(off, "viaFV").isEmpty, true, "kill switch restores the residual fix's silence (field)")
     }
 

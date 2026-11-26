@@ -87,7 +87,7 @@ for (n, f) in cases { f(); print(n, seen()) }
         }
         let off = try scan(root, env: ["CANDOR_R1498_OFF": "1"])
         for fn in ["tLit", "tField", "tRetIdx", "tDestrField", "tCopy"] {
-            XCTAssertNil(ProcessHarness.inferred(off, fn), "the release was silent: \(fn) \(off[fn] ?? [:])")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(off, fn), "the release was silent: \(fn) \(off[fn] ?? [:])")
         }
         XCTAssertEqual(try gate(root, "deny Fs tField\n"), 1)
         XCTAssertEqual(try gate(root, "deny Fs tField\n", env: ["CANDOR_R1498_OFF": "1"]), 0)

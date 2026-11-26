@@ -488,6 +488,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // (`let x = makeX()`) — the leaf's return type isn't known until `returnsIdx` is built, so resolution
     // is deferred exactly like `staticFactoryFields` above.
     var globalFactories: [(module: String, name: String, leaf: String)] = []
+    // SOUNDNESS R1931 — (module, global, chain) for a global initialised by a member-call chain (see DeclCollector).
+    var globalMemberFactoriesR1931: [(module: String, name: String, head: String, headIsCtor: Bool, hops: [String])] = []
     // Merged `DeclCollector.typeGenericBounds` across every file — a type's generic param may be BOUND by
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
@@ -1158,6 +1160,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalMetatypesByModule[cMod, default: [:]].merge(c.globalMetatypes) { a, _ in a }              // R585
         globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
+        globalMemberFactoriesR1931.append(contentsOf: c.globalMemberFactories.map { (cMod, $0.name, $0.head, $0.headIsCtor, $0.hops) })
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
         for (t, bs) in c.typeDeclGenericBounds { typeDeclGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }   // R1481
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
@@ -2565,6 +2568,53 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // consumer of `returnsIdx`.
     for (module, name, leaf) in globalFactories where globalTypesByModule[module]?[name] == nil {
         if let vended = returnsIdx[leaf] { globalTypesByModule[module, default: [:]][name] = vended }
+    }
+    // SOUNDNESS R1931 — …AND A GLOBAL INITIALISED BY A MEMBER-CALL CHAIN: `private let library = toolchainLoader.load(path: p)`
+    // (SourceKitten: 447 global initialisers then call `library.load(symbol:)`, and every one was R1455's C12 drop — no edge,
+    // and unchained no `Unknown`, over `DynamicLinkLibrary.load`'s `dlsym`). The head is typed as a global (`globalTypesByModule`),
+    // a local type (a static factory `T.make()`), or a local constructor; each hop by the RECEIVER's own `Owner.member` return
+    // (`returnFactsIdx`, which poisons a key whose declarations disagree) or its `-> Self` key — never by the bare leaf, which
+    // two types may share. Every hop must land on a type THIS scan declares, so a dependency's spelling is never recorded
+    // (the B1/B2 shape of R1896's round 1). A name declared twice in one module (two `private let library`) is typed only
+    // where every declaration agrees. Additive: it types a name nothing typed; `CANDOR_R1931_GLOBAL_OFF=1` restores that.
+    if !DeclCollector.r1931GOff {
+        let r1931Probe = Env.trace("CANDOR_R1931_PROBE")
+        func simpleR1931(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
+        func isLocalR1931(_ t: String) -> Bool { localTypes.contains(simpleR1931(t)) || localTypePaths.contains(t) }
+        func hopR1931(_ t: String, _ m: String) -> String? {
+            let st = simpleR1931(t)
+            if CallCollector.selfReturnKeysR1506.contains("\(t).\(m)") || CallCollector.selfReturnKeysR1506.contains("\(st).\(m)") { return t }
+            guard let f = returnFactsIdx["\(t).\(m)"] ?? returnFactsIdx["\(st).\(m)"], let sc = f.scalar, !f.isFunction,
+                  f.arrayElem == nil, f.arrayElemNested == nil, f.dictValue == nil, f.metatype == nil, f.tuple.isEmpty,
+                  isLocalR1931(sc) else { return nil }
+            return sc
+        }
+        var decided: [String: [String: String?]] = [:]   // module -> name -> type (.some(nil) = the declarations disagree)
+        var progress = true, rounds = 0
+        while progress, rounds < 6 {
+            progress = false; rounds += 1
+            var seen: [String: [String: String?]] = [:]
+            for g in globalMemberFactoriesR1931 where decided[g.module]?[g.name] == nil {
+                var t: String?
+                if g.headIsCtor { t = localTypes.contains(g.head) ? g.head : nil }
+                else if let gt = globalTypesByModule[g.module]?[g.head], g.head != g.name { t = gt }
+                else if g.head.first?.isUppercase == true, localTypes.contains(g.head) { t = g.head }
+                for m in g.hops { guard let cur = t else { break }; t = hopR1931(cur, m) }
+                if let prev = seen[g.module]?[g.name] { if prev != t { seen[g.module, default: [:]][g.name] = .some(nil) } }
+                else { seen[g.module, default: [:]][g.name] = .some(t) }
+            }
+            for (mod, names) in seen {
+                for (n, t) in names {
+                    // a name some other binder typed, or a declaration of it no hop could type, is left to that answer
+                    guard globalTypesByModule[mod]?[n] == nil else { continue }
+                    guard let typed = t else { continue }
+                    decided[mod, default: [:]][n] = .some(typed)
+                    globalTypesByModule[mod, default: [:]][n] = typed
+                    if r1931Probe { FileHandle.standardError.write("R1931G\t\(mod)\t\(n)\t\(typed)\n".data(using: .utf8)!) }
+                    progress = true
+                }
+            }
+        }
     }
     // R85 — derive `publicGlobalTypesByModule` HERE, in the one place, now that both passes that can
     // populate `globalTypesByModule` (the per-file merge above and this factory-resolution loop) have
@@ -5090,6 +5140,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // reason is "the field's type is unresolved", which is true of exactly the calls it is emitted for.
         if evidence == nil, call.fieldHeadR1896, c12OwnLeaves.contains(leaf) { evidence = "own-field" }
         guard let ev = evidence else {
+            // SOUNDNESS R1931 — THE REST OF THE OWN-LEAF RESIDUE: the receiver is untyped (a closure parameter, a `$0`, a
+            // pattern binder, a local bound from a call, a generic-typed parameter, …) and THIS package declares a member of
+            // the leaf's name. The call may run that member, and when the member does anything at all the caller's row is a
+            // purity claim over it. Decided after the graph, by R1071's fixpoint (`r1071Pending`): disclosed only where some
+            // same-named member this scan has a body for (transitively) carries an effect, so a leaf whose every declaration
+            // is pure costs nothing. Same token as every C12 row; the reason — "the receiver's type is unresolved and a
+            // member of this name in this package has effects" — is true of exactly the calls it is emitted for.
+            if c12OwnLeaves.contains(leaf), let ts = c12OwnLeafQuals[leaf], !ts.isEmpty {
+                r1071Pending.append((f.qual, ts, "dispatch:<untyped>.\(leaf)"))
+            }
             // SOUNDNESS R1896 — MEASUREMENT ONLY (`CANDOR_C12_PROBE`): a drop the hedge did not reach whose leaf THIS package
             // declares, i.e. the exposed residue after the implicit-self typing. Changes no output.
             if c12Probe, c12OwnLeaves.contains(leaf) {
@@ -5102,6 +5162,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return p
     }
     let c12Probe = Env.trace("CANDOR_C12_PROBE")
+    /// SOUNDNESS R1931 — the units this scan has a body for, by the leaf `c12OwnLeaves` names them by.
+    lazy var c12OwnLeafQuals: [String: [String]] = {
+        var m: [String: [String]] = [:]
+        for f in allFns {
+            let q = f.simpleQual.prefix { $0 != "(" && $0 != "#" }
+            m[String(q.split(separator: ".").last ?? ""), default: []].append(f.qual)
+        }
+        return m
+    }()
     lazy var c12OwnLeaves: Set<String> = Set(allFns.map { f in
         let q = f.simpleQual.prefix { $0 != "(" && $0 != "#" }
         return String(q.split(separator: ".").last ?? "") })
@@ -9007,6 +9076,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let pre = propagate(direct, over: edges)
             for (caller, targets, why) in r1071Pending where !(whyMap[caller]?.contains(why) ?? false) {
                 if targets.contains(where: { !(pre[$0] ?? []).isEmpty }) {
+                    if c12Probe, why.hasPrefix("dispatch:<untyped>.") {
+                        FileHandle.standardError.write("C12OWNH\t\(caller)\t\(why.dropFirst("dispatch:<untyped>.".count))\n".data(using: .utf8)!)
+                    }
                     if r974aProbe, why.hasSuffix(" witness passed to a chained package") {
                         FileHandle.standardError.write("R974AHEDGE \(caller) \(why)\n".data(using: .utf8)!)
                     }

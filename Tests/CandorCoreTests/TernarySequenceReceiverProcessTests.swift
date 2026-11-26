@@ -152,9 +152,9 @@ final class TernarySequenceReceiverProcessTests: XCTestCase {
         public func differingRoots(_ c: Bool) { (c ? CT() : DT()).emitT() }
         """
         let r = try scan(src, name: "Merge")
-        XCTAssertNil(r.fns["differingRoots"],
-                     "R589 RESIDUAL (OPEN): a three-element ternary whose arms resolve to different "
-                     + "roots is still dropped. If this ever gains a row, that residual is CLOSED and "
+        XCTAssertEqual(r.fns["differingRoots"]?.filter { $0 != "Unknown" } ?? [], [],
+                     "R589 RESIDUAL (OPEN, disclosed since R1931 by the own-leaf C12 `Unknown`, never resolved): a three-element ternary whose arms resolve to different "
+                     + "roots is still dropped. If this ever gains a CONCRETE charge, that residual is CLOSED and "
                      + "this assertion is the thing to update; got "
                      + "\(r.fns["differingRoots"].map(String.init(describing:)) ?? "ABSENT")")
     }

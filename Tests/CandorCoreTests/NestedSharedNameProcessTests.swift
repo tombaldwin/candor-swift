@@ -146,6 +146,6 @@ enum VO { struct PK { fileprivate typealias BK = QuietImpl; fileprivate var back
         let noR = try scan(root, env: ["CANDOR_R1513R_OFF": "1"])
         XCTAssertNil(ProcessHarness.inferred(noR, "XA.XT.pExtRet"), "R off: \(noR["XA.XT.pExtRet"] ?? [:])")
         let noI = try scan(root, env: ["CANDOR_R1513I_OFF": "1"])
-        XCTAssertNil(ProcessHarness.inferred(noI, "IA.CT.pInh"), "I off: \(noI["IA.CT.pInh"] ?? [:])")
+        XCTAssertNil(ProcessHarness.noConcreteEffect(noI, "IA.CT.pInh"), "I off: \(noI["IA.CT.pInh"] ?? [:])")
     }
 }
