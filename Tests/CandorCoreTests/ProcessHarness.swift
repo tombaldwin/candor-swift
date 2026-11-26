@@ -252,6 +252,16 @@ enum ProcessHarness {
         return (e["inferred"] as? [String])?.sorted()
     }
 
+    /// SOUNDNESS R1896 — "the release charged no concrete effect": ABSENT, or a row whose only charge is the C12 `Unknown` hedge
+    /// (an untyped stored-field receiver now discloses instead of reading silent). A concrete effect, an `invisible` or an
+    /// `incomplete` marker returns the offending entry. Asked by the kill-switch arms that pin "the release did not resolve this".
+    static func noConcreteEffect(_ byName: [String: [String: Any]], _ fn: String) -> String? {
+        guard let e = byName[fn] else { return nil }
+        let inf = Set((e["inferred"] as? [String]) ?? []).subtracting(["Unknown"])
+        let inv = (e["invisible"] as? [String]) ?? [], inc = (e["incomplete"] as? [String]) ?? []
+        return (inf.isEmpty && inv.isEmpty && inc.isEmpty) ? nil : "\(e)"
+    }
+
     /// ⟨0.39⟩ A PURE ROW IS NO LONGER AN ABSENT ROW, so `XCTAssertNil(by[fn])` no longer says what the
     /// fixtures using it meant. SPEC §4 ⟨0.39⟩ obligation 1 makes a function that DISPATCHES emit a row
     /// even when it is otherwise pure — the deliberate exception to §2 rule 3 — precisely because that

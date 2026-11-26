@@ -407,6 +407,8 @@ final class DeclCollector: SyntaxVisitor {
     // (same file, later; or a different file, any order) have contributed their `where` clauses to the
     // merged `typeGenericBounds`. Mirrors `staticFactoryFields`'s exact two-phase shape one level down.
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
+    /// SOUNDNESS R1896 — an unannotated stored property initialised by a path-qualified constructor spelling, undecided until the merge.
+    var ctorPathFieldsR1896: [(ty: String, path: String, field: String, spelled: String, file: String)] = []
     /// SOUNDNESS R1044 residual — THE INSTANTIATION OF A LOCAL GENERIC TYPE (see `LocalGenericFacts`). Per file;
     /// merged, and poisoned where two declarations disagree, by the Driver.
     var lgOrder: [String: [String]?] = [:]                                  // Type -> its generic params, in order
@@ -1855,6 +1857,18 @@ final class DeclCollector: SyntaxVisitor {
                         if !CallCollector.r1492fOff, r1492Path(ty, tyPath) { fieldTypeArgs[tyPath, default: [:]][name] = targs }   // R1492 residual
                     }
                 } else if let initVal = binding.initializer?.value,
+                          let call = initVal.as(FunctionCallExprSyntax.self),
+                          let ctorPath = Self.qualifiedCtorPathR1896(call.calledExpression) {
+                    // SOUNDNESS R1896 — `public var unknownFields = SwiftProtobuf.UnknownStorage()` / `var n = Outer.Inner()`: an
+                    // UNANNOTATED stored property initialised by a PATH-QUALIFIED constructor (a module-qualified or nested type).
+                    // The arm above reads a bare `DeclReference` callee, so the field recorded nothing, every implicit-self
+                    // `unknownFields.traverse(…)` was R1455's `droppedMember` (no edge, no `Unknown`), and the C12 hedge cannot
+                    // fire where only THIS package declares the member — silent over an executed effect. Recorded as a CANDIDATE
+                    // and decided once every file is merged (`Driver`, `ctorPathFieldsR1896`): a path spelling is also an enum
+                    // case (`Kind.Node(1)`) or a static factory (`Dep.Make()`), and typing the field from one of those would
+                    // replace the C12 hedge on its calls with a receiver that binds nothing.
+                    ctorPathFieldsR1896.append((ty, tyPath, name, ctorPath, file))
+                } else if let initVal = binding.initializer?.value,
                           let ma = initVal.as(MemberAccessExprSyntax.self),
                           let base = ma.base?.as(DeclReferenceExprSyntax.self),
                           base.baseName.text.first?.isUppercase == true,
@@ -1948,6 +1962,23 @@ final class DeclCollector: SyntaxVisitor {
         return .visitChildren
     }
 
+    /// SOUNDNESS R1896 — `A.B.C` -> "A.B.C" when `e` is a PATH of uppercase-first identifiers (`Lib.Store`, `Outer.Inner`),
+    /// optionally ending in `.init`; nil for anything else (a value path, a lowercase member, a call, a generic).
+    static func qualifiedCtorPathR1896(_ e: ExprSyntax) -> String? {
+        var comps: [String] = []
+        var cur = e
+        while true {
+            if let ma = cur.as(MemberAccessExprSyntax.self), let b = ma.base {
+                comps.append(ma.declName.baseName.text); cur = b; continue
+            }
+            if let d = cur.as(DeclReferenceExprSyntax.self), d.argumentNames == nil { comps.append(d.baseName.text); break }
+            return nil
+        }
+        comps.reverse()
+        if comps.count >= 3, comps.last == "init" { comps.removeLast() }
+        guard comps.count >= 2, comps.allSatisfy({ $0.first?.isUppercase == true }) else { return nil }
+        return comps.joined(separator: ".")
+    }
     /// SOUNDNESS R1044 residual — a type's own generic parameters, IN ORDER; a second declaration of the same
     /// simple name with a different list poisons it.
     private func recordLocalGenericOrder(_ name: String, _ clause: GenericParameterClauseSyntax?) {

@@ -76,7 +76,7 @@ final class SpelledReceiverProcessTests: XCTestCase {
         let off = try scan(Self.shapes, env: ["CANDOR_R1463_OFF": "1"])
         for f in Self.r1463Fns {
             XCTAssertEqual(inf(by, f), ["Fs"], "R1463: \(f)'s receiver type is spelled; its callee deletes a file; got \(by[f] ?? [:])")
-            XCTAssertNil(off[f], "kill switch: \(f) is ABSENT on the release reading (the row this pins); got \(off[f] ?? [:])")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(off, f), "kill switch: \(f) charges no concrete effect on the release reading (the row this pins; an untyped stored-field receiver may now carry the C12 hedge, R1896); got \(off[f] ?? [:])")
         }
         // THE GATE, on the R1463 row's own spelling.
         XCTAssertEqual(try gate(Self.shapes, "deny Fs e_strlit"), 1)

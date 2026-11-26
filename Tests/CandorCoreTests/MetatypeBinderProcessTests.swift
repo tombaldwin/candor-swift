@@ -319,7 +319,7 @@ final class MetatypeBinderProcessTests: XCTestCase {
             XCTAssertEqual(eff(by, fn), ["Net"], "\(fn) is a CONTROL and must resolve either way")
         }
         for fn in Self.classArms + Self.protoArms {
-            XCTAssertNil(by[fn], "with R585 off, \(fn) must be ABSENT again — got \(eff(by, fn))")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(by, fn), "with R585 off, \(fn) must charge no concrete effect again (ABSENT, or the C12 hedge on an untyped field, R1896) — got \(eff(by, fn))")
         }
     }
 

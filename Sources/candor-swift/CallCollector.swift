@@ -263,6 +263,10 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// platform members (`STDLIB_PROJECTED_VALUE_MEMBER_LABELS`) are what the call may bind. `false` (the
               /// default) is the DISCLOSING direction: the name-keyed platform table alone decides.
               var projectedTaskLocal: Bool = false
+              /// SOUNDNESS R1896 — on a `<site>.c12.` marker: the receiver chain's HEAD is a stored field of the enclosing type
+              /// (`unknownFields.traverse(…)`, `self.oneof.generate()`, `loop!.run()`) that no stage-1 rule typed, so the call
+              /// is a member of whatever that field holds. `false` (the default) asks nothing new of the terminal.
+              var fieldHeadR1896: Bool = false
               /// SOUNDNESS R1463 — the receiver's owner was read from its own SPELLING (a literal, a stdlib container
               /// binding, a specialised type reference — `spelledReceiverRoot`), so it names a platform nominal this
               /// package does not own: no ⟨0.39⟩ obligation-1 key is minted for it (`DepLib#Array.makeIterator`
@@ -7077,6 +7081,30 @@ final class CallCollector: SyntaxVisitor {
 
     /// Is `name` a LOCAL BINDING at this point in the walk? The union of the function-wide set and the
     /// lexically-scoped payload set — every guard in this file asks it at a position, so both apply.
+    /// SOUNDNESS R1896 — is the HEAD of this receiver chain a stored field of the enclosing type, spelled bare (`f`) or through
+    /// `self` (`self.f`), and neither shadowed by a local, a parameter nor a binder? Read only at R1455's drop, so the field is
+    /// one no stage-1 rule typed. Measurement of what the C12 hedge may disclose, never of what the call does.
+    private func untypedFieldHeadR1896(_ recv: ExprSyntax) -> Bool {
+        guard let et = enclosingType, var e = Optional(Self.peel(recv)) as ExprSyntax? else { return false }
+        while true {   // walk to the head: `f.a.b()` / `f.a().b` / `f[0].b` start at `f`
+            if let c = e.as(FunctionCallExprSyntax.self) { e = Self.peel(c.calledExpression); continue }
+            if let sc = e.as(SubscriptCallExprSyntax.self) { e = Self.peel(sc.calledExpression); continue }
+            if let m = e.as(MemberAccessExprSyntax.self), let b = m.base {
+                let pb = Self.peel(b)
+                if let d = pb.as(DeclReferenceExprSyntax.self), d.baseName.text == "self" {
+                    let n = m.declName.baseName.text
+                    return fields[et]?[n] != nil
+                }
+                e = pb; continue
+            }
+            break
+        }
+        guard let d = e.as(DeclReferenceExprSyntax.self) else { return false }
+        let n = d.baseName.text
+        if ["self", "Self", "super"].contains(n) { return false }
+        if isBoundLocal(n) || vars[n] != nil || paramTypesR951[n] != nil || paramNamesR851.contains(n) { return false }
+        return fields[et]?[n] != nil
+    }
     private func isBoundLocal(_ name: String) -> Bool {
         boundLocals.contains(name) || casePayloadLocals.contains(name)
     }
@@ -11205,6 +11233,7 @@ final class CallCollector: SyntaxVisitor {
                         c.platextLabels = node.arguments.map { $0.label?.text }
                         c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
                         c.projectedTaskLocal = projectedReceiver(b)?.kind == .taskLocal
+                        c.fieldHeadR1896 = untypedFieldHeadR1896(b)
                         calls.append(c)
                     }
                     // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
@@ -12845,6 +12874,10 @@ final class CallCollector: SyntaxVisitor {
     static let ct2FallbackProbe = Env.trace("CANDOR_CT2_FALLBACK_PROBE")
     /// Curated-routing S3 (lane L8) kill switch: no `<site>.c12.` marker at the R1455 drop, so the terminal is never asked.
     static let c12Off = Env.on("CANDOR_C12_OFF")
+    /// SOUNDNESS R1896 KILL SWITCH — restores the release's reading of an unannotated stored property initialised by a
+    /// path-qualified constructor (`var f = Mod.Type()`, `var n = Outer.Inner()`): untyped, so its implicit-self member calls are
+    /// R1455 drops again. Non-additive (typing the field removes the C12 `Unknown` the dependency-typed calls carried).
+    static let r1896Off = Env.on("CANDOR_R1896_OFF")
 
     /// SOUNDNESS R1904 / R1905 — WHAT A `$n` PROJECTED-VALUE RECEIVER IS. `$n` / `T.$n` / `self.$n` / `x.$n` call whatever
     /// the wrapper's `projectedValue` is, so the receiver's type is not the declaring type's: it is the wrapper's DECLARED

@@ -10,6 +10,19 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ An unannotated field initialised by a path-qualified constructor is typed; an untyped field head is hedged (SOUNDNESS R1896)
+
+`public var unknownFields = SwiftProtobuf.UnknownStorage()` and `var n = Outer.Inner()` recorded no type: the constructor arm read only a
+bare callee, so every implicit-self `unknownFields.traverse(…)` (and `self.n.m()`) was R1455's dropped member call, with no edge and no
+`Unknown`, and the C12 hedge cannot fire where only THIS package declares the member. The field is now typed when the path names a type
+THIS scan declares (a nested type by its full path, or a type of one of its own modules by `Module.Type()`), or is a two-segment
+`Module.Type()` of an imported module (the local binder's own rule); an enum case (`Dep.Kind.Node(1)`), a static factory
+(`Dep.NS.Make()`) and a three-segment dependency path keep their C12 hedge (typing one would have replaced the hedge with a receiver
+that binds nothing). Chained, the dependency's body charges; standalone, the typed call is disclosed `invisible` as any typed
+dependency receiver is. A drop whose receiver chain starts at a stored field of the enclosing type that nothing typed (`var x: T!`, an
+initializer the engine cannot read) is hedged `Unknown {dispatch:<untyped>.<m>}` when this package declares a member of that name.
+Kill switch `CANDOR_R1896_OFF` restores the untyped field (the hedge on an untyped field head is additive and has none).
+
 ### ⚠ `$n` projected-value receivers: typed through the wrapper, or hedged (SOUNDNESS R1904, R1905)
 
 `$n.m()`, `T.$n.m()`, `self.$n.m()` and `x.$n.m()` call whatever the wrapper's `projectedValue` is, not a member of the declaring

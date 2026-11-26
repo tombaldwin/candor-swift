@@ -503,6 +503,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // two-phase shape one level down (see `DeclCollector.unresolvedGenericFields`'s doc for the ordering
     // hazard this exists to close).
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
+    var ctorPathFieldsR1896: [(ty: String, path: String, field: String, spelled: String, file: String)] = []   // SOUNDNESS R1896
     var memberTypeAliasesByPathAll: [String: [String: Set<String>]] = [:]                          // R1492
     var r1492PathKeys: Set<String> = []                                                            // R1492
     var assocTypeBoundsAll: [String: [String: String]] = [:]                                          // R1492
@@ -1159,6 +1160,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, bs) in c.typeDeclGenericBounds { typeDeclGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }   // R1481
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
+        ctorPathFieldsR1896.append(contentsOf: c.ctorPathFieldsR1896)
     }
     // SOUNDNESS R1105 audit (swiftagent-audit1105) — THE GETTER VIEW IS A PROPERTY OF THE QUAL. A read of `T.p` edges
     // `T.p.<get>` whenever ANY binding under `T.p` has a setter side, so every getter-side body under that qual must
@@ -2374,6 +2376,32 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // types it; an unknown leaf leaves the field unrecorded (the binder then clears rather than guessing).
     for (ty, field, leaf) in staticFactoryFields where fields[ty]?[field] == nil {
         if let vended = returnsIdx[leaf] { fields[ty, default: [:]][field] = (vended, false) }
+    }
+    // SOUNDNESS R1896 — AN UNANNOTATED FIELD INITIALISED BY A PATH-QUALIFIED CONSTRUCTOR types the field when the path NAMES A TYPE
+    // THIS SCAN DECLARES: a nested type by its full path (`Outer.Inner()`), or a type of one of this scan's own modules by
+    // `Module.Type()` (`SwiftProtobuf.UnknownStorage()`, the module not itself a type). Nothing else is read as a construction: an
+    // enum case with an uppercase name, a static factory, or a type of a DEPENDENCY the scan cannot prove declares it stays what it
+    // was — the call is dropped and the C12 hedge keeps its say. The recorded string is the one the annotated spelling
+    // (`var x: Module.Type`) records, so both spellings resolve through the one downstream path.
+    if !ctorPathFieldsR1896.isEmpty, !CallCollector.r1896Off {
+        let ownModulesR1896 = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
+        for (ty, path, field, spelled, file) in ctorPathFieldsR1896 {
+            let pathKeyed = path != ty && path.contains(".")
+            if fields[ty]?[field] != nil, !(pathKeyed && fields[path]?[field] == nil) { continue }   // a declaration already typed it: that answer stands
+            let comps = spelled.split(separator: ".").map(String.init)
+            var ok = localTypePaths.contains(spelled)
+            if !ok, comps.count >= 2, ownModulesR1896.contains(comps[0]), !localTypes.contains(comps[0]) {
+                let rest = comps.dropFirst().joined(separator: ".")
+                ok = localTypePaths.contains(rest) && (comps.count > 2 || localTypes.contains(rest))
+            }
+            // `Module.Type()` of an IMPORTED module this scan does not own: the same trust the local binder's `Module.Type()` arm
+            // gives (`isModuleQualifier` + an uppercase leaf), and no more — a two-segment path only. `Dep.Kind.Node(1)` and
+            // `Dep.NS.Make()` (an enum case, a static factory) are three segments and stay dropped.
+            if !ok, comps.count == 2, !ownModulesR1896.contains(comps[0]), !localTypes.contains(comps[0]), (fileImports[file] ?? []).contains(comps[0]) { ok = true }
+            guard ok else { continue }
+            if fields[ty]?[field] == nil { fields[ty, default: [:]][field] = (spelled, false) }
+            if pathKeyed, fields[path]?[field] == nil { fields[path, default: [:]][field] = (spelled, false); r1492PathKeys.insert(path) }
+        }
     }
     // SOUNDNESS R915 (B) — A MEMBER ALIAS, RESOLVED IN THE SCOPE THAT DECLARED IT. `let parent: Parent`
     // inside `ObserveOnSink` names `ObserveOnSink.Parent`, and `fields` stores the spelling `Parent`, which
@@ -5037,12 +5065,26 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 evidence = "kappa:\(root)"; break
             }
         }
-        guard let ev = evidence else { return p }
+        // SOUNDNESS R1896 — the receiver chain starts at a stored field of the enclosing type that nothing typed, and THIS package
+        // declares a member of the leaf's name: the call may reach it. Said with the same token as every other C12 row; the
+        // reason is "the field's type is unresolved", which is true of exactly the calls it is emitted for.
+        if evidence == nil, call.fieldHeadR1896, c12OwnLeaves.contains(leaf) { evidence = "own-field" }
+        guard let ev = evidence else {
+            // SOUNDNESS R1896 — MEASUREMENT ONLY (`CANDOR_C12_PROBE`): a drop the hedge did not reach whose leaf THIS package
+            // declares, i.e. the exposed residue after the implicit-self typing. Changes no output.
+            if c12Probe, c12OwnLeaves.contains(leaf) {
+                FileHandle.standardError.write("C12OWN\t\(f.qual)\t\(leaf)\n".data(using: .utf8)!)
+            }
+            return p
+        }
         if c12Probe { FileHandle.standardError.write("C12HEDGE\t\(f.qual)\t\(leaf)\t\(ev)\n".data(using: .utf8)!) }
         p.unknown.insert("dispatch:<untyped>.\(leaf)")
         return p
     }
     let c12Probe = Env.trace("CANDOR_C12_PROBE")
+    lazy var c12OwnLeaves: Set<String> = Set(allFns.map { f in
+        let q = f.simpleQual.prefix { $0 != "(" && $0 != "#" }
+        return String(q.split(separator: ".").last ?? "") })
     var moduleMemberCache: [String: Set<String>?] = [:]
     func moduleMemberNames(_ m: String) -> Set<String>? {
         if let c = moduleMemberCache[m] { return c }

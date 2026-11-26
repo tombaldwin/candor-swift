@@ -103,7 +103,7 @@ for (n, f) in cases { f(); print(n, seen()) }
         }
         let off = try scan(root, env: ["CANDOR_R1506_OFF": "1"])
         for fn in ["H.pField", "TopT.pTopExt", "pLocal", "pParam", "pGeneric", "pAnyMeta", "pLitMkSelf", "H.pFieldInf"] {
-            XCTAssertNil(ProcessHarness.chargedNothing(off, fn), "the release was silent: \(fn) \(off[fn] ?? [:])")
+            XCTAssertNil(ProcessHarness.noConcreteEffect(off, fn), "the release charged no concrete effect: \(fn) \(off[fn] ?? [:])")
         }
         XCTAssertEqual(try gate(root, "deny Fs TopT.pTopExt\n"), 1)
         XCTAssertEqual(try gate(root, "deny Fs TopT.pTopExt\n", env: ["CANDOR_R1506_OFF": "1"]), 0)
