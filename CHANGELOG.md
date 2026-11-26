@@ -10,6 +10,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### Stdlib table generator: `->` is not a closing bracket (SOUNDNESS R1903)
+
+`tools/gen-stdlib-conformances.py`'s `split_top` read the `>` of `->` as a closing bracket, so a platform member with a
+closure parameter followed by more parameters lost its later labels in `STDLIB_MEMBER_LABELS`. Five entries change
+(`assertIsolated`, `assumeIsolated`, `preconditionIsolated`, `enumerator`, `withCancellationHandler`). A call spelled with
+the platform's complete label set now binds the platform member, so the C12 `dispatch:<untyped>.<leaf>` token drops on it;
+the dependency-receiver disclosures (`untyped cross-package receiver`, `invisible`) are unchanged.
+
 ### Platform member table: `TaskLocal.withValue` (SOUNDNESS R1895)
 
 `$taskLocal.withValue(…)` is a call of the platform's own `TaskLocal`, so the C12 hedge no longer discloses it as
