@@ -263,7 +263,8 @@ final class ReceiverTypingS2cProcessTests: XCTestCase {
         XCTAssertEqual(ch["closTally"]?.inferred.contains("Fs"), true, "chained: `typeSurface.returns` types the element")
         XCTAssertEqual(ch["closGet"]?.inferred.contains("Fs"), true, "chained")
         XCTAssertEqual(try gate(fx, chained: true, "deny Fs closTally"), 1, "GATE — was exit 0 over a write")
-        let off = try scan(fx, chained: true, env: ["CANDOR_R1455T4E_OFF": "1"], "off")
+        // the C12 hedge (lane L8) discloses the same drop independently, so the release's reading needs both switches
+        let off = try scan(fx, chained: true, env: ["CANDOR_R1455T4E_OFF": "1", "CANDOR_C12_OFF": "1"], "off")
         XCTAssertNil(off["closTally"], "§1b — the drop, reproduced")
     }
 }

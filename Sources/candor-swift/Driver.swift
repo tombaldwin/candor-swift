@@ -4881,6 +4881,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         /// every other call that reached the end of its routes: a typed owner the dependency declares, a `super` call, a
         /// free call, a protocol spelling, a module-qualified call, or a receiver a blind dependency's sources declare.
         case unresolvedCall(resolved: Bool)
+        /// `<site>.c12.` — an explicit member call whose receiver NO stage-1 rule typed (R1455's `droppedMember`): no
+        /// identity, no key, no edge. New in L8; not one of the folded arms, so it answers the same under the fold switch.
+        case unidentifiedMember
     }
     let s3FoldOff = Env.on("CANDOR_S3_FOLD_OFF")
     func applyTerminal(_ p: TerminalPosture, to qual: String, file: String) {
@@ -4897,6 +4900,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             return terminalUntypedReceiver(call, f, file: file)
         case .unresolvedCall(let resolved):
             return terminalUnresolvedCall(call, f, resolved: resolved)
+        case .unidentifiedMember:
+            return terminalUnidentifiedMember(call, f, file: file)
         }
     }
     /// The untyped-receiver row of the table: one token, four pieces of evidence (chained, R836 guessed owner, R1066 instance
@@ -4978,6 +4983,78 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return p
     }
+    /// The UNIDENTIFIED-MEMBER row (SOUNDNESS R1455 residue, R1875's C12 drop, L6's unchained element of a κ-dependency
+    /// factory). SPEC §4: an unresolvable explicit call is `Unknown`, never silently pure. The posture is R1472's and the
+    /// pricing arm's token, `Unknown {dispatch:<untyped>.<m>}`.
+    ///
+    /// NARROWED TO WHERE A DEPENDENCY BODY COULD ANSWER THE NAME, measured before it was written: hedging every drop
+    /// (the round-2 X arm) costs 3,703 rows chained (2.93% of 126,581 units, above the 2.6% band) and 1,943 unchained
+    /// (6.74% of 28,823), and the population is dominated by stdlib names on values the engine did not type (`map`,
+    /// `append`, `contains`, `joined`, `hasPrefix`, a `Result`'s `get`) and by the package's OWN members on implicit-self
+    /// fields (`unknownFields.traverse`, a typing gap whose remedy is a resolution, not a hedge). So the call is disclosed
+    /// when — and only when — a dependency could be what it reaches:
+    ///   · a CHAINED package publishes a body under this leaf (`anyChainedPackagePublishesLeaf`: an entry with something
+    ///     to say), or an UNCOVERED dependency module the file imports declares a visible member of this name in its
+    ///     readable sources (`moduleMemberNames`) — and the platform declares no member of the name whose labels could
+    ///     bind this call (a platform member is the likelier receiver, and its effects are κ's question);
+    ///   · or the leaf is a κ verb of a THIRD-PARTY κ root whose module the file imports uncovered (`get` on
+    ///     `HTTPClient`), with the same platform-label exclusion.
+    /// What it does NOT disclose is the residue the report names: a leaf only this package declares, a leaf only the
+    /// platform declares, and an unreadable dependency (no evidence either way).
+    func terminalUnidentifiedMember(_ call: Call, _ f: FnInfo, file: String) -> TerminalPosture {
+        var p = TerminalPosture()
+        let leaf = call.leaf
+        let labels = call.platextLabels ?? []
+        let platformNamed = (STDLIB_MEMBER_LABELS[leaf] ?? []).contains {
+            r1071LabelsAdmit(labels, call.platextTrailing, $0.isEmpty ? [] : $0.split(separator: ",").map(String.init)) }
+        if platformNamed { return p }
+        var evidence: String? = nil
+        if deps.anyChainedPackagePublishesLeaf(leaf) { evidence = "chained" }
+        let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+        let open = blindModules(inFile: file).union(kappaDepOpenModules(inFile: file)).subtracting(own)
+        if evidence == nil, !open.isEmpty {
+            var closure = Set<String>(), queue = Array(open)
+            while let x = queue.popLast() {
+                guard closure.insert(x).inserted else { continue }
+                queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            }
+            for m in closure.sorted() where !PLATFORM_MODULES.contains(m) && moduleMemberNames(m)?.contains(leaf) == true {
+                evidence = "source:\(m)"; break
+            }
+        }
+        if evidence == nil, !open.isEmpty {
+            for (root, mods) in kappaThirdPartyRoots where !mods.isDisjoint(with: open) && kappaMember(root: root, member: leaf) != nil {
+                evidence = "kappa:\(root)"; break
+            }
+        }
+        guard let ev = evidence else { return p }
+        if c12Probe { FileHandle.standardError.write("C12HEDGE\t\(f.qual)\t\(leaf)\t\(ev)\n".data(using: .utf8)!) }
+        p.unknown.insert("dispatch:<untyped>.\(leaf)")
+        return p
+    }
+    let c12Probe = Env.trace("CANDOR_C12_PROBE")
+    var moduleMemberCache: [String: Set<String>?] = [:]
+    func moduleMemberNames(_ m: String) -> Set<String>? {
+        if let c = moduleMemberCache[m] { return c }
+        var out: Set<String>? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var all = Set<String>(), ok = true
+            for path in files where path.hasSuffix(".swift") {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                all.formUnion(visibleMemberNames(source: text).names)
+            }
+            if ok { out = all }
+        }
+        moduleMemberCache[m] = out
+        return out
+    }
+    /// The κ member roots that describe a THIRD-PARTY package, with the modules through which κ recognises it.
+    let kappaThirdPartyRoots: [(root: String, modules: Set<String>)] = KAPPA_REGISTRY.values.compactMap { e in
+        guard e.surfaces.contains(.member) else { return nil }
+        var mods = Set<String>()
+        for d in e.describes { if case .package(let pk, let decl) = d { mods.formUnion(pk.modules ?? decl) } }
+        return mods.isEmpty ? nil : (e.name, mods)
+    }.sorted { $0.root < $1.root }
     /// The unresolved-call rows: the `Unknown {dispatch:<T>.<m>}` evidence (R1866 typed, R1874 `super`) and, independently,
     /// the `invisible` ledger evidence (free call, protocol spelling, module-qualified, R1066/R1071 source-declared, R1104
     /// unreadable — first match wins, as before).
@@ -5880,6 +5957,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
             // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
+            if call.path.hasPrefix("<site>.c12.") {   // curated-routing S3: an unidentified explicit member call (lane L8)
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                applyTerminal(terminalDecision(.unidentifiedMember, call, f, file: file), to: f.qual, file: file)
+                continue
+            }
             if call.path.hasPrefix("<site>.") {
                 direct[f.qual, default: []].insert("Unknown")
                 whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(call.leaf)")

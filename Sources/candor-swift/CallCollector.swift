@@ -11148,6 +11148,18 @@ final class CallCollector: SyntaxVisitor {
                         calls.append(Call(path: "<untyped>.\(member)", leaf: member, strArg: nil,
                                           typed: false, args: [], argTypes: [], depCallee: callee, extOwner: nil))
                     }
+                    // CURATED-ROUTING S3 (SOUNDNESS R1455 residue, R1875, lane L8) — THE TERMINAL IS ASKED ABOUT THE DROP. No
+                    // identity was formed, so the call goes to the Driver's single disclosure terminal as `unidentified`,
+                    // with the call's labels (a platform member whose labels can bind the call is the likeliest receiver).
+                    // The marker is emitted BESIDE the drop, never instead of it: `droppedMember` and every fence keyed on
+                    // it (R1073, R1472, the R1455 probe and pricing arm) read what they read before. The Driver decides
+                    // whether anything is disclosed (`terminalUnidentifiedMember`); the marker itself carries no effect.
+                    if !Self.c12Off {
+                        var c = Call(path: "<site>.c12.\(member)", leaf: member, strArg: nil, typed: false, args: [], argTypes: [])
+                        c.platextLabels = node.arguments.map { $0.label?.text }
+                        c.platextTrailing = (node.trailingClosure == nil ? 0 : 1) + node.additionalTrailingClosures.count
+                        calls.append(c)
+                    }
                     // SOUNDNESS R1472 — THE SKIP MUST NOT MAKE THIS DROP CHEAPER (see `r1472DroppedMembers`).
                     if !Self.r1472Off { r1472DroppedMembers.append(member) }
                     if let only = R1455.hedgeOnly {   // SOUNDNESS R1455 pricing arm — hedge only the named classes
@@ -12784,6 +12796,8 @@ final class CallCollector: SyntaxVisitor {
     // unresolved explicit call already discloses, and here it does not. OFF (unset) by default; nothing ships on it.
     static let ct2Fallback: String? = Env.value("CANDOR_CT2_FALLBACK")
     static let ct2FallbackProbe = Env.trace("CANDOR_CT2_FALLBACK_PROBE")
+    /// Curated-routing S3 (lane L8) kill switch: no `<site>.c12.` marker at the R1455 drop, so the terminal is never asked.
+    static let c12Off = Env.on("CANDOR_C12_OFF")
     private func siteFallback(_ cls: String, _ member: String) {
         guard let opt = Self.ct2Fallback else { return }
         let optionAOnly = cls == "format" || cls == "eq"

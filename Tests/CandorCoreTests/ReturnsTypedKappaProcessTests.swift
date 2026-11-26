@@ -120,8 +120,8 @@ final class ReturnsTypedKappaProcessTests: XCTestCase {
         return fx
     }
 
-    private func scan(_ fx: Fixture, chained: Bool, _ tag: String) throws -> [String: Row] {
-        var env: [String: String] = [:]
+    private func scan(_ fx: Fixture, chained: Bool, env extra: [String: String] = [:], _ tag: String) throws -> [String: Row] {
+        var env = extra
         if chained { env["CANDOR_DEPS"] = fx.depDir.path }
         let r = try ProcessHarness.run(fx.bin, [fx.appDir.path, "--out", fx.root.appendingPathComponent(tag).path], env: env)
         XCTAssertEqual(r.code, 0, "consumer scan must succeed — stderr: \(r.err)")
@@ -183,11 +183,18 @@ final class ReturnsTypedKappaProcessTests: XCTestCase {
         }
         XCTAssertNil(ch["elemPureTwin"], "a leaf no chained package publishes (pure `rest`) is not hedged")
         XCTAssertNil(ch["platformLeafElement"], "a platform-only leaf (`uppercased`) is not hedged")
-        // Unchained: unchanged — the factory call's own `invisible` still names the module, nothing is added.
+        // Unchained: the factory call's own `invisible` still names the module, and — since curated-routing S3 (lane L8,
+        // the C12 hedge) — the dropped member call itself discloses, because `Nodes`' readable sources declare the member.
+        // The pure twin is hedged too: nothing unchained can tell `rest` from `touch`.
         let nc = try scan(fx, chained: false, "nc")
-        for fn in ["elemBound", "elemUnbound", "elemSubscript", "elemPureTwin"] {
-            XCTAssertEqual(nc[fn]?.inferred, [], "\(fn) unchained")
+        for (fn, m) in [("elemBound", "touch"), ("elemUnbound", "touch"), ("elemSubscript", "touch"), ("elemPureTwin", "rest")] {
+            XCTAssertEqual(nc[fn]?.inferred, ["Unknown"], "\(fn) unchained (L8: was `[]`, `invisible` only)")
+            XCTAssertEqual(nc[fn]?.why, ["dispatch:<untyped>.\(m)"], "\(fn) unchained")
             XCTAssertEqual(nc[fn]?.invisible, ["Nodes"], "\(fn) unchained")
+        }
+        let ncOff = try scan(fx, chained: false, env: ["CANDOR_C12_OFF": "1"], "ncoff")
+        for fn in ["elemBound", "elemUnbound", "elemSubscript", "elemPureTwin"] {
+            XCTAssertEqual(ncOff[fn]?.inferred, [], "\(fn) unchained with the C12 hedge off: the release's reading")
         }
     }
 }

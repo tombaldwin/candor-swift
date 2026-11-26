@@ -166,4 +166,27 @@ final class DisclosureTerminalProcessTests: XCTestCase {
         XCTAssertNotEqual(folded.raw["t_srcdecl"], seeded.raw["t_srcdecl"],
                           "with ONE old arm (R1066) off the two arms must differ, or the byte comparison above proves nothing")
     }
+
+    // ── part 2: the C12 hedge ──
+
+    func testAnUnidentifiedMemberCallADependencyCouldAnswerIsDisclosed() throws {
+        let fx = try make(); defer { try? FileManager.default.removeItem(at: fx.root) }
+        for chained in [false, true] {
+            let rows = try scan(fx, chained: chained).rows
+            for c in ["c12_shorthand_w", "c12_localcall_w"] {
+                XCTAssertTrue(rows[c]?.why.contains("dispatch:<untyped>.touch") ?? false,
+                              "chained=\(chained) \(c): Guess declares `touch`; the drop must disclose (was ABSENT over an executed write)")
+            }
+            XCTAssertTrue(rows["c12_kappaelem_w"]?.why.contains("dispatch:<untyped>.get") ?? false,
+                          "chained=\(chained): an element of a κ-dependency factory, `get` reached through no identity")
+            XCTAssertNil(rows["c12_localonly_p"], "chained=\(chained): a leaf only this package declares is the named residue")
+            XCTAssertFalse(rows["c12_platform_p"]?.why.contains("dispatch:<untyped>.hasPrefix") ?? false,
+                           "chained=\(chained): a leaf the platform declares with labels that bind the call is not hedged")
+            XCTAssertEqual(try gate(fx, chained: chained, "deny Fs Unknown c12_localcall_w"), 1,
+                           "chained=\(chained): the gate a user writes now fires over the executed write")
+        }
+        let off = try scan(fx, chained: true, env: ["CANDOR_C12_OFF": "1"]).rows
+        XCTAssertFalse(off["c12_localcall_w"]?.why.contains("dispatch:<untyped>.touch") ?? false,
+                       "`CANDOR_C12_OFF=1` restores the drop (the switch reaches the marker)")
+    }
 }

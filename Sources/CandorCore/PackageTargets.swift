@@ -953,6 +953,64 @@ public func topLevelExtensionConformances(source: String) -> (types: Set<String>
     return (out, opaque)
 }
 
+/// Curated-routing stage S3 (SOUNDNESS R1455 residue, lane L8) — the names of every MEMBER (method or property) a file
+/// declares visibly to an importer, at any nesting: in a type body (`public`/`open` on the member), in an extension
+/// (`public`/`open` on the member, or a `public`/`open` extension it does not narrow), or as a requirement of a
+/// `public` protocol. The question it answers is a NAME question — "could a call `x.touch(p)` whose receiver no rule
+/// typed reach a body this dependency declares?" — so it records names, not owners. `opaque`: a macro expansion or an
+/// unread `#if` shape, which proves nothing either way.
+public func visibleMemberNames(source: String) -> (names: Set<String>, opaque: Bool) {
+    var out = Set<String>()
+    var opaque = false
+    func vis(_ mods: DeclModifierListSyntax) -> String? {
+        for m in mods {
+            let t = m.name.text
+            if ["public", "open", "private", "fileprivate", "internal", "package"].contains(t) { return t }
+        }
+        return nil
+    }
+    func note(_ name: String, _ mods: DeclModifierListSyntax, inherited: String?) {
+        let v = vis(mods) ?? inherited
+        if v == "public" || v == "open" { out.insert(name) }
+    }
+    func walkMembers(_ items: MemberBlockItemListSyntax, inherited: String?) {
+        for item in items { walkDecl(item.decl, inherited: inherited) }
+    }
+    func walkDecl(_ d: DeclSyntax, inherited: String?) {
+        if let f = d.as(FunctionDeclSyntax.self) { note(f.name.text, f.modifiers, inherited: inherited) }
+        else if let v = d.as(VariableDeclSyntax.self) {
+            for b in v.bindings { if let n = b.pattern.as(IdentifierPatternSyntax.self)?.identifier.text { note(n, v.modifiers, inherited: inherited) } }
+        }
+        else if let e = d.as(ExtensionDeclSyntax.self) {
+            let ev = vis(e.modifiers)
+            if ev == "private" || ev == "fileprivate" { return }
+            walkMembers(e.memberBlock.members, inherited: ev)
+        }
+        // a protocol's requirements are as visible as the protocol; a type's members carry their own modifier
+        else if let p = d.as(ProtocolDeclSyntax.self) { walkMembers(p.memberBlock.members, inherited: vis(p.modifiers)) }
+        else if let c = d.as(ClassDeclSyntax.self) { walkMembers(c.memberBlock.members, inherited: nil) }
+        else if let s = d.as(StructDeclSyntax.self) { walkMembers(s.memberBlock.members, inherited: nil) }
+        else if let e = d.as(EnumDeclSyntax.self) { walkMembers(e.memberBlock.members, inherited: nil) }
+        else if let a = d.as(ActorDeclSyntax.self) { walkMembers(a.memberBlock.members, inherited: nil) }
+        else if d.is(MacroExpansionDeclSyntax.self) { opaque = true }
+        else if let x = d.as(IfConfigDeclSyntax.self) {
+            for clause in x.clauses {
+                switch clause.elements {
+                case .statements(let st)?: walk(st)
+                case .decls(let ds)?: for m in ds { walkDecl(m.decl, inherited: inherited) }
+                case nil: break
+                default: opaque = true
+                }
+            }
+        }
+    }
+    func walk(_ items: CodeBlockItemListSyntax) {
+        for item in items { if let d = item.item.as(DeclSyntax.self) { walkDecl(d, inherited: nil) } }
+    }
+    walk(Parser.parse(source: source).statements)
+    return (out, opaque)
+}
+
 /// The default `targetSources`: every file under the target's source directory, or nil when that
 /// directory cannot be located (`targetSourceDirs`' own conventions — `path:`, `Sources/<name>`,
 /// `Source/<name>`, `<name>/`). nil is read as "cannot prove this is Swift", never as "no sources".

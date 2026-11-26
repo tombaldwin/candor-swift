@@ -145,7 +145,8 @@ final class PlatformProtocolExtensionProcessTests: XCTestCase {
                                           env: ["CANDOR_DEPS": root.appendingPathComponent("deps").path].merging(env) { _, b in b }).code
         }
         XCTAssertEqual(try gate(mid, "deny Fs midSeq"), 1, "the chained consumer sees the write")
-        XCTAssertNotEqual(try gate(mid, "deny Fs Unknown midSeq", ["CANDOR_R1071P_OFF": "1"]), 1, "kill switch restores the release's silence")
+        XCTAssertNotEqual(try gate(mid, "deny Fs Unknown midSeq", ["CANDOR_R1071P_OFF": "1", "CANDOR_C12_OFF": "1"]), 1,
+                          "kill switch restores the release's silence (the C12 hedge, lane L8, discloses the same drop, so it is off too)")
         try Data(chainedRun.out.utf8).write(to: root.appendingPathComponent("deps/mid.json"))
         XCTAssertEqual(try gate(app, "deny Fs appSeq"), 1, "…and so does the package one hop further downstream")
     }
