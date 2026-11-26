@@ -504,6 +504,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // hazard this exists to close).
     var unresolvedGenericFields: [(ty: String, field: String, param: String)] = []
     var ctorPathFieldsR1896: [(ty: String, path: String, field: String, spelled: String, file: String)] = []   // SOUNDNESS R1896
+    /// SOUNDNESS R1896 — type key -> field -> the IMPORTED module whose qualifier the field's recorded type spells; read per use file.
+    var importedFieldModuleR1896: [String: [String: String]] = [:]
     var memberTypeAliasesByPathAll: [String: [String: Set<String>]] = [:]                          // R1492
     var r1492PathKeys: Set<String> = []                                                            // R1492
     var assocTypeBoundsAll: [String: [String: String]] = [:]                                          // R1492
@@ -2383,8 +2385,28 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // enum case with an uppercase name, a static factory, or a type of a DEPENDENCY the scan cannot prove declares it stays what it
     // was — the call is dropped and the C12 hedge keeps its say. The recorded string is the one the annotated spelling
     // (`var x: Module.Type`) records, so both spellings resolve through the one downstream path.
+    // (moved up from the VEIN D block so the R1896 typing below can ask whether a module declares a TYPE of a name)
+    var moduleDeclCache: [String: (names: [String: Bool], opaque: Bool)?] = [:]
+    func moduleDeclarations(_ m: String) -> (names: [String: Bool], opaque: Bool)? {
+        if let c = moduleDeclCache[m] { return c }
+        var out: (names: [String: Bool], opaque: Bool)? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            var names: [String: Bool] = [:], opaque = false, ok = true
+            for path in files {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                let r = topLevelTypeDeclarations(source: text)
+                for (n, v) in r.names { names[n] = (names[n] ?? false) || v }
+                if r.opaque { opaque = true }
+            }
+            if ok { out = (names, opaque) }
+        }
+        moduleDeclCache[m] = out
+        return out
+    }
     if !ctorPathFieldsR1896.isEmpty, !CallCollector.r1896Off {
         let ownModulesR1896 = Set(allFns.map { swiftModuleOf($0.loc) }).subtracting([""])
+        let ownLeafNamesR1896: Set<String> = Set(localTypes).union(localTypePaths.map { String($0.split(separator: ".").last ?? "") })
+            .union(declaredTypes).union(typeAliases.keys)
         for (ty, path, field, spelled, file) in ctorPathFieldsR1896 {
             let pathKeyed = path != ty && path.contains(".")
             if fields[ty]?[field] != nil, !(pathKeyed && fields[path]?[field] == nil) { continue }   // a declaration already typed it: that answer stands
@@ -2394,10 +2416,25 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let rest = comps.dropFirst().joined(separator: ".")
                 ok = localTypePaths.contains(rest) && (comps.count > 2 || localTypes.contains(rest))
             }
-            // `Module.Type()` of an IMPORTED module this scan does not own: the same trust the local binder's `Module.Type()` arm
-            // gives (`isModuleQualifier` + an uppercase leaf), and no more — a two-segment path only. `Dep.Kind.Node(1)` and
-            // `Dep.NS.Make()` (an enum case, a static factory) are three segments and stay dropped.
-            if !ok, comps.count == 2, !ownModulesR1896.contains(comps[0]), !localTypes.contains(comps[0]), (fileImports[file] ?? []).contains(comps[0]) { ok = true }
+            // `Module.Type()` of an IMPORTED module this scan does not own. The string recorded is read at every use site, through
+            // `canonicalTypeRef`, which strips an imported qualifier and then asks `localTypes`; so the typing is decided from
+            // what can be PROVEN, not from the spelling (Fable's B1-B3, executed):
+            //   · `Guess.Teller()` where the scan ALSO declares a `Teller` would bind the local member: no scan type, alias or
+            //     nested type may carry the leaf's name (`ownLeafNamesR1896`);
+            //   · `Guess.Maker()` where `Maker` is a free function names no type: the module's readable sources (`moduleDeclarations`,
+            //     complete: not opaque, module not unreadable) must declare a public TYPE `Maker` — an unreadable or opaque module
+            //     keeps the C12 hedge, which is main's answer;
+            //   · a USE file that does not import the module cannot read the qualified spelling: that is decided per file when the
+            //     collector is built (`importScopedFieldsR1896`), so such a file reads the field as untyped, as main did.
+            // Exactly two segments: `Dep.Kind.Node(1)` and `Dep.NS.Make()` stay dropped.
+            if !ok, comps.count == 2, !ownModulesR1896.contains(comps[0]), !localTypes.contains(comps[0]),
+               (fileImports[file] ?? []).contains(comps[0]), !PLATFORM_MODULES.contains(comps[0]),
+               !ownLeafNamesR1896.contains(comps[1]),
+               let d = moduleDeclarations(comps[0]), !d.opaque, d.names[comps[1]] == true {
+                ok = true
+                importedFieldModuleR1896[ty, default: [:]][field] = comps[0]
+                if pathKeyed { importedFieldModuleR1896[path, default: [:]][field] = comps[0] }
+            }
             guard ok else { continue }
             if fields[ty]?[field] == nil { fields[ty, default: [:]][field] = (spelled, false) }
             if pathKeyed, fields[path]?[field] == nil { fields[path, default: [:]][field] = (spelled, false); r1492PathKeys.insert(path) }
@@ -2989,23 +3026,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // Anything else stays refused — no key is ever minted from a guess.
     let veinDOff = Env.on("CANDOR_VEIND_OFF")
     let veinDProbe = Env.trace("CANDOR_VEIND_PROBE")
-    var moduleDeclCache: [String: (names: [String: Bool], opaque: Bool)?] = [:]
-    func moduleDeclarations(_ m: String) -> (names: [String: Bool], opaque: Bool)? {
-        if let c = moduleDeclCache[m] { return c }
-        var out: (names: [String: Bool], opaque: Bool)? = nil
-        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
-            var names: [String: Bool] = [:], opaque = false, ok = true
-            for path in files {
-                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
-                let r = topLevelTypeDeclarations(source: text)
-                for (n, v) in r.names { names[n] = (names[n] ?? false) || v }
-                if r.opaque { opaque = true }
-            }
-            if ok { out = (names, opaque) }
-        }
-        moduleDeclCache[m] = out
-        return out
-    }
     // ── SOUNDNESS R1868(e) / R1878 — WHAT A DEPENDENCY MODULE'S OWN `typealias`ES NAME ───────────────────────────────────
     //
     // `topLevelTypeDeclarations` records an alias NAME as a declared type and nothing about what it spells, so a call on
@@ -5431,6 +5451,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         var unitFields = r1513Facts.fields
+        // SOUNDNESS R1896 (B3) — a field typed from an imported module's qualified constructor is typed ONLY in a file that imports
+        // that module: elsewhere the qualified spelling cannot be read (`isModuleQualifier`), the call would drop with no marker,
+        // and main's C12 hedge would be lost. There the field is read as it was on main: not recorded.
+        if !importedFieldModuleR1896.isEmpty {
+            let imps = Set(fileImports[String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })] ?? [])
+            for (k, fs) in importedFieldModuleR1896 {
+                for (field, mod) in fs where !imps.contains(mod) { unitFields[k]?[field] = nil }
+            }
+        }
         if !CallCollector.r1481Off, let et = f.enclosingType, let gfs = genericParamFieldsR1481[et] {
             for (field, param) in gfs.sorted(by: { $0.key < $1.key }) where !f.genericParamNames.contains(param) {
                 // a FUNCTION carries R1463's bounds; an ACCESSOR unit carries none, so its own extension clause is read

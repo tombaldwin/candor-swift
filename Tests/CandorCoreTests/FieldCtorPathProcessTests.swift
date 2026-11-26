@@ -27,6 +27,9 @@ open class DepBase { public init() {}
 public enum DepKind { case Node(Int)
     public func wipeKindDep(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
 public enum DepNS { public static func Make() -> DepStore { DepStore() } }
+public final class Teller { public init() {}
+    public func settleUp(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
+public func Maker() -> DepStore { DepStore() }
 """#
 
     private static let app = #"""
@@ -40,7 +43,11 @@ public enum Outer { public final class Inner { public init() {}
     public func wipeNest(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } } }
 public enum Kind { case Node(Int)
     public func wipeKind(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
+public final class Teller { public init() {}
+    public func settleUp(_ p: String) -> Int { p.count } }
 public struct Msg {
+    public var tc = Guess.Teller()
+    public var mkr = Guess.Maker()
     public var fDep = Guess.DepStore()
     public let lDep = Guess.DepStore()
     public var pDep = Guess.DepPure()
@@ -61,6 +68,8 @@ public struct Msg {
     public func s_iuo(_ p: String) { iuoOwn.wipeOwn(p) }
     public func s_iuo_self(_ p: String) { self.iuoOwn.wipeOwn(p) }
     public func s_iuo_pure(_ p: String) -> Int { iuoPure.calmOwn(p) }
+    public func s_b1(_ p: String) { tc.settleUp(p) }
+    public func s_b2(_ p: String) { mkr.wipeDep(p) }
     public func s_dkind(_ p: String) { dk.wipeKindDep(p) }
     public func s_mk(_ p: String) { mk.wipeDep(p) }
     public func s_bare(_ p: String) { fDep.wipeDep(p) }
@@ -94,6 +103,14 @@ public final class ODerived: OBase {
     public func s_qinh_self(_ p: String) { self.qi.wipeOwn(p) } }
 """#
 
+    private static let ext = #"""
+// no `import Guess` here (legal: member visibility crosses files)
+extension Msg {
+    public func s_b3(_ p: String) { fDep.wipeDep(p) }
+    public func s_b3_tc(_ p: String) { tc.settleUp(p) }
+}
+"""#
+
     private struct Fixture { let root: URL; let bin: URL
         var depDir: URL { root.appendingPathComponent("depR") }
         var appDir: URL { root.appendingPathComponent("app") } }
@@ -120,6 +137,7 @@ public final class ODerived: OBase {
             targets: [.target(name: "App", dependencies: [.product(name: "Guess", package: "Guess")])])
         """)
         try write("app/Sources/App/app.swift", Self.app)
+        try write("app/Sources/App/ext.swift", Self.ext)
         let fx = Fixture(root: root, bin: bin)
         try FileManager.default.createDirectory(at: fx.depDir, withIntermediateDirectories: true)
         let rd = try ProcessHarness.run(bin, [root.appendingPathComponent("Guess").path, "--out", fx.depDir.appendingPathComponent("rGuess").path])
@@ -160,7 +178,9 @@ public final class ODerived: OBase {
         let hedged: [(String, String)] = [("Msg.s_dkind", "wipeKindDep"), ("Msg.s_mk", "wipeDep"), ("Msg.s_fac", "wipeDep"),
                                           ("Msg.s_gen", "wipeGen"),
                                           // an `T!` stored field nothing types: hedged on the call (a pure twin is hedged too — the reason is the untyped receiver)
-                                          ("Msg.s_iuo", "wipeOwn"), ("Msg.s_iuo_pure", "calmOwn")]
+                                          ("Msg.s_iuo", "wipeOwn"), ("Msg.s_iuo_pure", "calmOwn"),
+                                          // Fable B1/B2: the scan also declares `Teller`; `Maker` is a free FUNCTION of the dependency (executed WRITES)
+                                          ("Msg.s_b1", "settleUp"), ("Msg.s_b2", "wipeDep")]
         // EXECUTED pure twins
         let pure = ["Msg.s_pure", "Msg.s_ownpure", "Msg.s_shadow_local", "Msg.s_shadow_param", "Msg.s_iuo_pure"]
         for chained in [true, false] {
@@ -178,6 +198,12 @@ public final class ODerived: OBase {
             }
             for (c, leaf) in hedged {
                 XCTAssertTrue(r[c]?.why.contains("dispatch:<untyped>.\(leaf)") ?? false, "chained=\(chained) \(c): the C12 hedge must stay — rows: \(r)")
+            }
+            // B3 (executed WRITES): the call is in a file that does not import `Guess`; main hedged it chained, standalone it is silent on every arm
+            if chained {
+                for (c, leaf) in [("Msg.s_b3", "wipeDep"), ("Msg.s_b3_tc", "settleUp")] {
+                    XCTAssertTrue(r[c]?.why.contains("dispatch:<untyped>.\(leaf)") ?? false, "chained \(c): the C12 hedge must stay in a file that does not import the module — rows: \(r)")
+                }
             }
             for c in pure {
                 XCTAssertFalse(r[c]?.effects.contains("Fs") ?? false, "chained=\(chained) \(c): pure twin must not be charged")

@@ -16,7 +16,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 bare callee, so every implicit-self `unknownFields.traverse(…)` (and `self.n.m()`) was R1455's dropped member call, with no edge and no
 `Unknown`, and the C12 hedge cannot fire where only THIS package declares the member. The field is now typed when the path names a type
 THIS scan declares (a nested type by its full path, or a type of one of its own modules by `Module.Type()`), or is a two-segment
-`Module.Type()` of an imported module (the local binder's own rule); an enum case (`Dep.Kind.Node(1)`), a static factory
+`Module.Type()` of an imported module the scan can READ and whose sources declare a public TYPE of that name, no scan type
+or alias sharing the name, read only in a file that imports the module (elsewhere the field stays untyped, as on main); an enum case (`Dep.Kind.Node(1)`), a static factory
 (`Dep.NS.Make()`) and a three-segment dependency path keep their C12 hedge (typing one would have replaced the hedge with a receiver
 that binds nothing). Chained, the dependency's body charges; standalone, the typed call is disclosed `invisible` as any typed
 dependency receiver is. A drop whose receiver chain starts at a stored field of the enclosing type that nothing typed (`var x: T!`, an
