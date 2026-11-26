@@ -4858,6 +4858,312 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         var tupleFacts: TupleFactsR1498, supertypes: [String: Set<String>], returnFacts: [String: DeclaredFacts]
     }
     var r1513Cache: (scope: String, lex: [String: String], facts: R1513Facts)? = nil
+    // ── STAGE 3: THE SINGLE DISCLOSURE TERMINAL (swift curated-routing design §4 S3, lane L8) ─────────────────────────────
+    //
+    // An unanswered call into a dependency must name it: SPEC §2 `invisible` ("at least one of `invisible`/`Unknown`, never
+    // silently pure") and §4 ("an unresolvable call is `Unknown`"). That one obligation was implemented once per receiver
+    // shape — R548/R827 free calls, R706 protocol spellings, R1066/R1071 readable dependency types, R1104 unreadable ones,
+    // R1866 κ-dependency modules (untyped and typed halves), R1868(iii) F5 — each deciding disclosure at its own site with
+    // its own module list. They are folded here into ONE decision: the call's Stage-1 identity outcome
+    // (`TerminalIdentity`) goes in, a POSTURE comes out, and one function applies it.
+    //
+    // THE POSTURE TABLE IS TODAY'S, AND THE TOKENS ARE PER CAUSE (Fable, design review §1 D and Q4). They encode three
+    // different claims a consumer reads, and PART 110's OWN-HEDGE seed and SPEC's reason table depend on them staying apart:
+    //   `Unknown` + `dispatch:untyped cross-package receiver` — "I could not type the receiver" (R836, R1066H, R1866);
+    //   `Unknown` + `dispatch:<T>.<m>`                        — "owner known, member unread" (R1866 typed, R1874 super);
+    //   `invisible:[M]`                                      — "the call reaches an uncovered package" (non-gating, R133).
+    // No shape may move from `Unknown` to `invisible` (a `deny E Unknown` 1→0). The fold moves no byte on any shape the
+    // arms covered: `CANDOR_S3_FOLD_OFF=1` runs the six arms where they stood, for the A/B.
+    struct TerminalPosture { var unknown: Set<String> = []; var invisible: Set<String> = []; var kappaLedger: Set<String> = [] }
+    enum TerminalIdentity {
+        /// `<untyped>.` — the receiver came from a dependency call (or a guessed owner) and the `returns` join gave no answer.
+        case untypedReceiver
+        /// every other call that reached the end of its routes: a typed owner the dependency declares, a `super` call, a
+        /// free call, a protocol spelling, a module-qualified call, or a receiver a blind dependency's sources declare.
+        case unresolvedCall(resolved: Bool)
+    }
+    let s3FoldOff = Env.on("CANDOR_S3_FOLD_OFF")
+    func applyTerminal(_ p: TerminalPosture, to qual: String, file: String) {
+        if !p.unknown.isEmpty {
+            direct[qual, default: []].insert("Unknown")
+            whyMap[qual, default: []].formUnion(p.unknown)
+        }
+        if !p.invisible.isEmpty { blindDirect[qual, default: []].formUnion(p.invisible) }
+        for m in p.kappaLedger { kappaFloorLedgerFiles[m, default: []].insert(file) }
+    }
+    func terminalDecision(_ id: TerminalIdentity, _ call: Call, _ f: FnInfo, file: String) -> TerminalPosture {
+        switch id {
+        case .untypedReceiver:
+            return terminalUntypedReceiver(call, f, file: file)
+        case .unresolvedCall(let resolved):
+            return terminalUnresolvedCall(call, f, resolved: resolved)
+        }
+    }
+    /// The untyped-receiver row of the table: one token, four pieces of evidence (chained, R836 guessed owner, R1066 instance
+    /// hop, R1866 κ-dependency module).
+    func terminalUntypedReceiver(_ call: Call, _ f: FnInfo, file: String) -> TerminalPosture {
+        var p = TerminalPosture()
+        let fileImps = fileImports[file] ?? []
+        let chainedHere = !deps.chainedPkgs(importing: fileImps).isEmpty   // R565
+        // BOUNDED TO WHERE THE RELEASE PUBLISHED A KEY — the same conjuncts as obligation 1's publish
+        // arm, asked of the guessed owner. That is exactly the population whose downstream answer a
+        // guess can make wrong (a consumer joins the floor key and reads a miss as purity); anywhere
+        // else the release published nothing for a consumer to misread, and a hedge there is new
+        // uncertainty with no silence behind it. MEASURED the wider way first ("the file sees any
+        // uncovered module"): it charged `Unknown` to Bitwarden's `session.outputs.forEach {…}` on an
+        // `AVCaptureSession` (`PrivacyEffectsTests`), 291 corpus sites dominated by UIKit, `Self` and
+        // stdlib roots.
+        let r836Standalone: Bool = {
+            guard !chainedHere, !r836Off, let g = call.guessedOwner, !call.opaqueRecv,
+                  !localTypes.contains(g), !STD_PURE_PROTOCOLS.contains(g),
+                  !RAW_VALUE_BASE_TYPES.contains(g) else { return false }
+            if foreignOwnerModule(inFile: file) != nil { return dispatchAbstraction(g, f) != nil }
+            // VEIN D — and wherever the proof above published the same key for a guessed owner.
+            guard !veinDOff, let abs = dispatchAbstraction(g, f), localProtocolWirePath(abs) == nil
+            else { return false }
+            return provenOwnerPackage(of: abs, inFile: file, site: "r836") != nil
+        }()
+        // REACH PROBE (§E1) — only the arm this change ADDS: a guessed owner disclosed WITHOUT a chain.
+        if r836Standalone, r836Probe {
+            FileHandle.standardError.write(
+                "R836HIT \(f.qual) \(call.guessedOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+        }
+        // SOUNDNESS R1065 — an INSTANCE member's result (`dep.label().uppercased()`) is untyped because
+        // the producer publishes `returns` only for its OWN types: `-> String` and `-> V` look alike
+        // here. Disclose only where the next member's leaf could be a body someone answers — declared
+        // by a local type (the generic-argument case: `Box(v: E()).get().go()` runs `E.go`) or published
+        // by a chained package. A leaf only the platform declares (`uppercased`) stays as it was.
+        if call.instanceHop,
+           !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
+            return p
+        }
+        // SOUNDNESS R1066 — …AND THE SAME INSTANCE HOP IN A STANDALONE SCAN, where the receiver's type is a blind
+        // dependency's by its own sources. `b.get().go()` with `b: Box<E>`: the chained arm above hedges it,
+        // the standalone arm did not, and the row's `[]` became a purity claim one package downstream — a
+        // consumer chaining this report joins the floor key `Iface#Box.get`, finds the dependency's pure
+        // `get`, and `deny Fs Unknown` passed over a call that runs `E.go` (executed). R836's reasoning,
+        // for the hop R836 did not reach; bounded by the leaf rule above and by SOURCE ownership, never
+        // by the file's import vote, so a platform receiver (`url.appendingPathComponent(…).path`) is
+        // untouched.
+        let r1066Standalone: Bool = {
+            guard !chainedHere, !r1066Off, call.instanceHop, let cal = call.depCallee,
+                  let dot = cal.lastIndex(of: ".") else { return false }
+            return !sourceProvenDepModules(of: String(cal[..<dot]), inFile: file).isEmpty
+        }()
+        if r1066Standalone, r1066Probe {
+            FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+        }
+        // SOUNDNESS R1866 — …AND A STANDALONE SCAN WHERE THE FACTORY'S MODULE IS ONE THE CURATED CLASSIFIER
+        // "COVERS". The comment above this block rests on "for an UNCHAINED package the κ ledger already
+        // discloses `invisible: [M]`", and for a κ module it does not: `blindModules` excludes
+        // `KAPPA_MODULES`, so `let r = makeClient(); r.get(p)` (and `makeClient().get(p)`) with
+        // `import AsyncHTTPClient` read `['Env']`, `unresolved: false`, no `invisible` anywhere — `deny Fs`
+        // and `deny Fs Unknown` exit 0 over an executed write, while the SAME call chained discloses here.
+        // κ keys its verbs on a TYPED receiver, so a receiver it cannot type is not covered by it. Bounded
+        // to the κ modules that are dependency packages (not an OS framework) and to a file that imports
+        // one no chained report covers; the token is the chained arm's, so the two arms say one thing.
+        let r1866Standalone: Bool = {
+            guard !chainedHere, !r1866Off, call.depCallee != nil else { return false }
+            // NOT the package's own module: inside swift-nio, `import NIOCore` names a target this scan
+            // reads (corpus A/B: 8 swift-nio rows gained the token with nothing crossing a package).
+            let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+            return effectiveImports(file).contains {
+                KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
+        }()
+        if r1866Standalone, r1866Probe {
+            FileHandle.standardError.write("R1866HIT \(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+        }
+        if chainedHere || r836Standalone || r1066Standalone || r1866Standalone {
+            p.unknown.insert("dispatch:untyped cross-package receiver")
+        }
+        return p
+    }
+    /// The unresolved-call rows: the `Unknown {dispatch:<T>.<m>}` evidence (R1866 typed, R1874 `super`) and, independently,
+    /// the `invisible` ledger evidence (free call, protocol spelling, module-qualified, R1066/R1071 source-declared, R1104
+    /// unreadable — first match wins, as before).
+    func terminalUnresolvedCall(_ call: Call, _ f: FnInfo, resolved: Bool) -> TerminalPosture {
+        var p = TerminalPosture()
+        let r1866Owner: String? = call.unqualified
+            ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
+            : call.extOwner.map { raw in
+                guard let b = f.genericBounds[raw], !declaredTypes.contains(raw), !declaredTypes.contains(b) else { return raw }
+                if r1866Probe { FileHandle.standardError.write("R1872HIT bound \(f.qual) \(raw)->\(b).\(call.leaf)\n".data(using: .utf8)!) }
+                return b
+            }
+        // SOUNDNESS R1874 — a `super.<m>` call asks the same question of each EXTERNAL base (see `externalSuperBases`).
+        let r1874Super = !r1866Off && call.extOwner == CallCollector.superMarker && !call.unqualified
+        let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
+                                               : (r1866Owner.map { [$0] } ?? [])
+        if !r1866Off, !resolved, r1874Super || !call.path.hasPrefix("<") {
+          for rawOwner in r1866Owners where rawOwner.first?.isUppercase == true && !declaredTypes.contains(rawOwner) {
+            // SOUNDNESS R1868(c) — A GENERIC PARAMETER IS ITS BOUND (`<F: Fetching>`, `f.fetchW(p)`): the same
+            // resolution the ordinary join's key uses (`dispatchAbstraction`), so the disclosure and the key name
+            // one abstraction. A bound this scan declares, or a std-pure one, resolves to nil and keeps the raw
+            // spelling, which is what this arm asked before.
+            let owner: String = dispatchAbstraction(rawOwner, f) ?? rawOwner
+            guard owner.first?.isUppercase == true, !declaredTypes.contains(owner),
+                  kappaMember(root: owner, member: call.leaf) == nil else { continue }
+            // SOUNDNESS R1868(a) — A NESTED TYPE (`HTTPClient.Inner`) IS KEYED BY ITS HEAD: a type the dependency
+            // declares owns everything declared inside it, and the declaration walker records top-level names only.
+            // The head is the question; a head THIS scan declares is its own (the nested type is then a local one).
+            let segs = owner.split(separator: ".").map(String.init)
+            let head = segs.first ?? owner
+            guard !declaredTypes.contains(head) else { continue }
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+            let open = effectiveImports(file).filter {
+                KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
+            let byRoot = KAPPA_DEPENDENCY_ROOTS[head].map { roots in open.contains { roots.contains($0) } } ?? false
+            func openClosure(_ m: String) -> Set<String> {
+                var closure = Set<String>(), queue = [m]
+                while let x = queue.popLast() {
+                    guard closure.insert(x).inserted else { continue }
+                    queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                }
+                return closure
+            }
+            let byModule: Bool = {
+                guard !byRoot, !r1866mOff, !open.isEmpty else { return false }
+                for m in open where openClosure(m).contains(where: { moduleDeclarations($0)?.names[head] == true }) { return true }
+                return false
+            }()
+            // SOUNDNESS R1868(b) — A MEMBER THE DEPENDENCY ADDS BY EXTENSION TO A TYPE IT DOES NOT DECLARE
+            // (`extension String { func slurp }`): the receiver is a platform type, so neither the roots nor the
+            // module's declared names own it, and the call read pure. Positive evidence only — a readable module whose
+            // `public` extension of the receiver's type declares THIS member. The member may be the platform's own
+            // (a name collision), which over-discloses; that is the direction a disclosure may err in.
+            let byExtension: Bool = {
+                guard !byRoot, !byModule, !open.isEmpty, let leafType = segs.last else { return false }
+                for m in open where openClosure(m).contains(where: { moduleExtensionMembers($0)?[leafType]?[call.leaf] == true }) { return true }
+                return false
+            }()
+            // SOUNDNESS R1868(c) — A TYPE THE KAPPA DEPENDENCY MODULE MAY DECLARE BUT WHOSE SOURCES ARE UNREADABLE
+            // (not fetched): only the κ roots are known without them, so a non-root type, an alias, a protocol or a
+            // subclass of a root read pure. The type is not this scan's, not a generic parameter, and not a
+            // platform/stdlib name the engine's tables hold, and no OTHER imported module's readable sources declare it.
+            let byUnreadable: Bool = {
+                guard !byRoot, !byModule, !byExtension, !open.isEmpty else { return false }
+                return !unreadableKappaDepModules(of: owner, inFile: file, among: open, generics: Set(f.genericBounds.keys)).isEmpty
+            }()
+            if byRoot || byModule || byExtension || byUnreadable {
+                if r1866Probe {
+                    FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : byModule ? "module" : byExtension ? "ext" : "unreadable") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                }
+                p.unknown.insert("dispatch:\(owner).\(call.leaf)")
+            }
+          }
+        }
+        if Env.trace("CANDOR_R548_PROBE"), !resolved {
+            let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            FileHandle.standardError.write(
+                ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
+                 + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
+                 + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
+        }
+        if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let blind = blindModules(inFile: file)
+            let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
+            for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
+                p.invisible.insert(m)
+                if kdep.contains(m) {
+                    p.kappaLedger.insert(m)
+                    if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) free \(call.leaf) -> [\(m)]\n".data(using: .utf8)!) }
+                }
+            }
+        } else if !r706iOff, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                  case let owner = f.genericBounds[raw] ?? raw,
+                  existentialSpelled.contains(owner) || someSpelled.contains(owner)
+                    || f.genericBounds[raw] != nil,
+                  !localTypes.contains(owner), !localProtocolNames.contains(owner),
+                  !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
+                  !PLATFORM_PROTOCOL_NAMES.contains(owner),
+                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
+            // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
+            // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
+            // the coverage ledger, and an engine MUST disclose at least one of `invisible`/`Unknown`, "never
+            // silently pure". The arm below this one (and the general member-call rule above) withholds it for a
+            // member call because a bare receiver's module cannot be decided — the reverted widening tagged an
+            // `NSPasteboard` receiver. The predicate here is narrower than that one by construction: the source
+            // SPELLS the owner as a protocol, the owner is neither declared here nor a platform/stdlib protocol
+            // this engine names, and the value is the file's ONE dependency module (`foreignOwnerModule`, the
+            // same owner the ⟨0.39⟩ `dispatchesOn` key already publishes) — so the attribution is the module the
+            // free-call rows name. ⟨0.24⟩: a judged-nothing chained copy covers nothing, so this fires in that
+            // arm exactly as unchained. Non-gating by design (R133): `deny`/`pure` do not move.
+            if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
+            p.invisible.insert(module)
+        } else if !resolved, !call.typed, let owner = call.extOwner,
+                  case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
+            // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
+            // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
+            // makes typed calls carry one and this arm is not a place that should follow. It fires on
+            // a receiver root that IS an imported blind MODULE name, and R651's owners are type names
+            // — the two coincide only where a project extends a type sharing a blind module's name,
+            // where the honest answer is the scan-level κ ledger's, not a per-fn `invisible`. Written
+            // as a guard rather than left implied because "no construction site sets that today" is
+            // exactly the kind of sentence that goes stale one commit later.
+            // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
+            // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
+            // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names
+            // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
+            // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
+            // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
+            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            if (fileImports[file] ?? []).contains(owner) {
+                p.invisible.insert(owner)
+                if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
+                    p.kappaLedger.insert(owner)
+                    if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) modq \(owner).\(call.leaf) -> [\(owner)]\n".data(using: .utf8)!) }
+                }
+            }
+        } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                  case let owner = f.genericBounds[raw] ?? raw,
+                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let mods = { () -> Set<String> in
+                      let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
+                                                         && call.leaf == "init" && owner == f.enclosingType)
+                      return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                  }(), !mods.isEmpty {
+            // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
+            // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
+            // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
+            // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls
+            // an uncovered package, never silently pure — and the rows above withhold it for a member call
+            // because a bare receiver's module cannot be decided from the FILE (the reverted widening tagged
+            // an `NSPasteboard`). Here it is decided from the DEPENDENCY: its sources declare the type, so the
+            // member is that module's (or an extension of it, which is no less a reach into uncovered code).
+            // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
+            if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+            p.invisible.formUnion(mods)
+        } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                  case let owner = f.genericBounds[raw] ?? raw,
+                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
+                                                       extendedInit: !CallCollector.r1492Off && call.leaf == "init"
+                                                           && owner == f.enclosingType),
+                  !mods.isEmpty {
+            // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
+            // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
+            // release's silence stood: `storage.coins.append(x)` on an `OrderedSet<Box>` read `inferred: []` with NO
+            // `invisible` (executed: it runs `Noisy.hash(into:)`, which writes a file), while the SETUP line promised
+            // "calls into those packages resolve … as `invisible`" and the same tree with checkouts present carried
+            // `invisible: [OrderedCollections]` on all four call shapes. SPEC §2 (`invisible`): at least one of
+            // `invisible`/`Unknown`, never silently pure.
+            //
+            // The receiver's type is not this scan's and not a platform type the generated SDK tables name, and the
+            // file imports a dependency module NOBODY CAN READ — so the type may be that module's and no evidence
+            // can say otherwise. Named are ONLY the unreadable candidates (a readable one that declares the type
+            // was R1066's answer above; one that does not is excluded by its own sources). Errs toward naming a
+            // module the call may not reach — e.g. an AppKit type the generated tables do not list — which is the
+            // direction a disclosure may err in. Non-gating (R133): `deny`/`pure` do not move.
+            if r1066Probe { FileHandle.standardError.write("VBHIT\tR1104\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+            p.invisible.formUnion(mods)
+        }
+        return p
+    }
+
     for f0 in allFns {
         var f = f0
         locOf[f.qual] = f.loc
@@ -6968,79 +7274,83 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // a key a consumer will join" — chained OR not — rather than "is it chained". The
                 // release's key for the same call is still published (the floor), so a consumer that CAN
                 // answer it still does; this only stops the answer being read as certain.
-                let fileImps = fileImports[file] ?? []
-                let chainedHere = !deps.chainedPkgs(importing: fileImps).isEmpty   // R565
-                // BOUNDED TO WHERE THE RELEASE PUBLISHED A KEY — the same conjuncts as obligation 1's publish
-                // arm, asked of the guessed owner. That is exactly the population whose downstream answer a
-                // guess can make wrong (a consumer joins the floor key and reads a miss as purity); anywhere
-                // else the release published nothing for a consumer to misread, and a hedge there is new
-                // uncertainty with no silence behind it. MEASURED the wider way first ("the file sees any
-                // uncovered module"): it charged `Unknown` to Bitwarden's `session.outputs.forEach {…}` on an
-                // `AVCaptureSession` (`PrivacyEffectsTests`), 291 corpus sites dominated by UIKit, `Self` and
-                // stdlib roots.
-                let r836Standalone: Bool = {
-                    guard !chainedHere, !r836Off, let g = call.guessedOwner, !call.opaqueRecv,
-                          !localTypes.contains(g), !STD_PURE_PROTOCOLS.contains(g),
-                          !RAW_VALUE_BASE_TYPES.contains(g) else { return false }
-                    if foreignOwnerModule(inFile: file) != nil { return dispatchAbstraction(g, f) != nil }
-                    // VEIN D — and wherever the proof above published the same key for a guessed owner.
-                    guard !veinDOff, let abs = dispatchAbstraction(g, f), localProtocolWirePath(abs) == nil
-                    else { return false }
-                    return provenOwnerPackage(of: abs, inFile: file, site: "r836") != nil
-                }()
-                // REACH PROBE (§E1) — only the arm this change ADDS: a guessed owner disclosed WITHOUT a chain.
-                if r836Standalone, r836Probe {
-                    FileHandle.standardError.write(
-                        "R836HIT \(f.qual) \(call.guessedOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
-                }
-                // SOUNDNESS R1065 — an INSTANCE member's result (`dep.label().uppercased()`) is untyped because
-                // the producer publishes `returns` only for its OWN types: `-> String` and `-> V` look alike
-                // here. Disclose only where the next member's leaf could be a body someone answers — declared
-                // by a local type (the generic-argument case: `Box(v: E()).get().go()` runs `E.go`) or published
-                // by a chained package. A leaf only the platform declares (`uppercased`) stays as it was.
-                if call.instanceHop,
-                   !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
-                    continue
-                }
-                // SOUNDNESS R1066 — …AND THE SAME INSTANCE HOP IN A STANDALONE SCAN, where the receiver's type is a blind
-                // dependency's by its own sources. `b.get().go()` with `b: Box<E>`: the chained arm above hedges it,
-                // the standalone arm did not, and the row's `[]` became a purity claim one package downstream — a
-                // consumer chaining this report joins the floor key `Iface#Box.get`, finds the dependency's pure
-                // `get`, and `deny Fs Unknown` passed over a call that runs `E.go` (executed). R836's reasoning,
-                // for the hop R836 did not reach; bounded by the leaf rule above and by SOURCE ownership, never
-                // by the file's import vote, so a platform receiver (`url.appendingPathComponent(…).path`) is
-                // untouched.
-                let r1066Standalone: Bool = {
-                    guard !chainedHere, !r1066Off, call.instanceHop, let cal = call.depCallee,
-                          let dot = cal.lastIndex(of: ".") else { return false }
-                    return !sourceProvenDepModules(of: String(cal[..<dot]), inFile: file).isEmpty
-                }()
-                if r1066Standalone, r1066Probe {
-                    FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
-                }
-                // SOUNDNESS R1866 — …AND A STANDALONE SCAN WHERE THE FACTORY'S MODULE IS ONE THE CURATED CLASSIFIER
-                // "COVERS". The comment above this block rests on "for an UNCHAINED package the κ ledger already
-                // discloses `invisible: [M]`", and for a κ module it does not: `blindModules` excludes
-                // `KAPPA_MODULES`, so `let r = makeClient(); r.get(p)` (and `makeClient().get(p)`) with
-                // `import AsyncHTTPClient` read `['Env']`, `unresolved: false`, no `invisible` anywhere — `deny Fs`
-                // and `deny Fs Unknown` exit 0 over an executed write, while the SAME call chained discloses here.
-                // κ keys its verbs on a TYPED receiver, so a receiver it cannot type is not covered by it. Bounded
-                // to the κ modules that are dependency packages (not an OS framework) and to a file that imports
-                // one no chained report covers; the token is the chained arm's, so the two arms say one thing.
-                let r1866Standalone: Bool = {
-                    guard !chainedHere, !r1866Off, call.depCallee != nil else { return false }
-                    // NOT the package's own module: inside swift-nio, `import NIOCore` names a target this scan
-                    // reads (corpus A/B: 8 swift-nio rows gained the token with nothing crossing a package).
-                    let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
-                    return effectiveImports(file).contains {
-                        KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
-                }()
-                if r1866Standalone, r1866Probe {
-                    FileHandle.standardError.write("R1866HIT \(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
-                }
-                if chainedHere || r836Standalone || r1066Standalone || r1866Standalone {
-                    direct[f.qual, default: []].insert("Unknown")
-                    whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                if s3FoldOff {
+                    let fileImps = fileImports[file] ?? []
+                    let chainedHere = !deps.chainedPkgs(importing: fileImps).isEmpty   // R565
+                    // BOUNDED TO WHERE THE RELEASE PUBLISHED A KEY — the same conjuncts as obligation 1's publish
+                    // arm, asked of the guessed owner. That is exactly the population whose downstream answer a
+                    // guess can make wrong (a consumer joins the floor key and reads a miss as purity); anywhere
+                    // else the release published nothing for a consumer to misread, and a hedge there is new
+                    // uncertainty with no silence behind it. MEASURED the wider way first ("the file sees any
+                    // uncovered module"): it charged `Unknown` to Bitwarden's `session.outputs.forEach {…}` on an
+                    // `AVCaptureSession` (`PrivacyEffectsTests`), 291 corpus sites dominated by UIKit, `Self` and
+                    // stdlib roots.
+                    let r836Standalone: Bool = {
+                        guard !chainedHere, !r836Off, let g = call.guessedOwner, !call.opaqueRecv,
+                              !localTypes.contains(g), !STD_PURE_PROTOCOLS.contains(g),
+                              !RAW_VALUE_BASE_TYPES.contains(g) else { return false }
+                        if foreignOwnerModule(inFile: file) != nil { return dispatchAbstraction(g, f) != nil }
+                        // VEIN D — and wherever the proof above published the same key for a guessed owner.
+                        guard !veinDOff, let abs = dispatchAbstraction(g, f), localProtocolWirePath(abs) == nil
+                        else { return false }
+                        return provenOwnerPackage(of: abs, inFile: file, site: "r836") != nil
+                    }()
+                    // REACH PROBE (§E1) — only the arm this change ADDS: a guessed owner disclosed WITHOUT a chain.
+                    if r836Standalone, r836Probe {
+                        FileHandle.standardError.write(
+                            "R836HIT \(f.qual) \(call.guessedOwner ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    // SOUNDNESS R1065 — an INSTANCE member's result (`dep.label().uppercased()`) is untyped because
+                    // the producer publishes `returns` only for its OWN types: `-> String` and `-> V` look alike
+                    // here. Disclose only where the next member's leaf could be a body someone answers — declared
+                    // by a local type (the generic-argument case: `Box(v: E()).get().go()` runs `E.go`) or published
+                    // by a chained package. A leaf only the platform declares (`uppercased`) stays as it was.
+                    if call.instanceHop,
+                       !(localMemberLeaves.contains(call.leaf) || deps.anyChainedPackagePublishesLeaf(call.leaf)) {
+                        continue
+                    }
+                    // SOUNDNESS R1066 — …AND THE SAME INSTANCE HOP IN A STANDALONE SCAN, where the receiver's type is a blind
+                    // dependency's by its own sources. `b.get().go()` with `b: Box<E>`: the chained arm above hedges it,
+                    // the standalone arm did not, and the row's `[]` became a purity claim one package downstream — a
+                    // consumer chaining this report joins the floor key `Iface#Box.get`, finds the dependency's pure
+                    // `get`, and `deny Fs Unknown` passed over a call that runs `E.go` (executed). R836's reasoning,
+                    // for the hop R836 did not reach; bounded by the leaf rule above and by SOURCE ownership, never
+                    // by the file's import vote, so a platform receiver (`url.appendingPathComponent(…).path`) is
+                    // untouched.
+                    let r1066Standalone: Bool = {
+                        guard !chainedHere, !r1066Off, call.instanceHop, let cal = call.depCallee,
+                              let dot = cal.lastIndex(of: ".") else { return false }
+                        return !sourceProvenDepModules(of: String(cal[..<dot]), inFile: file).isEmpty
+                    }()
+                    if r1066Standalone, r1066Probe {
+                        FileHandle.standardError.write("VBHIT\tR1066H\t\(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    // SOUNDNESS R1866 — …AND A STANDALONE SCAN WHERE THE FACTORY'S MODULE IS ONE THE CURATED CLASSIFIER
+                    // "COVERS". The comment above this block rests on "for an UNCHAINED package the κ ledger already
+                    // discloses `invisible: [M]`", and for a κ module it does not: `blindModules` excludes
+                    // `KAPPA_MODULES`, so `let r = makeClient(); r.get(p)` (and `makeClient().get(p)`) with
+                    // `import AsyncHTTPClient` read `['Env']`, `unresolved: false`, no `invisible` anywhere — `deny Fs`
+                    // and `deny Fs Unknown` exit 0 over an executed write, while the SAME call chained discloses here.
+                    // κ keys its verbs on a TYPED receiver, so a receiver it cannot type is not covered by it. Bounded
+                    // to the κ modules that are dependency packages (not an OS framework) and to a file that imports
+                    // one no chained report covers; the token is the chained arm's, so the two arms say one thing.
+                    let r1866Standalone: Bool = {
+                        guard !chainedHere, !r1866Off, call.depCallee != nil else { return false }
+                        // NOT the package's own module: inside swift-nio, `import NIOCore` names a target this scan
+                        // reads (corpus A/B: 8 swift-nio rows gained the token with nothing crossing a package).
+                        let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+                        return effectiveImports(file).contains {
+                            KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
+                    }()
+                    if r1866Standalone, r1866Probe {
+                        FileHandle.standardError.write("R1866HIT \(f.qual) \(call.depCallee ?? "?").\(call.leaf)\n".data(using: .utf8)!)
+                    }
+                    if chainedHere || r836Standalone || r1066Standalone || r1866Standalone {
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
+                    }
+                } else {
+                    applyTerminal(terminalDecision(.untypedReceiver, call, f, file: file), to: f.qual, file: file)
                 }
                 continue
             }
@@ -7243,184 +7553,189 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // as the chained join already does through `dispatchAbstraction` and the R1066/R1104/R706 arms below do
             // through `genericBounds`: `c.tally(p)` reaches `HTTPClient.tally` or an override of it, exactly as on a
             // `c: HTTPClient` parameter. Not for a bound this scan declares (local resolution answers it).
-            let r1866Owner: String? = call.unqualified
-                ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
-                : call.extOwner.map { raw in
-                    guard let b = f.genericBounds[raw], !declaredTypes.contains(raw), !declaredTypes.contains(b) else { return raw }
-                    if r1866Probe { FileHandle.standardError.write("R1872HIT bound \(f.qual) \(raw)->\(b).\(call.leaf)\n".data(using: .utf8)!) }
-                    return b
-                }
-            // SOUNDNESS R1874 — a `super.<m>` call asks the same question of each EXTERNAL base (see `externalSuperBases`).
-            let r1874Super = !r1866Off && call.extOwner == CallCollector.superMarker && !call.unqualified
-            let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
-                                                   : (r1866Owner.map { [$0] } ?? [])
-            if !r1866Off, !resolved, r1874Super || !call.path.hasPrefix("<") {
-              for rawOwner in r1866Owners where rawOwner.first?.isUppercase == true && !declaredTypes.contains(rawOwner) {
-                // SOUNDNESS R1868(c) — A GENERIC PARAMETER IS ITS BOUND (`<F: Fetching>`, `f.fetchW(p)`): the same
-                // resolution the ordinary join's key uses (`dispatchAbstraction`), so the disclosure and the key name
-                // one abstraction. A bound this scan declares, or a std-pure one, resolves to nil and keeps the raw
-                // spelling, which is what this arm asked before.
-                let owner: String = dispatchAbstraction(rawOwner, f) ?? rawOwner
-                guard owner.first?.isUppercase == true, !declaredTypes.contains(owner),
-                      kappaMember(root: owner, member: call.leaf) == nil else { continue }
-                // SOUNDNESS R1868(a) — A NESTED TYPE (`HTTPClient.Inner`) IS KEYED BY ITS HEAD: a type the dependency
-                // declares owns everything declared inside it, and the declaration walker records top-level names only.
-                // The head is the question; a head THIS scan declares is its own (the nested type is then a local one).
-                let segs = owner.split(separator: ".").map(String.init)
-                let head = segs.first ?? owner
-                guard !declaredTypes.contains(head) else { continue }
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
-                let open = effectiveImports(file).filter {
-                    KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
-                let byRoot = KAPPA_DEPENDENCY_ROOTS[head].map { roots in open.contains { roots.contains($0) } } ?? false
-                func openClosure(_ m: String) -> Set<String> {
-                    var closure = Set<String>(), queue = [m]
-                    while let x = queue.popLast() {
-                        guard closure.insert(x).inserted else { continue }
-                        queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+            if s3FoldOff {
+                let r1866Owner: String? = call.unqualified
+                    ? ((!call.argRef && call.leaf.first?.isLowercase == true) ? f.enclosingType : nil)
+                    : call.extOwner.map { raw in
+                        guard let b = f.genericBounds[raw], !declaredTypes.contains(raw), !declaredTypes.contains(b) else { return raw }
+                        if r1866Probe { FileHandle.standardError.write("R1872HIT bound \(f.qual) \(raw)->\(b).\(call.leaf)\n".data(using: .utf8)!) }
+                        return b
                     }
-                    return closure
-                }
-                let byModule: Bool = {
-                    guard !byRoot, !r1866mOff, !open.isEmpty else { return false }
-                    for m in open where openClosure(m).contains(where: { moduleDeclarations($0)?.names[head] == true }) { return true }
-                    return false
-                }()
-                // SOUNDNESS R1868(b) — A MEMBER THE DEPENDENCY ADDS BY EXTENSION TO A TYPE IT DOES NOT DECLARE
-                // (`extension String { func slurp }`): the receiver is a platform type, so neither the roots nor the
-                // module's declared names own it, and the call read pure. Positive evidence only — a readable module whose
-                // `public` extension of the receiver's type declares THIS member. The member may be the platform's own
-                // (a name collision), which over-discloses; that is the direction a disclosure may err in.
-                let byExtension: Bool = {
-                    guard !byRoot, !byModule, !open.isEmpty, let leafType = segs.last else { return false }
-                    for m in open where openClosure(m).contains(where: { moduleExtensionMembers($0)?[leafType]?[call.leaf] == true }) { return true }
-                    return false
-                }()
-                // SOUNDNESS R1868(c) — A TYPE THE KAPPA DEPENDENCY MODULE MAY DECLARE BUT WHOSE SOURCES ARE UNREADABLE
-                // (not fetched): only the κ roots are known without them, so a non-root type, an alias, a protocol or a
-                // subclass of a root read pure. The type is not this scan's, not a generic parameter, and not a
-                // platform/stdlib name the engine's tables hold, and no OTHER imported module's readable sources declare it.
-                let byUnreadable: Bool = {
-                    guard !byRoot, !byModule, !byExtension, !open.isEmpty else { return false }
-                    return !unreadableKappaDepModules(of: owner, inFile: file, among: open, generics: Set(f.genericBounds.keys)).isEmpty
-                }()
-                if byRoot || byModule || byExtension || byUnreadable {
-                    if r1866Probe {
-                        FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : byModule ? "module" : byExtension ? "ext" : "unreadable") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                // SOUNDNESS R1874 — a `super.<m>` call asks the same question of each EXTERNAL base (see `externalSuperBases`).
+                let r1874Super = !r1866Off && call.extOwner == CallCollector.superMarker && !call.unqualified
+                let r1866Owners: [String] = r1874Super ? (f.enclosingType.map { externalSuperBases($0) } ?? [])
+                                                       : (r1866Owner.map { [$0] } ?? [])
+                if !r1866Off, !resolved, r1874Super || !call.path.hasPrefix("<") {
+                  for rawOwner in r1866Owners where rawOwner.first?.isUppercase == true && !declaredTypes.contains(rawOwner) {
+                    // SOUNDNESS R1868(c) — A GENERIC PARAMETER IS ITS BOUND (`<F: Fetching>`, `f.fetchW(p)`): the same
+                    // resolution the ordinary join's key uses (`dispatchAbstraction`), so the disclosure and the key name
+                    // one abstraction. A bound this scan declares, or a std-pure one, resolves to nil and keeps the raw
+                    // spelling, which is what this arm asked before.
+                    let owner: String = dispatchAbstraction(rawOwner, f) ?? rawOwner
+                    guard owner.first?.isUppercase == true, !declaredTypes.contains(owner),
+                          kappaMember(root: owner, member: call.leaf) == nil else { continue }
+                    // SOUNDNESS R1868(a) — A NESTED TYPE (`HTTPClient.Inner`) IS KEYED BY ITS HEAD: a type the dependency
+                    // declares owns everything declared inside it, and the declaration walker records top-level names only.
+                    // The head is the question; a head THIS scan declares is its own (the nested type is then a local one).
+                    let segs = owner.split(separator: ".").map(String.init)
+                    let head = segs.first ?? owner
+                    guard !declaredTypes.contains(head) else { continue }
+                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
+                    let open = effectiveImports(file).filter {
+                        KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
+                    let byRoot = KAPPA_DEPENDENCY_ROOTS[head].map { roots in open.contains { roots.contains($0) } } ?? false
+                    func openClosure(_ m: String) -> Set<String> {
+                        var closure = Set<String>(), queue = [m]
+                        while let x = queue.popLast() {
+                            guard closure.insert(x).inserted else { continue }
+                            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+                        }
+                        return closure
                     }
-                    direct[f.qual, default: []].insert("Unknown")
-                    whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")
-                }
-              }
-            }
-            if Env.trace("CANDOR_R548_PROBE"), !resolved {
-                let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                FileHandle.standardError.write(
-                    ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
-                     + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
-                     + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
-            }
-            if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                let blind = blindModules(inFile: file)
-                let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
-                for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
-                    blindDirect[f.qual, default: []].insert(m)
-                    if kdep.contains(m) {
-                        kappaFloorLedgerFiles[m, default: []].insert(file)
-                        if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) free \(call.leaf) -> [\(m)]\n".data(using: .utf8)!) }
+                    let byModule: Bool = {
+                        guard !byRoot, !r1866mOff, !open.isEmpty else { return false }
+                        for m in open where openClosure(m).contains(where: { moduleDeclarations($0)?.names[head] == true }) { return true }
+                        return false
+                    }()
+                    // SOUNDNESS R1868(b) — A MEMBER THE DEPENDENCY ADDS BY EXTENSION TO A TYPE IT DOES NOT DECLARE
+                    // (`extension String { func slurp }`): the receiver is a platform type, so neither the roots nor the
+                    // module's declared names own it, and the call read pure. Positive evidence only — a readable module whose
+                    // `public` extension of the receiver's type declares THIS member. The member may be the platform's own
+                    // (a name collision), which over-discloses; that is the direction a disclosure may err in.
+                    let byExtension: Bool = {
+                        guard !byRoot, !byModule, !open.isEmpty, let leafType = segs.last else { return false }
+                        for m in open where openClosure(m).contains(where: { moduleExtensionMembers($0)?[leafType]?[call.leaf] == true }) { return true }
+                        return false
+                    }()
+                    // SOUNDNESS R1868(c) — A TYPE THE KAPPA DEPENDENCY MODULE MAY DECLARE BUT WHOSE SOURCES ARE UNREADABLE
+                    // (not fetched): only the κ roots are known without them, so a non-root type, an alias, a protocol or a
+                    // subclass of a root read pure. The type is not this scan's, not a generic parameter, and not a
+                    // platform/stdlib name the engine's tables hold, and no OTHER imported module's readable sources declare it.
+                    let byUnreadable: Bool = {
+                        guard !byRoot, !byModule, !byExtension, !open.isEmpty else { return false }
+                        return !unreadableKappaDepModules(of: owner, inFile: file, among: open, generics: Set(f.genericBounds.keys)).isEmpty
+                    }()
+                    if byRoot || byModule || byExtension || byUnreadable {
+                        if r1866Probe {
+                            FileHandle.standardError.write("R1866HIT typed-\(byRoot ? "root" : byModule ? "module" : byExtension ? "ext" : "unreadable") \(f.qual) \(owner).\(call.leaf)\n".data(using: .utf8)!)
+                        }
+                        direct[f.qual, default: []].insert("Unknown")
+                        whyMap[f.qual, default: []].insert("dispatch:\(owner).\(call.leaf)")
                     }
+                  }
                 }
-            } else if !r706iOff, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
-                      case let owner = f.genericBounds[raw] ?? raw,
-                      existentialSpelled.contains(owner) || someSpelled.contains(owner)
-                        || f.genericBounds[raw] != nil,
-                      !localTypes.contains(owner), !localProtocolNames.contains(owner),
-                      !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
-                      !PLATFORM_PROTOCOL_NAMES.contains(owner),
-                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
-                // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
-                // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
-                // the coverage ledger, and an engine MUST disclose at least one of `invisible`/`Unknown`, "never
-                // silently pure". The arm below this one (and the general member-call rule above) withholds it for a
-                // member call because a bare receiver's module cannot be decided — the reverted widening tagged an
-                // `NSPasteboard` receiver. The predicate here is narrower than that one by construction: the source
-                // SPELLS the owner as a protocol, the owner is neither declared here nor a platform/stdlib protocol
-                // this engine names, and the value is the file's ONE dependency module (`foreignOwnerModule`, the
-                // same owner the ⟨0.39⟩ `dispatchesOn` key already publishes) — so the attribution is the module the
-                // free-call rows name. ⟨0.24⟩: a judged-nothing chained copy covers nothing, so this fires in that
-                // arm exactly as unchained. Non-gating by design (R133): `deny`/`pure` do not move.
-                if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
-                blindDirect[f.qual, default: []].insert(module)
-            } else if !resolved, !call.typed, let owner = call.extOwner,
-                      case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
-                // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
-                // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
-                // makes typed calls carry one and this arm is not a place that should follow. It fires on
-                // a receiver root that IS an imported blind MODULE name, and R651's owners are type names
-                // — the two coincide only where a project extends a type sharing a blind module's name,
-                // where the honest answer is the scan-level κ ledger's, not a per-fn `invisible`. Written
-                // as a guard rather than left implied because "no construction site sets that today" is
-                // exactly the kind of sentence that goes stale one commit later.
-                // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
-                // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
-                // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names
-                // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
-                // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
-                // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
-                if (fileImports[file] ?? []).contains(owner) {
-                    blindDirect[f.qual, default: []].insert(owner)
-                    if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
-                        kappaFloorLedgerFiles[owner, default: []].insert(file)
-                        if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) modq \(owner).\(call.leaf) -> [\(owner)]\n".data(using: .utf8)!) }
+                if Env.trace("CANDOR_R548_PROBE"), !resolved {
+                    let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    FileHandle.standardError.write(
+                        ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
+                         + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
+                         + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
+                }
+                if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
+                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let blind = blindModules(inFile: file)
+                    let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
+                    for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
+                        blindDirect[f.qual, default: []].insert(m)
+                        if kdep.contains(m) {
+                            kappaFloorLedgerFiles[m, default: []].insert(file)
+                            if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) free \(call.leaf) -> [\(m)]\n".data(using: .utf8)!) }
+                        }
                     }
+                } else if !r706iOff, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                          case let owner = f.genericBounds[raw] ?? raw,
+                          existentialSpelled.contains(owner) || someSpelled.contains(owner)
+                            || f.genericBounds[raw] != nil,
+                          !localTypes.contains(owner), !localProtocolNames.contains(owner),
+                          !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
+                          !PLATFORM_PROTOCOL_NAMES.contains(owner),
+                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
+                    // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
+                    // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
+                    // the coverage ledger, and an engine MUST disclose at least one of `invisible`/`Unknown`, "never
+                    // silently pure". The arm below this one (and the general member-call rule above) withholds it for a
+                    // member call because a bare receiver's module cannot be decided — the reverted widening tagged an
+                    // `NSPasteboard` receiver. The predicate here is narrower than that one by construction: the source
+                    // SPELLS the owner as a protocol, the owner is neither declared here nor a platform/stdlib protocol
+                    // this engine names, and the value is the file's ONE dependency module (`foreignOwnerModule`, the
+                    // same owner the ⟨0.39⟩ `dispatchesOn` key already publishes) — so the attribution is the module the
+                    // free-call rows name. ⟨0.24⟩: a judged-nothing chained copy covers nothing, so this fires in that
+                    // arm exactly as unchained. Non-gating by design (R133): `deny`/`pure` do not move.
+                    if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
+                    blindDirect[f.qual, default: []].insert(module)
+                } else if !resolved, !call.typed, let owner = call.extOwner,
+                          case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
+                    // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
+                    // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
+                    // makes typed calls carry one and this arm is not a place that should follow. It fires on
+                    // a receiver root that IS an imported blind MODULE name, and R651's owners are type names
+                    // — the two coincide only where a project extends a type sharing a blind module's name,
+                    // where the honest answer is the scan-level κ ledger's, not a per-fn `invisible`. Written
+                    // as a guard rather than left implied because "no construction site sets that today" is
+                    // exactly the kind of sentence that goes stale one commit later.
+                    // ⟨0.15 staged⟩ a MODULE-QUALIFIED member call whose confidently-resolved receiver root IS
+                    // a blind imported module (`SomeSDK.doThing()` — extOwner == the module name, in this file's
+                    // import scope) demonstrably reaches that exact module. PRECISE, not file-granular — it names
+                    // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
+                    // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
+                    // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
+                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    if (fileImports[file] ?? []).contains(owner) {
+                        blindDirect[f.qual, default: []].insert(owner)
+                        if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
+                            kappaFloorLedgerFiles[owner, default: []].insert(file)
+                            if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) modq \(owner).\(call.leaf) -> [\(owner)]\n".data(using: .utf8)!) }
+                        }
+                    }
+                } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                          case let owner = f.genericBounds[raw] ?? raw,
+                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let mods = { () -> Set<String> in
+                              let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
+                                                                 && call.leaf == "init" && owner == f.enclosingType)
+                              return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                          }(), !mods.isEmpty {
+                    // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
+                    // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
+                    // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
+                    // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls
+                    // an uncovered package, never silently pure — and the rows above withhold it for a member call
+                    // because a bare receiver's module cannot be decided from the FILE (the reverted widening tagged
+                    // an `NSPasteboard`). Here it is decided from the DEPENDENCY: its sources declare the type, so the
+                    // member is that module's (or an extension of it, which is no less a reach into uncovered code).
+                    // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
+                    if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+                    blindDirect[f.qual, default: []].formUnion(mods)
+                } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
+                          case let owner = f.genericBounds[raw] ?? raw,
+                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
+                                                               extendedInit: !CallCollector.r1492Off && call.leaf == "init"
+                                                                   && owner == f.enclosingType),
+                          !mods.isEmpty {
+                    // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
+                    // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
+                    // release's silence stood: `storage.coins.append(x)` on an `OrderedSet<Box>` read `inferred: []` with NO
+                    // `invisible` (executed: it runs `Noisy.hash(into:)`, which writes a file), while the SETUP line promised
+                    // "calls into those packages resolve … as `invisible`" and the same tree with checkouts present carried
+                    // `invisible: [OrderedCollections]` on all four call shapes. SPEC §2 (`invisible`): at least one of
+                    // `invisible`/`Unknown`, never silently pure.
+                    //
+                    // The receiver's type is not this scan's and not a platform type the generated SDK tables name, and the
+                    // file imports a dependency module NOBODY CAN READ — so the type may be that module's and no evidence
+                    // can say otherwise. Named are ONLY the unreadable candidates (a readable one that declares the type
+                    // was R1066's answer above; one that does not is excluded by its own sources). Errs toward naming a
+                    // module the call may not reach — e.g. an AppKit type the generated tables do not list — which is the
+                    // direction a disclosure may err in. Non-gating (R133): `deny`/`pure` do not move.
+                    if r1066Probe { FileHandle.standardError.write("VBHIT\tR1104\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
+                    blindDirect[f.qual, default: []].formUnion(mods)
                 }
-            } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
-                      case let owner = f.genericBounds[raw] ?? raw,
-                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      case let mods = { () -> Set<String> in
-                          let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
-                                                             && call.leaf == "init" && owner == f.enclosingType)
-                          return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
-                      }(), !mods.isEmpty {
-                // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
-                // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
-                // (`func f(_ b: Box<E>) { b.get() }`, `Box` public in the one dependency). SPEC §2 (`invisible`): an
-                // engine MUST disclose at least one of `invisible`/`Unknown` for a function that demonstrably calls
-                // an uncovered package, never silently pure — and the rows above withhold it for a member call
-                // because a bare receiver's module cannot be decided from the FILE (the reverted widening tagged
-                // an `NSPasteboard`). Here it is decided from the DEPENDENCY: its sources declare the type, so the
-                // member is that module's (or an extension of it, which is no less a reach into uncovered code).
-                // A platform type no dependency declares answers nothing and stays as it was. Non-gating (R133).
-                if r1066Probe { FileHandle.standardError.write("VBHIT\tR1066\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
-                blindDirect[f.qual, default: []].formUnion(mods)
-            } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
-                      case let owner = f.genericBounds[raw] ?? raw,
-                      case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
-                      case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
-                                                           extendedInit: !CallCollector.r1492Off && call.leaf == "init"
-                                                               && owner == f.enclosingType),
-                      !mods.isEmpty {
-                // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
-                // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
-                // release's silence stood: `storage.coins.append(x)` on an `OrderedSet<Box>` read `inferred: []` with NO
-                // `invisible` (executed: it runs `Noisy.hash(into:)`, which writes a file), while the SETUP line promised
-                // "calls into those packages resolve … as `invisible`" and the same tree with checkouts present carried
-                // `invisible: [OrderedCollections]` on all four call shapes. SPEC §2 (`invisible`): at least one of
-                // `invisible`/`Unknown`, never silently pure.
-                //
-                // The receiver's type is not this scan's and not a platform type the generated SDK tables name, and the
-                // file imports a dependency module NOBODY CAN READ — so the type may be that module's and no evidence
-                // can say otherwise. Named are ONLY the unreadable candidates (a readable one that declares the type
-                // was R1066's answer above; one that does not is excluded by its own sources). Errs toward naming a
-                // module the call may not reach — e.g. an AppKit type the generated tables do not list — which is the
-                // direction a disclosure may err in. Non-gating (R133): `deny`/`pure` do not move.
-                if r1066Probe { FileHandle.standardError.write("VBHIT\tR1104\t\(f.qual) \(owner).\(call.leaf) -> \(mods.sorted())\n".data(using: .utf8)!) }
-                blindDirect[f.qual, default: []].formUnion(mods)
+            } else {
+                let tfile = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                applyTerminal(terminalDecision(.unresolvedCall(resolved: resolved), call, f, file: tfile), to: f.qual, file: tfile)
             }
             // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────
             //
