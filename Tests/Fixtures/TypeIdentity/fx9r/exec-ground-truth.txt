@@ -1,0 +1,5 @@
+Outer9.r_nested pure
+Outer9.r_nested_ann pure
+Outer9.r_qualified WRITES
+Sub9.r_super pure
+Plain9.p_data WRITES

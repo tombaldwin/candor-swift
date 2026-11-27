@@ -1,0 +1,3 @@
+Svc.c_log LOGS
+Svc.c_alog LOGS
+Svc.c_local LOGS

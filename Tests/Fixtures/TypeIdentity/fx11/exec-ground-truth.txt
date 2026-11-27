@@ -1,0 +1,13 @@
+Holder11.a_field WRITES
+Holder11.a_live WRITES
+B11.b_ext_field WRITES
+B11.b_ext_factory WRITES
+B11.b_ext_local WRITES
+B11.b_ext_quiet pure
+B11.b_own_field WRITES
+Holder11.b_ext_self WRITES
+HolderMi.mi_ext WRITES
+HolderMi.mi_ext_quiet pure
+HolderMi.mi_own WRITES
+BMi.mi_b_ext WRITES
+BMi.mi_b_ext_quiet pure

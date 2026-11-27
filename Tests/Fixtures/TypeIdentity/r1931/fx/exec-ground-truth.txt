@@ -1,0 +1,17 @@
+A.a_dep WRITES
+A.a_quiet pure
+A.a_store WRITES
+A.a_store_ann WRITES
+A.a_ov WRITES
+A.a_stat pure
+A.a_inst WRITES
+A.a_sub WRITES
+A.a_boxed WRITES
+A.a_any WRITES
+A.a_shadow_loud WRITES
+A.a_param_loud WRITES
+A.a_closure_loud WRITES
+A.a_live WRITES
+H.h_write WRITES
+H.h_scribble WRITES
+H.h_hush pure

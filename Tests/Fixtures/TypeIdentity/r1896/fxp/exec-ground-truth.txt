@@ -1,0 +1,3 @@
+GBox2.c_genparam2 WRITES
+Msg4.c_platname WRITES
+Msg4.c_ctrl WRITES

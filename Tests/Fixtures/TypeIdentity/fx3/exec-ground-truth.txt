@@ -1,0 +1,8 @@
+N.n_nested WRITES
+N.n_nested_ctor WRITES
+N.n_nested_own pure
+N.t_twin WRITES
+N.t_twin_ann WRITES
+N.r73_ctor WRITES
+N.r73_ctor_ann WRITES
+N.n_live WRITES

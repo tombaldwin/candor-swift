@@ -1,0 +1,5 @@
+A8.a_ext WRITES
+A8.a_live WRITES
+B8.b_ext WRITES
+B8.b_ext_quiet pure
+B8.b_own WRITES

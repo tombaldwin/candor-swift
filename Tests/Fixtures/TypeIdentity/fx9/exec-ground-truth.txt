@@ -1,0 +1,9 @@
+U9.s1s12_ann WRITES
+U9.s1s12_ctor WRITES
+U9.s1s12_inline WRITES
+U9.s12_url_ann TOUCHES
+U9.s12_url_ctor TOUCHES
+U9.s12_result_get pure
+UF9.s12_file_ann WRITES
+UF9.s12_file_ctor WRITES
+UF9.live WRITES

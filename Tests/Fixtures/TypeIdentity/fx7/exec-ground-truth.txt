@@ -1,0 +1,5 @@
+H.b3r WRITES
+S6.s6_sib WRITES
+Sub.inh_nested WRITES
+Sub2.inh_shared WRITES
+Pure.other_knob pure

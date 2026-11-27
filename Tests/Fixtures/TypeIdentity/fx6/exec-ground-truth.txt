@@ -1,0 +1,5 @@
+TA.a_data_ann WRITES
+TA.a_data_ctor WRITES
+TB.b_data_ann WRITES
+TB.b_data_ctor WRITES
+TB.b_own_nested pure

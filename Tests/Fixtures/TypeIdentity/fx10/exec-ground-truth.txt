@@ -1,0 +1,12 @@
+SubOther.inh_other_module WRITES
+SubOther.inh_other_pure pure
+SubDep.inh_dependency WRITES
+SubDep.inh_dep_pure pure
+SubGen.inh_generic WRITES
+SubGen.inh_generic_pure pure
+Conf10.alias_conformance WRITES
+Conf10.alias_conformance_pure pure
+M10.assoc_witness pure
+Ext10.s13_ext_nested WRITES
+Ext10.s13_ext_pure pure
+Ext10.live WRITES
