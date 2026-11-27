@@ -1,0 +1,4 @@
+Parsed19.resp_init WRITES
+Parsed19.resp_make WRITES
+Parsed19.resp_plain WRITES
+Parsed19.resp_quiet pure

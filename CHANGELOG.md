@@ -29,6 +29,9 @@ the same way (an extension of the dependency type in the scan keeps its edge). A
 - **the `identity:foreign` evidence arm** (DESIGN §3): where such a name is declared by no readable module the file imports and the
   file's target names a dependency nobody can read, the member call is `Unknown {dispatch:<untyped>.<m>}` — before, `invisible`
   alone, which no `deny E Unknown` gate sees.
+Only SOURCE spellings decide: a name in member position (`A.N.m`) is not a bare spelling, a call the engine re-walks from a CONTEXTUAL
+type (`.init(…)`, `.make(…)` typed `A.N`) carries no context, an own-module qualifier is never "as if undeclared", and an alias of a
+platform type keeps main's reading (fixtures `fx19`, `fx20`: the scan's nested init and its extension init on `Swift.Result` stay edged).
 Fields, globals, returns and closure parameters keep their binding (L3); their callers can gain the `invisible` of a callee body the
 rule now reads correctly (a global's own `Lib()` initializer). Kill switch `CANDOR_TYPE_ID_L2_OFF`; probe lines `IDL2`/`IDL2R`/`IDL2C`
 under `CANDOR_TYPE_ID_SHADOW_PROBE`.

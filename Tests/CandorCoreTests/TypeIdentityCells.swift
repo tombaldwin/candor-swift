@@ -424,4 +424,23 @@ Ext16Use.q_own_loud WRITES Fs+inc|Fs+inc|Fs+inc # control: `Feat16.Pipe16()` —
 Outer16f.r_unseen_nested pure ABSENT|ABSENT|ABSENT # R1950 control: Ext16 nests a LOUD `Outer16f.Tank16` from a module Feat16 does not import
 """
 
+    // fx19 (Fable's merge review of lane L2, B1): a nested type spelled only as a MEMBER (`Resp19.Status19.isValid`) and constructed
+    // through an implicit member with that CONTEXTUAL type (`.init(code:)`, `.make(p)`): neither is a bare spelling of the unit's, so no
+    // L2 context may attach (swift-http-types `HTTPParsedFields.response` is the pool shape). Pinned at main: lane ca8cfae read ABSENT.
+    static let fx19 = """
+Parsed19.resp_init WRITES Fs+inc
+Parsed19.resp_make WRITES Fs+inc
+Parsed19.resp_plain WRITES Fs+inc
+Parsed19.resp_quiet pure ABSENT
+"""
+
+    // fx20 (Fable's merge review of lane L2, B2): a typealias of a PLATFORM type the scan EXTENDS (`MyResult<S> = Result<S, Error>`,
+    // the Alamofire `AFResult` shape) keeps the scan's extension init on Swift.Result. Pinned at main: lane ca8cfae read ABSENT.
+    static let fx20 = """
+U20.alias_generic WRITES Fs+inc
+U20.alias_plain WRITES Fs+inc
+U20.direct WRITES Fs+inc
+U20.alias_quiet pure ABSENT
+"""
+
 }

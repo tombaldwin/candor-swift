@@ -1,0 +1,4 @@
+U20.alias_generic WRITES
+U20.alias_plain WRITES
+U20.direct WRITES
+U20.alias_quiet pure

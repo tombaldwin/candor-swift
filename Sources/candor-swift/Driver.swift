@@ -4709,10 +4709,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     guard !l2.idx.ownModules.contains(head), !projectModules.contains(head), !localTypes.contains(head),
                           (fileImports[c.file] ?? []).contains(head) else { poisoned.insert(a); continue }
                     t = String(t[t.index(after: dot)...])
-                    guard !t.contains("."), l2.candidates.contains(t) || LS_PLATFORM_NAMES_R1938.contains(t) else { poisoned.insert(a); continue }
+                    guard !t.contains("."), l2.candidates.contains(t), !LS_PLATFORM_NAMES_R1938.contains(t) else { poisoned.insert(a); continue }
                     out[a] = (t, m); continue
                 }
-                guard !t.contains("<"), l2.candidates.contains(t) else { poisoned.insert(a); continue }
+                // NOT a platform name (Fable's merge review B2, fx20): `typealias MyResult<S> = Result<S, Error>` names the platform
+                // type, whose scan EXTENSION members are its members (LS's extension-only exception keys on the bare spelling, which an
+                // alias spelling does not carry); a platform target stays main's reading.
+                guard !t.contains("<"), !t.contains("."), l2.candidates.contains(t), !LS_PLATFORM_NAMES_R1938.contains(t) else { poisoned.insert(a); continue }
                 let r = l2.decide(file: c.file, enclosingPath: nil, generics: [], bodyDecls: [], only: [t])
                 if r.ok.contains(t) { out[a] = (t, m) } else { poisoned.insert(a) }
             }

@@ -38,6 +38,9 @@ enum TypeIdentityFixtures {
 
     static let fx16  = F(app: "fx16/App16", truthFile: "fx16/exec-ground-truth.txt", deps: ["fx16/Dep16"], spelling: "../Dep16", unr: true, live: ["U16.live"], table: TypeIdentityCells.fx16)
 
+    static let fx19  = F(app: "fx19/Pkg19", truthFile: "fx19/exec-ground-truth.txt", deps: [], spelling: nil, unr: false, live: [], table: TypeIdentityCells.fx19)
+    static let fx20  = F(app: "fx20/Pkg20", truthFile: "fx20/exec-ground-truth.txt", deps: [], spelling: nil, unr: false, live: [], table: TypeIdentityCells.fx20)
+
     static let all: [(String, F)] = [("fx3", fx3), ("fx4", fx4), ("fx5", fx5), ("fx5nw", fx5nw), ("fx6", fx6), ("fx6c", fx6c), ("fx7", fx7), ("fx8", fx8),
-        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12), ("fx13", fx13), ("fx15", fx15), ("fx16", fx16)]
+        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12), ("fx13", fx13), ("fx15", fx15), ("fx16", fx16), ("fx19", fx19), ("fx20", fx20)]
 }

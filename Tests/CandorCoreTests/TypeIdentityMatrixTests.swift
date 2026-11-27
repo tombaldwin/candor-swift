@@ -163,6 +163,18 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Ext16Use.q_own_loud", has: ["Pipe16.flow16"]),
         ])
     }
+    /// fx19 / fx20 (Fable's merge review of lane L2, B1 / B2): the contextual-type construction keeps its nested init, and the alias
+    /// of a platform type keeps the scan's extension init. Both pure twins keep their own (pure) edge.
+    func testFx19_Fx20_ContextualAndPlatformAlias() throws {
+        try matrix(X.fx19, "fx19", edges: [
+            E("Parsed19.resp_init", has: ["Resp19.Status19.init(Int,String)"]), E("Parsed19.resp_make", has: ["Resp19.Status19.make"]),
+            E("Parsed19.resp_quiet", has: ["Resp19.Status19.init(Int)"]),
+        ])
+        try matrix(X.fx20, "fx20", edges: [
+            E("U20.alias_generic", has: ["Result.init(String,Success)"]), E("U20.alias_plain", has: ["Result.init(String,Success)"]),
+            E("U20.alias_quiet", has: ["Result.init(Success)"]),
+        ])
+    }
     func testFx12_LSAttack() throws {
         try matrix(X.fx12, "fx12", edges: [
             E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),

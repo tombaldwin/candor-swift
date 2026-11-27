@@ -310,7 +310,7 @@ final class NameKeyedStateTests: XCTestCase {
         // SOUNDNESS R1938 (lane LS) — `localTypes`/`declaredTypes` are now computed VIEWS of the two indexes above. The unit's
         // platform names and the extension-only ones are TYPE names injected at construction; the per-name views are a cache of
         // the indexes; the context is scope bookkeeping (set and restored around one syntax node), never a binding.
-        "lsNamesR1938": .immutableIndex, "lsKeepLocalR1938": .immutableIndex, "lsViewsR1938": .notPerBinding, "lsCtxRawR1938": .notPerBinding, "l2R1938": .immutableIndex, "lsAnyR1938": .immutableIndex, "enclosingMembers": .immutableIndex,
+        "lsNamesR1938": .immutableIndex, "lsKeepLocalR1938": .immutableIndex, "lsViewsR1938": .notPerBinding, "lsCtxRawR1938": .notPerBinding, "l2R1938": .immutableIndex, "lsAnyR1938": .immutableIndex, "lsTreeRootR1938": .immutableIndex, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
         // SOUNDNESS R563 — keyed by a GENERIC PARAMETER name and by `"<Proto>.<member>"`, both supplied
         // by the Driver from the DECLARATION indexes (`FnInfo.genericBounds`, `typeGenericBoundsAll`,

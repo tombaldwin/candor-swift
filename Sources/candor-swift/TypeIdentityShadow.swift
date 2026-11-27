@@ -301,6 +301,8 @@ func l2SpelledNamesR1938(_ body: Syntax?) -> Set<String> {
         var out: Set<String> = []
         override func visit(_ n: IdentifierTypeSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
         override func visit(_ n: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+            // a MEMBER position (`Resp19.Status19.isValid`: `Status19`, `isValid`) is not a bare spelling (Fable's merge review B1)
+            if let ma = n.parent?.as(MemberAccessExprSyntax.self), ma.declName.id == n.id { return .visitChildren }
             if n.baseName.text.first?.isUppercase == true { out.insert(n.baseName.text) }
             return .visitChildren
         }
