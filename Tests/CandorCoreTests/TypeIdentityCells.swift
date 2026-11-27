@@ -502,6 +502,20 @@ GSub27.gen_nested WRITES ABSENT l4 Fs
 Plain27.top pure ABSENT
 """
 
+    // Fable's recheck of lane L4 round 2 (fx28, executed): inherited initializers the call's labels do not narrow to ONE (a trailing
+    // closure, unlabeled parameters of different types) are hedged at the construction, never edged as a union of loud and pure inits.
+    static let fx28 = """
+U28.trailing_pure pure ABSENT l4 -+U # labels [name, nil]: no single match -> `dispatch:Base28.init`, no Fs
+U28.trailing_loud WRITES ABSENT l4 -+U
+U28.unlabeled_pure pure ABSENT l4 -+U # init(_: Int) beside init(_: String): a tie -> hedge, no Fs
+U28.unlabeled_loud WRITES ABSENT l4 -+U
+U28.defaulted pure ABSENT
+U28.variadic pure ABSENT
+U28.failable pure ABSENT
+U28.generic pure ABSENT
+U28.two_labels WRITES ABSENT l4 Fs
+"""
+
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling
     // importing Ext22X; c.swift imports Ext22X too (not evaluated as a.swift). Mirrors (`*_mirror`) beside every B1-direction cell.
     static let fx22 = """

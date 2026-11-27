@@ -291,4 +291,14 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Plain27.top", has: ["Node27.fire27"]),
         ])
     }
+    /// fx28 (Fable's recheck of lane L4 round 2): a construction whose labels do not pick ONE inherited initializer edges none of them
+    /// (it is hedged); a single label match edges exactly that one.
+    func testFx28_InheritedInitTieIsHedged() throws {
+        try matrix(X.fx28, "fx28", edges: [
+            E("U28.trailing_pure", lane: .l4, targetHasNot: ["Base28.init(String,_)", "Base28.init(String,_)#1", "Base28.init(String,Bool)", "Base28.init(String,Int)"]),
+            E("U28.unlabeled_pure", lane: .l4, targetHasNot: ["Base28.init(Int)", "Base28.init(String)"]),
+            E("U28.defaulted", lane: .l4, targetHas: ["Base28.init(String,Bool)"]),
+            E("U28.two_labels", lane: .l4, targetHas: ["Base28.init(String,Int)"]),
+        ])
+    }
 }

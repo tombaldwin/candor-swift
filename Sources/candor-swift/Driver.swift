@@ -2062,7 +2062,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return j == labels.count
     }
+    /// The ancestor whose inherited initializers the last `l4InheritedInitsR1972` call could not tell apart (see there), else nil.
+    var l4InitAmbiguousR1972: String? = nil
     func l4InheritedInitsR1972(_ start: String, argc: Int, labels: [String?]? = nil) -> [String] {
+        l4InitAmbiguousR1972 = nil
         guard !CallCollector.l4OffR1938 else { return [] }
         var cur = start, seen = Set<String>()
         while seen.insert(cur).inserted {
@@ -2072,10 +2075,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 guard cur != start else { return [] }
                 // Fable's merge review B1 (fx27): Swift picks ONE inherited designated initializer by LABEL (`Sub(name:)` runs
                 // `init(name:)`, never a same-arity `init(path:)`); the arity filter is only the fallback when labels are not recorded
+                // Fable's recheck of round 2 (fx28): a trailing closure (labels `[name, nil]`) or unlabeled parameters of different
+                // types (`init(_: Int)` beside `init(_: String)`) leave no single label match, and the arity union then charged a
+                // pure construction with a loud sibling init. The label selection must pick EXACTLY ONE init (or the ancestor has only
+                // one); otherwise the construction is hedged at its site (`dispatch:<Super>.init`) and edges none of them — a
+                // disclosure where main read the site ABSENT, never a union of more than one init.
                 let byLabel = own.filter { l4InitLabelsFitR1972($0, labels) == true }
-                if !byLabel.isEmpty { return byLabel.map(\.qual).sorted() }
-                let fit = own.filter { $0.paramSig.count >= argc && $0.paramSig.dropFirst(argc).allSatisfy { $0.hasDefault || $0.variadic } }
-                return (fit.isEmpty ? own : fit).map(\.qual).sorted()
+                if byLabel.count == 1 { return [byLabel[0].qual] }
+                if own.count == 1 { return [own[0].qual] }
+                l4InitAmbiguousR1972 = cur
+                return []
             }
             // the superclass: the direct supertype spellings that resolve to a scan CLASS (nearest enclosing scope first)
             var next: [String] = []
@@ -7922,6 +7931,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         for t in l4InheritedInitsR1972(c, argc: argc, labels: call.argLabels) where edges[f.qual, default: []].insert(t).inserted {
                             callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         }
+                        if let amb = l4InitAmbiguousR1972 {   // see `l4InheritedInitsR1972`: inherited inits not told apart
+                            direct[f.qual, default: []].insert("Unknown")
+                            whyMap[f.qual, default: []].insert("dispatch:\(amb).init")
+                        }
                     }
                 } else if localCtorR1938 {
                     // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
@@ -7937,6 +7950,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if let c = l4CtorClassR1972(call) {   // R1972
                         for t in l4InheritedInitsR1972(c, argc: argc, labels: call.argLabels) where edges[f.qual, default: []].insert(t).inserted {
                             callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                        }
+                        if let amb = l4InitAmbiguousR1972 {   // see `l4InheritedInitsR1972`: inherited inits not told apart
+                            direct[f.qual, default: []].insert("Unknown")
+                            whyMap[f.qual, default: []].insert("dispatch:\(amb).init")
                         }
                     }
                     resolved = true

@@ -1,0 +1,9 @@
+U28.trailing_pure pure
+U28.trailing_loud WRITES
+U28.unlabeled_pure pure
+U28.unlabeled_loud WRITES
+U28.defaulted pure
+U28.variadic pure
+U28.failable pure
+U28.generic pure
+U28.two_labels WRITES
