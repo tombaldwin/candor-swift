@@ -140,6 +140,9 @@ struct WitnessOwnersR1176 {
     var instR1515: (owner: String, args: [LocalGenericArg?])? = nil
 }
 struct Call { var path: String; var leaf: String; var strArg: String?; var typed: Bool; var args: [ArgKind] = []
+              /// SOUNDNESS R1938 (lane LS) — this call was collected under a platform name the unit's scope reads "as if
+              /// undeclared" (TypeIdentityShadow.swift): the Driver must not resolve it onto the scan's same-named type.
+              var lsNameR1938: String? = nil
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
               /// SOUNDNESS R1086 — on a binary-operator call, aligned with `argTypes`: the operand's type is a GUESS (an
               /// unexplained hop, a convention). It may add a caller witness; it may never refuse an overload (R1081).
@@ -410,7 +413,14 @@ final class CallCollector: SyntaxVisitor {
     let genericBoundExtrasR1677: [String: [String]]
     let existentialFieldsR1473: [String: Set<String>]   // SOUNDNESS R1473 — see DeclCollector
     let protocolSupersR1490: [String: Set<String>]      // SOUNDNESS R1490 residual (3) — local protocol -> protocols it refines
-    let localTypes: Set<String>
+    /// SOUNDNESS R1938 (lane LS) — `localTypes`/`declaredTypes` are VIEWS: the package-wide sets, minus the one platform name the
+    /// syntax node being collected binds "as if undeclared" (`lsCtxR1938`, see TypeIdentityShadow.swift). Outside such a node the
+    /// view IS the stored set, so every other read is unchanged.
+    let localTypesAllR1938: Set<String>
+    var localTypes: Set<String> {
+        guard let n = lsCtxR1938 else { return localTypesAllR1938 }
+        return lsViewR1938(n).local
+    }
     /// The modules THIS FILE imports, and the modules the SCANNED PROJECT itself defines. Together they
     /// decide whether a dotted callee (`Foundation.Process()`) is a MODULE-QUALIFIED SPELLING of a free
     /// name or an ordinary member access on a value. MEASURED before this was plumbed:
@@ -465,6 +475,8 @@ final class CallCollector: SyntaxVisitor {
     private var aiResolving: Set<String> = []
     /// VEIN A(i) §1b KILL SWITCH — restores the release's `dealias` and every arm this vein added.
     static let aiOff = Env.on("CANDOR_AI_OFF")
+    /// SOUNDNESS R1938 (lane LS) — the narrow platform-name shadow (TypeIdentityShadow.swift).
+    static let lsShadowOff = Env.on("CANDOR_TYPE_ID_SHADOW_OFF")
     /// The SEEDED C3 (partition calibration ONLY): the plausible half-fix — a STRICTLY scoped alias lookup,
     /// no supertypes and no last-writer floor — which loses an INHERITED member alias. Never set outside
     /// the calibration run and its pinning test.
@@ -478,7 +490,29 @@ final class CallCollector: SyntaxVisitor {
     /// Defaults to empty so every construction site that predates this field (tests, an unchained scan)
     /// is byte-identical: an empty `DepIndex` answers `isChained`/`lookup` false/nil for everything.
     let deps: DepIndex
-    let declaredTypes: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
+    let declaredTypesAllR1938: Set<String>  // types with a REAL local definition (NOT extension-only) — the shadow
+    var declaredTypes: Set<String> {
+        guard let n = lsCtxR1938 else { return declaredTypesAllR1938 }
+        return lsViewR1938(n).declared
+    }
+    /// SOUNDNESS R1938 (lane LS) — the platform names whose bare spellings IN THIS UNIT name a non-scan type (the Driver's
+    /// `LsShadowIndexR1938.names`), the extension-only top-level names among them (they stay in `localTypes`), the name the
+    /// node being collected binds that way, and the per-name views (built once).
+    let lsNamesR1938: Set<String>
+    let lsKeepLocalR1938: Set<String>
+    private(set) var lsCtxR1938: String? = nil
+    private var lsViewsR1938: [String: (local: Set<String>, declared: Set<String>)] = [:]
+    private func lsViewR1938(_ n: String) -> (local: Set<String>, declared: Set<String>) {
+        if let v = lsViewsR1938[n] { return v }
+        let v = (local: lsKeepLocalR1938.contains(n) ? localTypesAllR1938 : localTypesAllR1938.subtracting([n]),
+                 declared: declaredTypesAllR1938.subtracting([n]))
+        lsViewsR1938[n] = v
+        return v
+    }
+    /// A LOCAL bound by one of this unit's own spellings of a platform name (local annotation, local constructor, `as!`): name ->
+    /// that platform name. A per-binding fact: dropped on every rebind, saved and restored per scope, and read only while `vars`
+    /// still holds exactly that name for the binding.
+    private var lsVarsR1938: [String: String] = [:]
                                     // discipline keys on this so a member call on an extension-only κ-platform
                                     // type (`self.launch()` in `extension Process`) reaches the κ table.
     /// Member names callable BARE on the enclosing type — its own plus every local supertype's. A bare
@@ -1627,7 +1661,8 @@ final class CallCollector: SyntaxVisitor {
          optionalContainerFieldsR1463: [String: Set<String>] = [:],
          enumPayloadsR1272: [String: [String]] = [:],
          classNamesR1175: Set<String> = [], classSubtypesR1175: [String: Set<String>] = [:],
-         closureSigsT4: ClosureSigIndexT4 = ClosureSigIndexT4()) {
+         closureSigsT4: ClosureSigIndexT4 = ClosureSigIndexT4(),
+         lsNamesR1938: Set<String> = [], lsKeepLocalR1938: Set<String> = []) {
         self.closureSigsT4 = closureSigsT4
         self.opWitnessTypes = opWitnessTypes
         self.fieldContainersR1176 = fieldContainersR1176
@@ -1710,8 +1745,10 @@ final class CallCollector: SyntaxVisitor {
         self.genericBoundExtrasR1677 = r1677Off ? [:] : info.genericBoundExtras
         self.existentialFieldsR1473 = existentialFieldsR1473
         self.protocolSupersR1490 = protocolSupersR1490
-        self.localTypes = localTypes
-        self.declaredTypes = declaredTypes
+        self.localTypesAllR1938 = localTypes
+        self.declaredTypesAllR1938 = declaredTypes
+        self.lsNamesR1938 = CallCollector.lsShadowOff ? [] : lsNamesR1938
+        self.lsKeepLocalR1938 = lsKeepLocalR1938
         self.localProtocols = localProtocols
         self.protoBoundParams = protoBoundParams
         self.typeBoundParams = typeBoundParams
@@ -2149,6 +2186,75 @@ final class CallCollector: SyntaxVisitor {
             return aiReport(spelled, (s, false))
         }
         return aiReport(spelled, (s, localTypes.contains(s)))
+    }
+    // ── SOUNDNESS R1938 (lane LS) — which syntax node binds a platform name "as if undeclared" (TypeIdentityShadow.swift) ──
+    /// A bare type spelling `N` (optionally `N?`/`N!`, with generic arguments) that this unit's scope reads as the platform's.
+    func lsSpellingR1938(_ t: TypeSyntax) -> String? {
+        guard !lsNamesR1938.isEmpty else { return nil }
+        var t = t
+        while true {
+            if let o = t.as(OptionalTypeSyntax.self) { t = o.wrappedType; continue }
+            if let o = t.as(ImplicitlyUnwrappedOptionalTypeSyntax.self) { t = o.wrappedType; continue }
+            if let a = t.as(AttributedTypeSyntax.self) { t = a.baseType; continue }
+            break
+        }
+        guard let id = t.as(IdentifierTypeSyntax.self), lsNamesR1938.contains(id.name.text) else { return nil }
+        return id.name.text
+    }
+    /// A bare `N` used as a type in EXPRESSION position (`N(…)`, `N.init(…)`, `N.m(…)`), never a value of that name.
+    private func lsTypeRefR1938(_ e: ExprSyntax) -> String? {
+        guard !lsNamesR1938.isEmpty else { return nil }
+        let p = Self.peel(e)
+        if let g = p.as(GenericSpecializationExprSyntax.self) { return lsTypeRefR1938(g.expression) }
+        guard let dr = p.as(DeclReferenceExprSyntax.self), dr.argumentNames == nil else { return nil }
+        let n = dr.baseName.text
+        guard lsNamesR1938.contains(n), vars[n] == nil, !fnTyped.contains(n) else { return nil }
+        return n
+    }
+    /// The platform name a RECEIVER expression is bound to by this unit's own spelling: a local this unit's spelling typed
+    /// (`lsVarsR1938`, still holding that type), an inline constructor or static call on the bare name, or a chain rooted there.
+    func lsReceiverNameR1938(_ e: ExprSyntax) -> String? {
+        guard !lsNamesR1938.isEmpty else { return nil }
+        let p = Self.peel(e)
+        if let dr = p.as(DeclReferenceExprSyntax.self) {
+            if let n = lsVarsR1938[dr.baseName.text], vars[dr.baseName.text] == n { return n }
+            return lsTypeRefR1938(p)   // `N.m()` — a static member on the bare type name
+        }
+        if let c = p.as(FunctionCallExprSyntax.self) { return lsCallNameR1938(c) }
+        if let ma = p.as(MemberAccessExprSyntax.self), let b = ma.base { return lsReceiverNameR1938(b) }
+        return nil
+    }
+    /// The platform name a CALL node is collected under: a constructor head `N(…)`, or a member call on such a receiver.
+    func lsCallNameR1938(_ node: FunctionCallExprSyntax) -> String? {
+        guard !lsNamesR1938.isEmpty else { return nil }
+        if let n = lsTypeRefR1938(node.calledExpression) { return n }
+        if let ma = Self.peel(node.calledExpression).as(MemberAccessExprSyntax.self), let b = ma.base { return lsReceiverNameR1938(b) }
+        return nil
+    }
+    /// The bindings of a `let`/`var` this unit's own spelling types with a platform name: an annotation, a constructor (or a
+    /// chain rooted at one), or an `as!` cast to the bare name.
+    private func lsBinderMarksR1938(_ node: VariableDeclSyntax) -> [(name: String, n: String, kind: String)] {
+        guard !lsNamesR1938.isEmpty else { return [] }
+        var out: [(name: String, n: String, kind: String)] = []
+        for b in node.bindings {
+            guard let ip = b.pattern.as(IdentifierPatternSyntax.self) else { continue }
+            let name = ip.identifier.text
+            if let ann = b.typeAnnotation {
+                if let n = lsSpellingR1938(ann.type) { out.append((name, n, "ann")) }
+                continue
+            }
+            guard let v0 = b.initializer?.value else { continue }
+            let v = Self.peel(v0)
+            if let c = v.as(FunctionCallExprSyntax.self), let n = lsCallNameR1938(c) { out.append((name, n, "ctor")); continue }
+            if let seq = v.as(SequenceExprSyntax.self) {
+                let els = Array(seq.elements)
+                if els.count == 3, let a = els[1].as(UnresolvedAsExprSyntax.self), a.questionOrExclamationMark?.tokenKind == .exclamationMark,
+                   let te = els[2].as(TypeExprSyntax.self), let n = lsSpellingR1938(te.type) {
+                    out.append((name, n, "as!"))
+                }
+            }
+        }
+        return out
     }
     private func aiReport(_ spelled: String, _ r: (spelling: String, local: Bool)) -> (spelling: String, local: Bool) {
         identProbe("IDU\t\(ai.file ?? "-")\t\(ai.enclosingTypePath ?? enclosingType ?? "-")\t\(spelled)\t\(r.spelling)\t\(r.local)")
@@ -6827,6 +6933,7 @@ final class CallCollector: SyntaxVisitor {
         guessElem.remove(name)        // R618 — moves with `arrayElem`
         elemGuessVars.remove(name)    // R618 — moves with `vars`
         platformHopVarsR1499.remove(name)   // R1499 — moves with `vars`
+        lsVarsR1938.removeValue(forKey: name)   // R1938 LS — moves with `vars`
         opaqueVars.remove(name)          // R610 — the guess flag travels with the binding it describes
         protoTyped.removeValue(forKey: name)
         arrayElem.removeValue(forKey: name)
@@ -7042,6 +7149,7 @@ final class CallCollector: SyntaxVisitor {
     // map classified as cleared without the clear being written fails a different one.
     private func shadowName(_ name: String) {
         binderShadow.insert(name)   // R847
+        lsVarsR1938.removeValue(forKey: name)   // R1938 LS — a rebind: the old binding's spelling no longer applies
         holdsVars.removeValue(forKey: name)     // ⟨0.40⟩
         conventionVars.remove(name)             // ⟨0.40⟩
         monoNames.remove(name)
@@ -7465,6 +7573,7 @@ final class CallCollector: SyntaxVisitor {
         var literalLocals: Set<String>
         var binderShadow: Set<String>   // R847 — see `binderShadow`
         var caseElseOut: Set<String>    // R853 — see `caseElseOut`
+        var lsVarsR1938: [String: String]   // SOUNDNESS R1938 LS — see `lsVarsR1938`
     }
     private var shadowScopes: [SyntaxIdentifier: ShadowSave] = [:]
 
@@ -7521,7 +7630,7 @@ final class CallCollector: SyntaxVisitor {
                                            constStrings: localConstStrings, fnValueAlias: fnValueAlias,
                                            casePayload: casePayloadLocals, methodRefR1873: methodRefR1873,
                                            literalLocals: literalLocals, binderShadow: binderShadow,
-                                           caseElseOut: caseElseOut)
+                                           caseElseOut: caseElseOut, lsVarsR1938: lsVarsR1938)
     }
 
     private func leaveShadowScope(_ node: some SyntaxProtocol) {
@@ -7543,6 +7652,7 @@ final class CallCollector: SyntaxVisitor {
         literalLocals = saved.literalLocals
         binderShadow = saved.binderShadow
         caseElseOut = saved.caseElseOut
+        lsVarsR1938 = saved.lsVarsR1938
     }
 
     /// THE CATCH-ALL BINDER, and it exists to invert a failure mode rather than to add a case.
@@ -9649,6 +9759,21 @@ final class CallCollector: SyntaxVisitor {
     static let r832Probe = Env.trace("CANDOR_R832_PROBE")
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        let prev = lsCtxR1938
+        lsCtxR1938 = lsCallNameR1938(node)
+        defer { lsCtxR1938 = prev }
+        if let n = lsCtxR1938 { lsProbeR1938("IDLS\t\(ai.file ?? "-")\t\(r1455Qual)\tcall\t\(n)\t\(node.calledExpression.trimmedDescription.prefix(60))") }
+        let before = calls.count
+        let r = visitCallR1938(node)
+        if let n = lsCtxR1938, before < calls.count {
+            for j in before..<calls.count {
+                calls[j].lsNameR1938 = n
+                lsProbeR1938("IDLSC\t\(r1455Qual)\t\(n)\t\(calls[j].path)\t\(calls[j].leaf)\ttyped=\(calls[j].typed)\tunq=\(calls[j].unqualified)")
+            }
+        }
+        return r
+    }
+    private func visitCallR1938(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         let callsBefore = calls.count
         defer {
             if !Self.r974Off { annotateGenericForwards(node, from: callsBefore) }
@@ -11424,6 +11549,12 @@ final class CallCollector: SyntaxVisitor {
 
     // effectful property READS (no call): κ chains AND local accessor units (computed getters)
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
+        let prev = lsCtxR1938
+        lsCtxR1938 = node.base.flatMap { lsReceiverNameR1938($0) }
+        defer { lsCtxR1938 = prev }
+        return visitMemberAccessR1938(node)
+    }
+    private func visitMemberAccessR1938(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         // SOUNDNESS R999 — `.unix` read with a contextual type: walk its qualified spelling instead.
         if node.base == nil, node.parent?.as(FunctionCallExprSyntax.self)?.calledExpression.id != node.id,
            let t = implicitMemberResolved(Syntax(node), node.declName.baseName.text),
@@ -11656,6 +11787,12 @@ final class CallCollector: SyntaxVisitor {
     // and NOT the base of a member/call (handled by their own visitors); resolved in the fixpoint loop
     // only when the name is a known global unit (so an ordinary identifier never fabricates an edge).
     override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        let prev = lsCtxR1938
+        lsCtxR1938 = nil
+        defer { lsCtxR1938 = prev }
+        return visitDeclRefR1938(node)
+    }
+    private func visitDeclRefR1938(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
         let n = node.baseName.text
         // SOUNDNESS R1472 — A NAME AN ENCLOSING CLOSURE'S PARAMETER BINDS IS THAT PARAMETER, TYPED OR NOT. Swift
         // resolves a bare identifier to the innermost binding, and a closure parameter is in scope for the whole
@@ -13722,6 +13859,20 @@ final class CallCollector: SyntaxVisitor {
     }
 
     override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        let prev = lsCtxR1938
+        let marks = lsBinderMarksR1938(node)
+        lsCtxR1938 = marks.first?.n
+        defer { lsCtxR1938 = prev }
+        let r = visitVarDeclR1938(node)
+        // mark AFTER the binder ran (it called `shadowName`, which drops any earlier mark): only where `vars` now holds exactly
+        // the platform name for this binding, i.e. the binder typed it from the spelling and nothing else
+        for m in marks where vars[m.name] == m.n {
+            lsVarsR1938[m.name] = m.n
+            lsProbeR1938("IDLS\t\(ai.file ?? "-")\t\(r1455Qual)\tbind:\(m.kind)\t\(m.n)\t\(m.name)")
+        }
+        return r
+    }
+    private func visitVarDeclR1938(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
         // R98 — SAME ORDERING RULE, THE PLAIN-BINDER CASE. `let w = w.kill()` read silent-pure while
         // `let q = w.kill()` charged `Fs`. This file already reasoned about it TWICE and applied the
         // carve-out to one index each time — `fnValueAlias` ("captured before, reinstated after") and

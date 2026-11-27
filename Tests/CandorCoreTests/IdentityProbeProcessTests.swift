@@ -121,7 +121,10 @@ final class IdentityProbeProcessTests: XCTestCase {
         guard py.code == 0 else { throw XCTSkip("python3 is not available") }
         let out = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-census-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: out) }
-        let r = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out.path])
+        // The SEEDS are the instrument's calibration on the defect, so they run with lane LS switched off (SOUNDNESS R1938 lane
+        // LS fixes the shape Pkg6 seeds): with LS on, Pkg6's local use-site answers for `Data` must go to 0 (asserted below).
+        let r = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out.path],
+                                          env: ["CANDOR_TYPE_ID_SHADOW_OFF": "1"])
         XCTAssertEqual(r.code, 0, r.err)
         var seeds: [String: (binder: Int, use: Int)] = [:]
         for l in r.out.split(separator: "\n") {
@@ -137,5 +140,19 @@ final class IdentityProbeProcessTests: XCTestCase {
         XCTAssertTrue(r.out.contains("Pkg6                           {'Data': (2, 3,"), "kappa_shadow must fire on Pkg6:\n\(r.out)")
         XCTAssertFalse(r.out.contains("Pkg6c                          {"), "kappa_shadow must stay quiet on the renamed control")
         XCTAssertTrue(r.out.contains("0 of 19 attributed files differ"), "the engine's visible-module sets must agree with the independent @_exported reading")
+        // lane LS ON: the two declarations are still there, the three local answers are not (the binder census is an EMULATOR of
+        // the package-wide rule, so it does not move; the use-site census and kappa_shadow read the engine's real answers)
+        let out2 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-census-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: out2) }
+        let r2 = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out2.path])
+        XCTAssertEqual(r2.code, 0, r2.err)
+        var seeds2: [String: (binder: Int, use: Int)] = [:]
+        for l in r2.out.split(separator: "\n") {
+            let f = l.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            if f.count == 3, let b = Int(f[1]), let u = Int(f[2]) { seeds2[f[0]] = (b, u) }
+        }
+        XCTAssertEqual(seeds2["Pkg6"]?.use, 0, "Pkg6 with lane LS on: no local use-site answer for the shadowed platform name")
+        XCTAssertTrue(r2.out.contains("Pkg6                           {'Data': (2, 0,"), "kappa_shadow with LS on: declarations kept, 0 local answers:\n\(r2.out)")
+        for k in ["App3", "App4", "App5", "App5nw", "Pkg6c"] { XCTAssertEqual(seeds2[k]?.use, want[k]?.1, "\(k): LS must not move a non-platform name") }
     }
 }

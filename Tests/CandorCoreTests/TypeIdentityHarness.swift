@@ -25,12 +25,16 @@ enum TypeIdentityLane: String, CaseIterable { case ls, l2, l3, l4, l5 }
 
 enum TypeIdentityTarget {
     /// The lanes whose target readings are asserted. EMPTY at L0: no lane has landed. A later lane adds itself HERE, in the commit
-    /// that lands its fix. `CANDOR_IDENT_EXPECT_TARGET=ls,l2,…` (or `all`) forces lanes on for a calibration run, which must
+    /// that lands its fix (LS has). `CANDOR_IDENT_EXPECT_TARGET=ls,l2,…` (or `all`) forces lanes on; `main` forces every lane off for a calibration run, which must
     /// FAIL on a branch that has not landed them.
     static var expect: Set<TypeIdentityLane> {
-        var s: Set<TypeIdentityLane> = []
+        // LS landed (SOUNDNESS R1938 lane LS, the narrow platform-name shadow): its target column is the assertion now.
+        var s: Set<TypeIdentityLane> = [.ls]
         if let e = ProcessInfo.processInfo.environment["CANDOR_IDENT_EXPECT_TARGET"] {
             if e == "all" { s = Set(TypeIdentityLane.allCases) }
+            // `main` asserts the main column for EVERY cell, landed lanes included: the kill-switch arm (a landed lane's switch
+            // set must read main's column again)
+            else if e == "main" { s = [] }
             else { for p in e.split(separator: ",") { if let l = TypeIdentityLane(rawValue: String(p)) { s.insert(l) } } }
         }
         return s

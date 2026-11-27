@@ -3,3 +3,4 @@ TA.a_data_ctor WRITES
 TB.b_data_ann WRITES
 TB.b_data_ctor WRITES
 TB.b_own_nested pure
+TC.c_bytes_ann WRITES

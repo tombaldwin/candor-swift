@@ -109,4 +109,18 @@ final class TypeIdentityMatrixTests: XCTestCase {
     /// fx11: the S7e variants of fx8 — an extension member reached through a field, a factory return and a local declared in the
     /// importing file, an extension of that file's type, and a target that enables MemberImportVisibility.
     func testFx11_S7eVariants() throws { try matrix(X.fx11, "fx11") }
+    /// fx12 (lane LS): the inner binding of a rebind keeps its scan type and loses the platform ctor edge; a field keeps its
+    /// declaration's type in a file that cannot see it; the refusals keep main's edges.
+    func testFx12_LSAttack() throws {
+        try matrix(X.fx12, "fx12", edges: [
+            E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),
+            E("O12.rebind_closure", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),
+            E("O12.rebind_block", has: ["Outer12.Data.write", "Data.write"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Data.write"]),
+            E("O12.as_cast", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
+            E("H12.b_found", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
+            E("H12.own_top", has: ["Data.wipe12"]), E("H12.own_top_pure", has: ["Data.write"]),
+            E("H12.b3r_plat", has: ["Data.wipe12"]), E("H12.b3r_plat_pure", has: ["Data.write"]), E("H12.b3r_copy", has: ["Data.wipe12"]),
+            E("Outer12.inner_nested", has: ["Data.write"]), E("L12.body_local", has: ["Data.write"]), E("Sp12.sp_data", has: ["Data.write"]),
+        ])
+    }
 }

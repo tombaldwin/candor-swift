@@ -145,6 +145,12 @@ final class NameKeyedStateTests: XCTestCase {
         "elemGuessVars": .clearedOnRebind(scoped: false),
         // SOUNDNESS R1499 — "this binding's guessed type came through a platform-declared hop", moving with `vars`.
         "platformHopVarsR1499": .clearedOnRebind(scoped: false),
+        // SOUNDNESS R1938 (lane LS) — the platform name a LOCAL was typed with by this unit's own spelling. It describes the `vars`
+        // entry of that binding (and is read only while `vars` still holds exactly that name), so it is dropped in both
+        // `shadowName` and `clearBindingTypeOnly`. SCOPED, unlike `vars`: a stale entry is the fabrication direction (an inner
+        // `for d in nested` would read the outer platform binding), and dropping it at an inner block's close would lose the
+        // outer binding's platform reading for the rest of the body — fx12 `O12.rebind_block` is the measured cell.
+        "lsVarsR1938": .clearedOnRebind(scoped: true),
         // R278 — `[[T]]`'s INNER element, for a binder whose own element is a container. Keyed by the
         // binding name and cleared with `arrayElem` in the same call, for the same reason: a stale entry
         // would hand a later binder over the same name somebody else's element type, which is the
@@ -296,11 +302,15 @@ final class NameKeyedStateTests: XCTestCase {
         "moduleConstStrings": .immutableIndex, "fields": .immutableIndex,
         "fieldArrayElem": .immutableIndex, "fieldArrayElemNested": .immutableIndex,
         "fieldDictValue": .immutableIndex,
-        "opaqueFields": .immutableIndex, "localTypes": .immutableIndex,
+        "opaqueFields": .immutableIndex, "localTypesAllR1938": .immutableIndex,
         "existentialFieldsR1473": .immutableIndex,   // SOUNDNESS R1473 — keyed by TYPE, then field name
         "fieldBoundSpecR1677": .immutableIndex, "paramExtraProtosR1677": .immutableIndex, "genericBoundExtrasR1677": .immutableIndex,   // SOUNDNESS R1677 — keyed by TYPE/field and by PARAMETER/generic NAME; the hook re-checks `isBoundLocal`/`binderShadow` at the read
         "protocolSupersR1490": .immutableIndex,      // SOUNDNESS R1490 residual (3) — keyed by PROTOCOL name
-        "declaredTypes": .immutableIndex, "enclosingMembers": .immutableIndex,
+        "declaredTypesAllR1938": .immutableIndex,
+        // SOUNDNESS R1938 (lane LS) — `localTypes`/`declaredTypes` are now computed VIEWS of the two indexes above. The unit's
+        // platform names and the extension-only ones are TYPE names injected at construction; the per-name views are a cache of
+        // the indexes; the context is scope bookkeeping (set and restored around one syntax node), never a binding.
+        "lsNamesR1938": .immutableIndex, "lsKeepLocalR1938": .immutableIndex, "lsViewsR1938": .notPerBinding, "lsCtxR1938": .notPerBinding, "enclosingMembers": .immutableIndex,
         "localFreeFns": .immutableIndex, "localProtocols": .immutableIndex,
         // SOUNDNESS R563 — keyed by a GENERIC PARAMETER name and by `"<Proto>.<member>"`, both supplied
         // by the Driver from the DECLARATION indexes (`FnInfo.genericBounds`, `typeGenericBoundsAll`,

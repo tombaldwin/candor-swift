@@ -1,0 +1,16 @@
+Outer12.inner_nested pure
+O12.as_cast WRITES
+O12.opt_ann WRITES
+O12.static_init WRITES
+O12.rebind_for pure
+O12.rebind_closure pure
+O12.rebind_block WRITES
+String.fe_data WRITES
+L12.body_local pure
+Sp12.sp_data WRITES
+H12.own_top WRITES
+H12.own_top_pure pure
+H12.b3r_plat WRITES
+H12.b3r_plat_pure pure
+H12.b3r_copy WRITES
+H12.b_found WRITES

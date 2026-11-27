@@ -26,3 +26,17 @@ func identProbe(_ line: @autoclosure () -> String) {
     s.lock.lock(); defer { s.lock.unlock() }
     if s.seen.insert(l).inserted { FileHandle.standardError.write((l + "\n").data(using: .utf8)!) }
 }
+
+// SOUNDNESS R1938 (lane LS) — the narrow platform-name shadow's own trace, so the pool census of its MOVED sites does not need the
+// whole identity probe (whose IDU stream is every `canonicalTypeRef` answer). Records, on stderr, deduplicated like the above:
+//   IDLS   file  unit  call|bind:<kind>  name  spelling      a node collected "as if undeclared"
+//   IDLSC  unit  name  path  leaf  typed=  unq=             a call that node emitted (the Driver keeps it off the scan type)
+//   IDLSR  file  unit  name  reason                          a refusal, where the unit's body spells the name
+// Also on whenever `CANDOR_IDENT_PROBE` is.
+let lsProbeOnR1938 = Env.trace("CANDOR_TYPE_ID_SHADOW_PROBE") || identProbeOn
+func lsProbeR1938(_ line: @autoclosure () -> String) {
+    guard lsProbeOnR1938 else { return }
+    let l = line(); let s = IdentProbeSink.shared
+    s.lock.lock(); defer { s.lock.unlock() }
+    if s.seen.insert(l).inserted { FileHandle.standardError.write((l + "\n").data(using: .utf8)!) }
+}

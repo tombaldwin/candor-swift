@@ -10,6 +10,27 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A platform name a scan type shadows is read as the platform's where Swift cannot see that type (SOUNDNESS R1938, lane LS)
+
+The engine keys types by SIMPLE name, package-wide, so a scan type named like a platform or κ type — `Node.Data` nested in a target no
+file imports, a top-level `struct Data` in a sibling target the file does not import, swift-syntax's `Node.Data`, vapor's
+`ValidatorResults.URL`, openapi-generator's `Constants.File` — captured EVERY bare spelling of that name in the package: the binding
+went to the union of the scan's same-named types, and every `declaredTypes.contains(name)` κ fence suppressed the curated
+classification. Executed: `Data("x".utf8).write(to:)` WRITES, the row was ABSENT, `deny Fs` and `deny Fs Unknown` exited 0, on
+v0.43.0 and main (fixtures `TypeIdentity/fx6`, `fx9`, `fx9r`, `fx12`).
+
+Now, for each unit, the names Swift's own scope cannot resolve to a scan type (no type nested in the enclosing path or a supertype,
+no member alias, generic parameter or body-local declaration of that name, no top-level declaration or alias in the unit's module or
+in an own module its file can see) are read "as if undeclared" — exactly as in the same package with those declarations renamed —
+for the spellings whose scope IS the unit: a local annotation, a local constructor, an inline constructor head, `N.init`/`N.m`,
+`as! N`, and a receiver bound by one of those. Both layers move together: the collector's `localTypes`/`declaredTypes` are views
+without that name while such a node is collected, and the Driver keeps the constructor call off the scan type's `init`. Fields,
+globals, returns and closure parameters keep their binding (their spelling's scope is a declaration elsewhere; fx12 pins the
+platform-name F-B3r analogue in both directions). Refused, keeping main's reading: a file with no manifest target, an enclosing type
+the scan does not declare (unless a platform nominal whose nested types the generated table lists), a supertype the scan does not
+declare, and κ package names (`File`, `Storage`, …) without one of the package's modules visible. A RESOLUTION, non-additive (it
+removes the edges to the shadowing type), behind `CANDOR_TYPE_ID_SHADOW_OFF`; `CANDOR_TYPE_ID_SHADOW_PROBE` traces the moved sites.
+
 ### The type-identity attack matrix, an identity probe and module identity — NO behaviour change (SOUNDNESS R1938, lanes L0 + L1)
 
 First two stages of the type-identity design (`swift-type-identity-design/DESIGN.md` §7): the fixtures and instruments the later lanes

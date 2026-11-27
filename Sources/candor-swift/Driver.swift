@@ -991,7 +991,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let tsc = TypeSurfaceCollector(file: rel)   // ⟨0.40⟩
         tsc.walk(tree)
         surfaceCollectors.append(tsc)
-        if identProbeOn { identExportedByFile[rel] = reexportedModules(in: tree) }   // R1938 (probe only)
+        if identProbeOn || !CallCollector.lsShadowOff { identExportedByFile[rel] = reexportedModules(in: tree) }   // R1938 (probe; lane LS)
         surfaceAliases.formUnion(TypeSurfaceCollector.aliasNames(in: tree))
         for item in tree.statements {
             if let imp = item.item.as(ImportDeclSyntax.self),
@@ -4609,6 +4609,52 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if !(cw.broad.isEmpty && cw.indexBroad.isEmpty && cw.mutating.isEmpty) { collWitnessR1526[t] = cw }
         }
     }
+    // SOUNDNESS R1938 (lane LS) — the narrow platform-name shadow (TypeIdentityShadow.swift). Built only when some scan file
+    // DECLARES a type named like a platform/κ name; nil otherwise, so a package without the shape pays nothing.
+    let lsShadowR1938: LsShadowIndexR1938? = {
+        guard !CallCollector.lsShadowOff else { return nil }
+        let cands = declaredTypes.filter { !$0.contains(".") && LS_PLATFORM_NAMES_R1938.contains($0) }
+        guard !cands.isEmpty else { return nil }
+        let facts = moduleIdentityFacts(sourcePaths: sourcePaths, rootDir: rootDir, owningPackage: { owningPackage(of: $0) },
+                                        owningTarget: { owningTarget(of: $0, in: $1) }, xcodeModulesByFile: xcodeModulesByFile,
+                                        swiftModuleOf: { swiftModuleOf($0) })
+        var moduleOf: [String: String] = [:]
+        for f in facts { if let m = f.module { moduleOf[f.rel] = m } }
+        let idx = ModuleIdentityIndex(moduleOfFile: moduleOf, importsByFile: fileImports, exportedByFile: identExportedByFile,
+                                      dependencyReexports: deps.moduleReexports)
+        var tops: [String: Set<String>] = [:], privAliases: [String: Set<String>] = [:]
+        for c in collectors {
+            let m = moduleOf[c.file]
+            for p in c.declaredTypePaths where !p.contains(".") && cands.contains(p) {
+                // an UNATTRIBUTED file's top-level declaration may be visible anywhere: record it under a sentinel every
+                // module sees (so it refuses, never strips)
+                tops[p, default: []].insert(m ?? "\u{0}unattributed")
+            }
+            for (a, _) in c.fileTypeAliases where cands.contains(a) {
+                if c.filePrivateTypeAliases.contains(a) { privAliases[a, default: []].insert(c.file) }
+                else { tops[a, default: []].insert(m ?? "\u{0}unattributed") }
+            }
+        }
+        // the sentinel is visible from every attributed file: an unattributed top-level declaration refuses everywhere
+        for (n, ms) in tops where ms.contains("\u{0}unattributed") { tops[n] = ms.union(idx.ownModules) }
+        var declByLeaf: [String: Set<String>] = [:]
+        for p in declaredTypePathsAI { declByLeaf[p.split(separator: ".").last.map(String.init) ?? p, default: []].insert(p) }
+        var assoc: Set<String> = []
+        for c in collectors { assoc.formUnion(c.lgAssocNames) }
+        return LsShadowIndexR1938(candidates: cands, idx: idx, topLevelModules: tops, privateAliasFiles: privAliases,
+                                  localTypePaths: localTypePaths, declaredTypePaths: declaredTypePathsAI,
+                                  memberAliasNamesByPath: memberTypeAliasesByPathAll.mapValues { Set($0.keys) },
+                                  memberAliasNamesBySimple: memberTypeAliasesAll.mapValues { Set($0.keys) },
+                                  assocNames: assoc, pathsByLeaf: declByLeaf, supertypesBySimple: supertypesOf,
+                                  supertypesByPath: supertypePathsOf, typeGenericNames: typeGenericParamNamesAI)
+    }()
+    // the extended-only top-level names: `extension Data { … }` keeps `Data` in `localTypes` even with no scan declaration
+    let lsExtendedTopLevelR1938: Set<String> = {
+        guard let ls = lsShadowR1938 else { return [] }
+        var out: Set<String> = []
+        for c in collectors { for p in c.localTypePaths.subtracting(c.declaredTypePaths) where ls.candidates.contains(p) { out.insert(p) } }
+        return out
+    }()
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
     if !CallCollector.aiOff {
@@ -5620,7 +5666,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                optionalContainerFieldsR1463: optionalContainerFieldsR1463,             // R1463
                                enumPayloadsR1272: enumPayloadsR1272,                                   // R1272
                                classNamesR1175: classNamesAll, classSubtypesR1175: classSubtypesR1175, // R1175
-                               closureSigsT4: closureSigsT4)                                          // R1455 T4
+                               closureSigsT4: closureSigsT4,                                          // R1455 T4
+                               lsNamesR1938: {                                                        // R1938 LS
+                                   guard let ls = lsShadowR1938 else { return [] }
+                                   let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                   let r = ls.names(file: file, enclosingPath: f.enclosingTypePath ?? f.enclosingType,
+                                                    generics: f.genericParamNames.union(f.genericBounds.keys),
+                                                    bodyDecls: lsBodyDeclNamesR1938(Syntax(body)))
+                                   if lsProbeOnR1938, !r.refused.isEmpty {
+                                       let text = Syntax(body).trimmedDescription
+                                       for (n, why) in r.refused.sorted(by: { $0.key < $1.key })
+                                           where text.range(of: "\\b\(n)\\b", options: .regularExpression) != nil {
+                                           lsProbeR1938("IDLSR\t\(file)\t\(f.qual)\t\(n)\t\(why)")
+                                       }
+                                   }
+                                   return r.ok
+                               }(),
+                               lsKeepLocalR1938: lsExtendedTopLevelR1938)
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
@@ -6794,9 +6856,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // it — a THIRD question, pre-existing, and worth 802 changed rows across this corpus
                 // when measured. `freeArmWouldClaim` keeps operators on exactly the old path: an
                 // operator reaches a member arm only in the cases where it already did.
+                // SOUNDNESS R1938 (lane LS) — a constructor head the unit's scope reads as the PLATFORM type (`Data(…)` where
+                // Swift sees no scan `Data`): the scan's same-named type is not this call's type, so the local-constructor arms
+                // below must not claim it (they would edge `Node.Data.init` + `Outer.Data.init`). An extension-only top-level
+                // `extension Data { init… }` keeps its arms: there the local inits ARE the platform type's.
+                let lsCtorR1938 = call.lsNameR1938 != nil && call.lsNameR1938 == call.path && !lsExtendedTopLevelR1938.contains(call.path)
+                let localCtorR1938 = localTypes.contains(call.path) && !lsCtorR1938
                 let freeArmWouldClaim = overloadedBases.contains(call.path)
                     || (freeFnByName[call.path]?.count == 1)
-                    || localTypes.contains(call.path)
+                    || localCtorR1938
                 // SOUNDNESS R267 — the operator test is `swiftLeafIsOperator` (a DENYLIST over the
                 // grammar's `operator-head`), not "starts with a letter". The old allowlist classified
                 // every BACKTICK-ESCAPED and raw identifier as an operator, because SwiftSyntax keeps the
@@ -6979,7 +7047,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     edges[f.qual, default: []].insert(targets[0])
                     callsiteArgs[targets[0], default: []].append((f.qual, call.args)); callsiteArgTypes[targets[0], default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                     resolved = true
-                } else if localTypes.contains(call.path), overloadedBases.contains("\(call.path).init") {
+                } else if localCtorR1938, overloadedBases.contains("\(call.path).init") {
                     // R1047 — `resolved` keeps the release's answer (a matched overload); only the EDGE is filtered.
                     var admitted = 0
                     for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
@@ -6987,7 +7055,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         resolved = true
                     }
                     if admitted == 0 { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
-                } else if localTypes.contains(call.path) {
+                } else if localCtorR1938 {
                     // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
                     // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
                     // initializer vanished — the same hole the TS engine's got-dogfood found in ctors).

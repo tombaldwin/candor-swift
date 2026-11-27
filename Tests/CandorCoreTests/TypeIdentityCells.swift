@@ -156,6 +156,7 @@ TA.a_data_ctor WRITES ABSENT ls Fs
 TB.b_data_ann WRITES ABSENT ls Fs
 TB.b_data_ctor WRITES ABSENT ls Fs
 TB.b_own_nested pure ABSENT
+TC.c_bytes_ann WRITES ABSENT ls Fs # the brief's "fabrication control": same defect class in Pkg6 (Gen's nested Data shadows ToolC too)
 """
 
     static let fx6c = """
@@ -164,6 +165,7 @@ TA.a_data_ctor WRITES Fs+inc
 TB.b_data_ann WRITES Fs+inc
 TB.b_data_ctor WRITES Fs+inc
 TB.b_own_nested pure ABSENT
+TC.c_bytes_ann WRITES Fs+inc
 """
 
     static let fx7 = """
@@ -331,6 +333,28 @@ HolderMi.mi_ext_quiet pure -+inv|-|-+inv
 HolderMi.mi_own WRITES -+inv|Fs+inc|-+inv
 BMi.mi_b_ext WRITES -+inv|Fs+inc|-+inv
 BMi.mi_b_ext_quiet pure -+inv|-|-+inv
+"""
+
+    // fx12 (lane LS): binder shapes (as!, optional annotation, `N.init`), rebinds that must not inherit the platform reading, the
+    // refusals (visible nested, visible module top level, body-local, foreign superclass) and the platform-name F-B3r analogue
+    // (a FIELD typed Core12.Data in a file importing Core12, used from a file that does not import it).
+    static let fx12 = """
+Outer12.inner_nested pure ABSENT # LS refusal: visible nested Outer12.Data (main binds Core12's Data.write: pre-existing, L2/L4)
+O12.as_cast WRITES ABSENT ls Fs
+O12.opt_ann WRITES ABSENT ls Fs
+O12.static_init WRITES ABSENT ls Fs
+O12.rebind_for pure ABSENT
+O12.rebind_closure pure ABSENT
+O12.rebind_block WRITES ABSENT ls Fs
+String.fe_data WRITES ABSENT ls Fs # a platform enclosing type whose nested types the generated table lists
+L12.body_local pure ABSENT # LS refusal: a body-local Data
+Sp12.sp_data WRITES ABSENT # LS refusal: a superclass the scan does not declare (NSObject); pre-existing silence, L4
+H12.own_top WRITES Fs+inc
+H12.own_top_pure pure ABSENT
+H12.b3r_plat WRITES Fs+inc # field: must not move
+H12.b3r_plat_pure pure ABSENT # field: must not move (a platform reading would fabricate Fs)
+H12.b3r_copy WRITES Fs+inc
+H12.b_found WRITES ABSENT ls Fs
 """
 
 }
