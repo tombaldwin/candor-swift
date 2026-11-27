@@ -7,7 +7,9 @@ answer (the attribution gap) and why. Reads the IDM / IDX / IDMS records of the 
 `<entry>.probe` file per entry.
 
   agree          moduleOf == swiftModuleOf
-  disagree       both answer and differ (a target with `path:`; Kingfisher's single target is `Image`/`General`/`Utility`/`Views`)
+  disagree       moduleOf answers and swiftModuleOf differs. Printed in two parts: `heur-none` (the path heuristic has NO answer: the file is
+                 not under a `Sources/` or `Tests/` segment, e.g. Alamofire's `Source/`) and `differ` (both answer, differently: a target
+                 with `path:`; Kingfisher's single target is `Image`/`General`/`Utility`/`Views`)
   unattributed   moduleOf is nil: the reason is the `via` field (none:no-manifest, none:manifest-unclaimed:<dir>, manifest-ambiguous-target,
                  xcode-ambiguous:…)
 
@@ -66,10 +68,16 @@ print(f"{'entry':34s} {'files':>7s} {'agree':>7s} {'disagree':>9s} {'unattrib':>
 for entry, n, a, d, u, reasons, pairs, xc in rows:
     extra = []
     if u: extra.append("gap: " + ", ".join(f"{k}={v}" for k, v in reasons.most_common(3)))
-    if d: extra.append("differ: " + ", ".join(f"{m}!={s}x{k}" for (m, s), k in pairs.most_common(3)))
+    if d:
+        hn = sum(k for (m, s), k in pairs.items() if s == "-")
+        extra.append(f"heur-none={hn} differ={d - hn}")
+        both = [((m, s), k) for (m, s), k in pairs.most_common() if s != "-"][:3]
+        if both: extra.append("e.g. " + ", ".join(f"{m}!={s}x{k}" for (m, s), k in both))
     if xc and xc[0]: extra.append(f"VISIBLE-XCHECK {xc[0]}/{xc[1]} files differ e.g. {xc[2]}")
     print(f"{entry:34s} {n:7d} {a:7d} {d:9d} {u:9d}  " + "; ".join(extra))
 print(f"{'TOTAL':34s} {tot['files']:7d} {tot['agree']:7d} {tot['disagree']:9d} {tot['unattributed']:9d}")
+hn_all = sum(k for r in rows for (m, s), k in r[6].items() if s == "-")
+print(f"disagreements: {hn_all} where the path heuristic has no answer, {tot['disagree'] - hn_all} where both answer and differ")
 print("attribution gap reasons:", dict(reasons_tot))
 print("MemberImportVisibility over own modules:", dict(miv_tot))
 if pool:
