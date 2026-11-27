@@ -76,3 +76,19 @@ public struct ProdA26 {
     public static func make() -> Pair26 { Pair26() } }
 public struct UseP26 { public init() {}
     public func p_shared(_ p: String) { let q = ProdB26.make(); _ = q.src.put26(p) } }                     // WRITES (ProdB26's)
+// (g) a case payload bound from a pattern matched against `self`, where another enum shares the CASE NAME (the swift-certificates
+// `CertificateStore.Backing.custom` shape, exposed when the wrong-type edge that covered it at the callers went)
+public struct LoudStore26 { public init() {}
+    public mutating func put26(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
+public enum Back26 {
+    case custom(LoudStore26)
+    case none
+    public mutating func g_switch_self(_ p: String) { switch self { case .custom(var s): s.put26(p); self = .custom(s); case .none: break } }   // WRITES
+    public func g_if_case_self(_ p: String) { if case .custom(var s) = self { s.put26(p) } }                                             // WRITES
+}
+public enum OtherBack26 { case custom(Int); case none }
+public struct Alg26 { public init() {}
+    public func alg26(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }                // LOUD, top-level
+public struct Info26 { public init() {}; public var alg = Alg26() }
+public struct UseH26 { public init() {}
+    public func h_top_owner(_ p: String) { Info26().alg.alg26(p) } }                                                 // WRITES (top-level Alg26)

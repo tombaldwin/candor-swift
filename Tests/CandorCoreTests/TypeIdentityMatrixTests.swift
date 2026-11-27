@@ -278,6 +278,8 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Plain26.e_top", has: ["Body26.mark26"], hasNot: ["Mk26.mark26"]),
             E("Plain26.e_top_prop", has: ["Body26.markProp26"], hasNot: ["Mk26.markProp26"]),
             E("UseP26.p_shared", has: ["ProdB26.Src26.put26"]),
+            E("Back26.g_switch_self", hasNot: ["LoudStore26.put26"], lane: .l4, targetHas: ["LoudStore26.put26"]),
+            E("UseH26.h_top_owner", has: ["Alg26.alg26"], hasNot: ["NsH26.Alg26.alg26"]),
         ])
     }
 }

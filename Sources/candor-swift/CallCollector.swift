@@ -4692,6 +4692,11 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1499 — local DECLARED classes whose superclass chain leaves the scan at a platform (Objective-C) class
     /// and that spell no other foreign supertype (Driver `platformRootedClassesR1499`). Set once before collection.
     nonisolated(unsafe) static var platformRootedClassesR1499: Set<String> = []
+    /// SOUNDNESS R1938 lane L4 — enum path -> case -> its single payload type (Driver). `enumCaseValueType` is keyed by the CASE NAME
+    /// package-wide and drops a name two enums share (`custom`), so `switch self { case .custom(var inner): inner.append(…) }` inside
+    /// the enum bound nothing and the call was dropped (swift-certificates `CertificateStore.Backing.append`, exposed when lane L4
+    /// removed the wrong-type edge that covered it at its callers). A pattern matched against `self` names the enclosing enum's case.
+    nonisolated(unsafe) static var enumCaseByPathR1938: [String: [String: String]] = [:]
     /// SOUNDNESS R1499 — every property name a local type or extension declares (stored or computed).
     nonisolated(unsafe) static var localPropertyNamesR1499: Set<String> = []
     /// The `Self` spelling (row pending) §1b KILL SWITCH: `CANDOR_SELFCTOR_OFF=1` restores the literal `Self` root.
@@ -9155,6 +9160,20 @@ final class CallCollector: SyntaxVisitor {
     // `case .active(let c):` / `if case .active(let c) = …` — an enum case pattern is parsed as a call
     // `.active(let c)` (leading-dot member, a `let`-binding arg). Type the binding from the case's
     // associated value type so `c.method()` resolves (else it dropped to pure — a §4 under-report).
+    /// SOUNDNESS R1938 lane L4 — the payload type of case `c` when the pattern is matched against `self` (`switch self`, `if case
+    /// .c(let x) = self`) inside an enum that declares `c` with one payload (see `enumCaseByPathR1938`).
+    private func l4SelfCasePayloadR1938(_ node: FunctionCallExprSyntax, _ c: String) -> String? {
+        guard !Self.l4OffR1938, let ep = ai.enclosingTypePath ?? enclosingType, let m = Self.enumCaseByPathR1938[ep], let t = m[c] else { return nil }
+        func isSelf(_ e: ExprSyntax?) -> Bool { e.map { Self.peel($0).as(DeclReferenceExprSyntax.self)?.baseName.text == "self" } ?? false }
+        var cur: Syntax? = Syntax(node).parent
+        while let x = cur {
+            if let sw = x.as(SwitchExprSyntax.self) { return isSelf(sw.subject) ? t : nil }
+            if let mp = x.as(MatchingPatternConditionSyntax.self) { return isSelf(mp.initializer.value) ? t : nil }
+            if x.is(CodeBlockSyntax.self) || x.is(FunctionDeclSyntax.self) { return nil }
+            cur = x.parent
+        }
+        return nil
+    }
     private func typeEnumCaseBinding(_ node: FunctionCallExprSyntax) {
         guard let ma = node.calledExpression.as(MemberAccessExprSyntax.self), ma.base == nil else { return }
         // `t` is nil for an AMBIGUOUS or unknown case name — then the binding must be CLEARED, not left:
@@ -9191,7 +9210,7 @@ final class CallCollector: SyntaxVisitor {
         // `PatternExprSyntax`. The enclosing `case let` is exactly what makes the parser wrap a bound
         // identifier in a pattern node, so this cannot mistake a value being compared for a name being
         // bound.
-        let singleAssoc = node.arguments.count == 1 ? enumCaseValueType[ma.declName.baseName.text] : nil
+        let singleAssoc = node.arguments.count == 1 ? (enumCaseValueType[ma.declName.baseName.text] ?? l4SelfCasePayloadR1938(node, ma.declName.baseName.text)) : nil
         // SOUNDNESS R585 (b10) — the METATYPE payload, resolved from the metatype twin of the same
         // index and under the same arity rule. `case .c(let t) = h` where `case c(CBase.Type)`: the
         // ordinary map has nothing to say (`typeName` answers nil for a metatype), so the binder

@@ -521,6 +521,8 @@ final class DeclCollector: SyntaxVisitor {
     /// file scope: which type the head names is decided in this file's scope by the Driver (a dependency's `Lib`, here).
     var extensionConformancesR1938: [(type: String, proto: String)] = []
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
+    /// SOUNDNESS R1938 lane L4 — the same, per ENUM PATH (`typeStack` joined): enum path -> case -> payload type(s).
+    var caseAssocByEnumR1938: [String: [String: Set<String>]] = [:]
     /// SOUNDNESS R585 (b10) — the METATYPE twin of `caseAssoc`: `case c(CBase.Type)`. Same
     /// single-value, unambiguous-name discipline; separate map for `globalMetatypes`' reason.
     var caseAssocMetatype: [String: Set<String>] = [:]
@@ -1176,6 +1178,7 @@ final class DeclCollector: SyntaxVisitor {
             }
             guard let t = typeName(params.first!.type).name else { continue }
             caseAssoc[el.name.text, default: []].insert(t)
+            if !typeStack.isEmpty { caseAssocByEnumR1938[typeStack.joined(separator: "."), default: [:]][el.name.text, default: []].insert(t) }
         }
         return .visitChildren
     }

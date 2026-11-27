@@ -42,3 +42,9 @@ public struct ProdB26 {
         public func put26(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return 0 } }   // LOUD
     public struct Pair26 { public init() {}; public var src = Src26() }
     public static func make() -> Pair26 { Pair26() } }
+// (h) an OWNER simple name two declarations share, only ONE of which nests its field's type (swift-crypto `ASN1.SubjectPublicKeyInfo`
+// beside CryptoExtras' top-level `SubjectPublicKeyInfo`): the nested one's binding must not retype the top-level one's field
+public enum NsH26 {
+    public struct Alg26 { public init() {}
+        public func alg26(_ p: String) -> Int { p.count } }                                                       // PURE, nested
+    public struct Info26 { public init() {}; public var alg = Alg26() } }

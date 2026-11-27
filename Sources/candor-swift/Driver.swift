@@ -442,6 +442,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var storedFieldsR1490: [String: [String]] = [:]           // SOUNDNESS R1490 residual (2)
     var codingKeysR1490: [String: Set<String>] = [:]          // SOUNDNESS R1490 residual (2)
     var caseAssocAll: [String: Set<String>] = [:]
+    var caseAssocByEnumAllR1938: [String: [String: Set<String>]] = [:]   // SOUNDNESS R1938 lane L4 (see CallCollector.enumCaseByPathR1938)
     var caseAssocMetatypeAll: [String: Set<String>] = [:]   // R585 (b10)
     var staticFactoryFields: [(type: String, field: String, leaf: String)] = []
     // R73 — module-scope global NAME -> its concrete type, scoped by MODULE (not merged flat like `fields`)
@@ -1099,6 +1100,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, fs) in c.storedFieldsR1490 where storedFieldsR1490[t] == nil { storedFieldsR1490[t] = fs }   // R1490 residual (2)
         for (t, ks) in c.codingKeysR1490 { codingKeysR1490[t, default: []].formUnion(ks) }                 // R1490 residual (2)
         for (cn, ts) in c.caseAssoc { caseAssocAll[cn, default: []].formUnion(ts) }
+        for (ep, m) in c.caseAssocByEnumR1938 { for (cn, ts) in m { caseAssocByEnumAllR1938[ep, default: [:]][cn, default: []].formUnion(ts) } }
         for (cn, ts) in c.caseAssocMetatype { caseAssocMetatypeAll[cn, default: []].formUnion(ts) }   // R585
         for (pn, ms) in c.protocolMethods { protocolMethods[pn, default: []].formUnion(ms) }
         protocolFnTypedMembers.formUnion(c.protocolFnTypedMembers)   // R563
@@ -2836,6 +2838,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // the same "never guess on an ambiguous leaf" discipline as the returns index.
     var enumCaseValueType: [String: String] = [:]
     for (cn, ts) in caseAssocAll where ts.count == 1 { enumCaseValueType[cn] = ts.first! }
+    // SOUNDNESS R1938 lane L4 — per enum PATH, for a pattern matched against `self` inside that enum (see `typeEnumCaseBinding`)
+    if !CallCollector.l4OffR1938 {
+        var byPath: [String: [String: String]] = [:]
+        for (ep, m) in caseAssocByEnumAllR1938 { for (cn, ts) in m where ts.count == 1 { byPath[ep, default: [:]][cn] = ts.first! } }
+        CallCollector.enumCaseByPathR1938 = byPath
+    }
     // SOUNDNESS R585 (b10) — the metatype twin, under the SAME unambiguity rule. A case name that is a
     // metatype in one enum and an ordinary type in another is ambiguous ACROSS the two maps, so it is
     // dropped from both rather than answered twice.
@@ -5026,7 +5034,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             let ms = l2PathModulesR1950[inner] ?? []
                             let vis = l2.idx.visibleModules(inFile: c.file)
                             if !ms.contains("\u{0}unattributed"), ms.contains(m) || !ms.isDisjoint(with: vis) {
-                                for key in Set([ty, path]) where fields[key]?[fname]?.name == sp && sp == bare {
+                                // lane L4: a SIMPLE key that several declared types share (`SubjectPublicKeyInfo`: swift-crypto's
+                                // `ASN1.SubjectPublicKeyInfo` and CryptoExtras' top-level one) is not this declaration's alone, and
+                                // the other one may record no innermost answer at all; only the PATH key takes the rewrite there
+                                for key in Set([ty, path]) where fields[key]?[fname]?.name == sp && sp == bare
+                                    && !(key == ty && ty != path && (typePathsBySimple[ty]?.count ?? 0) > 1) {
                                     // lane L4: a SIMPLE key two declarations share (`NewSequence` in both async producers)
                                     // must not take one declaration's answer: two different inners poison the key, which keeps
                                     // main's union (measured on the pool: swift-nio's `copyRequiredQueue.source.yield` lost the

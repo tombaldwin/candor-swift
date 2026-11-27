@@ -32,3 +32,6 @@ propCell("Tbl26.e_field_prop") { _ = Tbl26().e_field_prop("") }
 propCell("Tbl26.e_local_prop") { _ = Tbl26().e_local_prop("") }
 propCell("Plain26.e_top_prop") { _ = Plain26().e_top_prop("") }
 cell("UseP26.p_shared") { UseP26().p_shared($0) }
+cell("Back26.g_switch_self") { var b = Back26.custom(LoudStore26()); b.g_switch_self($0) }
+cell("Back26.g_if_case_self") { Back26.custom(LoudStore26()).g_if_case_self($0) }
+cell("UseH26.h_top_owner") { UseH26().h_top_owner($0) }

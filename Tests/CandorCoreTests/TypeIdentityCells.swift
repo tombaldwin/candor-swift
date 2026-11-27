@@ -474,6 +474,9 @@ Tbl26.e_field_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
 Tbl26.e_local_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
 Plain26.e_top_prop pure ABSENT|ABSENT|ABSENT
 UseP26.p_shared WRITES Fs+inc|Fs+inc|Fs+inc # must not move: a SIMPLE key two files' declarations share (ProdA26/ProdB26.Pair26) keeps main's union; a439c1e bound the last writer (ABSENT)
+Back26.g_switch_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs # a case payload bound against `self` where another enum shares the case name (main: hedged; v0.43.0 ABSENT)
+Back26.g_if_case_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs
+UseH26.h_top_owner WRITES Fs+inc|Fs+inc|Fs+inc # must not move: an OWNER simple name shared with a nested type that nests the field's type; 996abe9 read ABSENT
 """
 
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling
