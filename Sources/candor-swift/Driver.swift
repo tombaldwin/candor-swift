@@ -4749,6 +4749,27 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SOUNDNESS R1950 (lane L2) — see `Call.innerR1950`: a candidate unit of a DIFFERENT dotted type with the same leaf as the
     /// innermost nested type is not this constructor's. Kept: the innermost type's own units (either spelling of an own-module
     /// qualifier), any unit of another leaf, and any unit whose owner is a bare name (an `extension N` head may be the nested type).
+    /// …and ONLY where the innermost type has a unit of its OWN among the candidates. Where it has none (its initializer is inherited
+    /// or synthesized), the other types' units are main's over-approximation of an edge the engine does not draw (measured on the pool:
+    /// SwiftLint `DuplicateImportsRule.Rewriter` inherits `ViolationsSyntaxRewriter.init`, an `Unknown` the wrong union carried), so the
+    /// call keeps main's candidates.
+    func r1950Owner(_ t: String) -> String? {
+        let q = t.prefix { $0 != "(" && $0 != "#" }
+        guard let dot = q.lastIndex(of: ".") else { return nil }
+        return String(q[..<dot])
+    }
+    func r1950SameType(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        let strip = l2IndexR1938?.stripOwnModule
+        return (strip?(a) ?? a) == (strip?(b) ?? b)
+    }
+    /// The innermost type has units of its own under the member (`<inner>.init…`): found either among the leaf-keyed candidates or
+    /// under its full path (an inline nested type's init is filed `Outer12.Data.init`, which `resolveQual("Data.init")` does not list).
+    func r1950Active(_ ts: [String], _ call: Call, member: String) -> Bool {
+        guard let inner = call.innerR1950 else { return false }
+        if ts.contains(where: { r1950Owner($0).map { r1950SameType($0, inner) } ?? false }) { return true }
+        return !resolveQual("\(inner).\(member)").isEmpty || overloadedBasesPath.contains("\(inner).\(member)")
+    }
     func r1950KeepsTarget(_ t: String, _ call: Call) -> Bool {
         guard let inner = call.innerR1950 else { return true }
         let q = t.prefix { $0 != "(" && $0 != "#" }
@@ -6683,10 +6704,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // SOUNDNESS R1938 (lane L2) — see `l2KeepsTargetR1938`: a receiver the unit reads as a NON-scan type reaches
                 // only the units that extend that type; when none is left the chain below answers as for an undeclared type.
                 let l2n = l2NameR1938(call)
-                let l2Keep: (String) -> Bool = { t in (l2n.map { l2KeepsTargetR1938(t, $0) } ?? true) && r1950KeepsTarget(t, call) }
+                let r1950On = r1950Active(resolveQual(call.path) + matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc))
+                    + matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)), call,
+                    member: String(call.path.split(separator: ".").last ?? Substring(call.leaf)))
+                let l2Keep: (String) -> Bool = { t in (l2n.map { l2KeepsTargetR1938(t, $0) } ?? true) && (!r1950On || r1950KeepsTarget(t, call)) }
                 let typedTargets = resolveQual(call.path).filter(l2Keep)   // hoisted: the else-if chain below reads it once
-                let l2OverPath = (l2n == nil && call.innerR1950 == nil) || matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
-                let l2Over = (l2n == nil && call.innerR1950 == nil) || matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
+                let l2OverPath = (l2n == nil && !r1950On) || matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
+                let l2Over = (l2n == nil && !r1950On) || matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
                 if !CallCollector.aiOff, !overloadedBases.contains(call.path), overloadedBasesPath.contains(call.path), l2OverPath {
                     // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
                     for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) where l2Keep(t) {
@@ -7048,7 +7072,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // SOUNDNESS R1938 (lane L2) — for a NON-platform name the extension exception holds only where an extension of the
                 // same non-scan type declares an init (`l2KeepsTargetR1938`); the scan's own `Lib.init` is not this call's
                 let l2CtorN = l2NameR1938(call).flatMap { $0 == call.path ? $0 : nil }
-                let l2CtorKeep: (String) -> Bool = { t in (l2CtorN.map { l2KeepsTargetR1938(t, $0) } ?? true) && r1950KeepsTarget(t, call) }
+                let r1950CtorOn = r1950Active(resolveQual("\(call.path).init")
+                    + matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)), call, member: "init")
+                let l2CtorKeep: (String) -> Bool = { t in (l2CtorN.map { l2KeepsTargetR1938(t, $0) } ?? true) && (!r1950CtorOn || r1950KeepsTarget(t, call)) }
                 let l2CtorForeign = l2CtorN != nil && !(resolveQual("\(call.path).init")
                     + matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc))).contains(where: l2CtorKeep)
                 let lsCtorR1938 = (call.lsNameR1938 != nil && call.lsNameR1938 == call.path && !lsExtendedTopLevelR1938.contains(call.path))
@@ -7246,7 +7272,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         if extensionInitLabelsAdmit(call, t) { edges[f.qual, default: []].insert(t); admitted += 1 }
                         resolved = true
                     }
-                    if call.innerR1950 != nil { resolved = true }   // R1950: a scan type's construction, whatever the filter left
+                    if r1950CtorOn { resolved = true }   // R1950: a scan type's construction, whatever the filter left
                     if admitted == 0 { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                 } else if localCtorR1938 {
                     // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
