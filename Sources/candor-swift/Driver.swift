@@ -556,7 +556,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var localGenerics = LocalGenericFacts()                      // SOUNDNESS R1044 residual
     var metatypeReturnsTmp: [String: String?] = [:]
     var importCounts: [String: Int] = [:]
-    var fileImports: [String: [String]] = [:]   // file (rel path) -> modules it imports (per-fn blind disclosure)
+    var fileImports = FileImportsR1981()   // file (rel path) -> modules it imports (per-fn blind disclosure); R1981: a call's B3 overlay
     /// ⟨0.39⟩ spelled inherited-type path -> the FILES whose conformances named it. Obligation 2 keys a
     /// foreign abstraction's union entry under the OWNING package, and the only evidence a Swift
     /// conformance carries about the owner is its file's import list — see `foreignOwnerModule`.
@@ -1176,7 +1176,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let facts = moduleIdentityFacts(sourcePaths: sourcePaths, rootDir: rootDir, owningPackage: { owningPackage(of: $0) },
                                         owningTarget: { owningTarget(of: $0, in: $1) }, xcodeModulesByFile: xcodeModulesByFile,
                                         swiftModuleOf: { swiftModuleOf($0) })
-        emitModuleIdentityProbe(facts, imports: fileImports, exported: identExportedByFile, reexports: deps.moduleReexports,
+        emitModuleIdentityProbe(facts, imports: fileImports.store, exported: identExportedByFile, reexports: deps.moduleReexports,
                                 manifestSource: { try? String(contentsOfFile: ($0 as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) })
     }
     // SOUNDNESS R1105 audit (swiftagent-audit1105) — THE GETTER VIEW IS A PROPERTY OF THE QUAL. A read of `T.p` edges
@@ -2251,7 +2251,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var lgByImports: [[String]: LocalGenericFacts] = [:]
     func localGenericsFor(file: String) -> LocalGenericFacts {
         guard !r1072Off else { return localGenerics }
-        var closure = Set<String>(), queue = (fileImports[file] ?? []).filter {
+        var closure = Set<String>(), queue = (fileImports.store[file] ?? []).filter {   // R1981: the file's own imports
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !(ownTargetsByFile[file] ?? []).contains($0)
         }
         while let x = queue.popLast() {
@@ -2906,7 +2906,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // chain would have taken as covered (its owner is chained) but no Swift report can contain, and a
     // re-exported module the file never names. An unchanged A/B row is not evidence the branch ran.
     if Env.trace("CANDOR_R827_PROBE") {
-        for (file, imports) in fileImports.sorted(by: { $0.key < $1.key }) {
+        for (file, imports) in fileImports.store.sorted(by: { $0.key < $1.key }) {
             for m in imports where deps.notSwiftCoverable.contains(m)
                                    && deps.isChained(deps.notSwiftOwner[m] ?? deps.pkgOfModule(m)) {
                 FileHandle.standardError.write("R827HIT \(file) \(m)\n".data(using: .utf8)!)
@@ -2917,7 +2917,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
     }
-    for file in fileImports.keys {
+    for file in fileImports.store.keys {
         let imports = effectiveImports(file)   // R827 — re-exported modules count too
         let importable = importableByFile[file] ?? []
         for m in imports where !PLATFORM_MODULES.contains(m) && !KAPPA_MODULES.contains(m)
@@ -3017,7 +3017,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     func foreignOwnerModule(inFile file: String) -> String? {
         let declared = declaredByFile[file] ?? [], importable = importableByFile[file] ?? []
         let ownTargets = ownTargetsByFile[file] ?? []                              // R592
-        let raw = (fileImports[file] ?? []).filter {
+        // SOUNDNESS R1981 — the OWNER of a declared value's type is the declaring file's answer: a B3 overlay adds only modules
+        // that may supply an extension member, and counting them here would make the owner ambiguous (fx22-unr `C22.c_field`: no
+        // key) or name a module that extends the type rather than the one that declares it.
+        let raw = (fileImports.store[file] ?? []).filter {
             declared.contains($0) && !importable.contains($0)
                 && !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0)
         }
@@ -3105,7 +3108,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// The modules `file` can NAME through an import: its own imports and every `@_exported import` closure beneath them.
     func importClosure(_ file: String) -> [String] {
         var seen = Set<String>(), order: [String] = []
-        var queue = Array((fileImports[file] ?? []).reversed())
+        var queue = Array((fileImports.store[file] ?? []).reversed())   // R1981: the file's own imports (alias spellings)
         while let x = queue.popLast() {
             guard seen.insert(x).inserted else { continue }
             order.append(x)
@@ -3335,7 +3338,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// `foreignIdentity` (SOUNDNESS R1938, lanes L2/L3): the call's scope read the owner's name "as if undeclared" (`l2NameR1938`),
     /// so the package-wide `localTypes`/`declaredTypes` hit is ANOTHER type of that name, not evidence the call stays in this scan.
     func sourceProvenDepModules(of spelled: String, inFile file: String, extendedInit: Bool = false, foreignIdentity: Bool = false) -> Set<String> {
-        let ck = "\(file)\u{0}\(spelled)\(extendedInit ? "\u{0}i" : "")\(foreignIdentity ? "\u{0}f" : "")"   // R1492: see `unreadableDepModules`
+        let ck = "\(file)\u{0}\(spelled)\(extendedInit ? "\u{0}i" : "")\(foreignIdentity ? "\u{0}f" : "")\(fileImports.cacheTag(file))"   // R1492: see `unreadableDepModules`; R1981
         if let c = sourceProvenCache[ck] { return c }
         var segs = spelled.split(separator: ".").map(String.init)
         let imports = fileImports[file] ?? []
@@ -4472,7 +4475,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     func crossModuleGlobalTypes(forFile file: String, ownModule: String) -> [String: String] {
         if let cached = crossModuleGlobalTypesCache[file] { return cached }
         let ownGlobals = globalTypesByModule[ownModule] ?? [:]
-        let imported = Set(fileImports[file] ?? []).intersection(projectModules).subtracting([ownModule])
+        let imported = Set(fileImports.store[file] ?? []).intersection(projectModules).subtracting([ownModule])   // R1981: own globals
         var extra: [String: String] = [:]
         if !imported.isEmpty {
             var byName: [String: (type: String, moduleCount: Int)] = [:]
@@ -4646,7 +4649,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                         swiftModuleOf: { swiftModuleOf($0) })
         var moduleOf: [String: String] = [:]
         for f in facts { if let m = f.module { moduleOf[f.rel] = m } }
-        let idx = ModuleIdentityIndex(moduleOfFile: moduleOf, importsByFile: fileImports, exportedByFile: identExportedByFile,
+        let idx = ModuleIdentityIndex(moduleOfFile: moduleOf, importsByFile: fileImports.store, exportedByFile: identExportedByFile,
                                       dependencyReexports: deps.moduleReexports)
         var tops: [String: Set<String>] = [:], privAliases: [String: Set<String>] = [:]
         for c in collectors {
@@ -5063,7 +5066,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// `deny E Unknown` gate sees (fx4-unr's nested-only `Vault`, fx16-unr). True by construction for exactly those calls.
     var l2ForeignCacheR1938: [String: Bool] = [:]
     func l2IdentityForeignR1938(_ n: String, inFile file: String) -> Bool {
-        let key = file + "\u{0}" + n
+        let key = file + "\u{0}" + n + fileImports.cacheTag(file)   // R1981
         if let c = l2ForeignCacheR1938[key] { return c }
         var foreign = false
         let imports = Set(fileImports[file] ?? [])
@@ -5089,6 +5092,96 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let keep = !file.isEmpty && l2.decide(file: file, enclosingPath: nil, generics: [], bodyDecls: [], only: [n]).ok.contains(n)
         l2KeepCacheR1938[key] = keep
         return keep
+    }
+    // SOUNDNESS R1981 (type-identity lane B3) — THE FILE AND IMPORTS A DECLARED VALUE'S CALL IS ROUTED THROUGH (see
+    // `FileImportsR1981`). The value's type is a fact of its DECLARATION, so a call on it is evaluated in the declaring file
+    // whatever the use file imports; the use site adds only the modules that can supply an EXTENSION member of the receiver's type:
+    //   · the modules Swift makes visible for member lookup at the use site — the use TARGET's import closure (module-wide, plus
+    //     `@_exported`), or the use file's own under `MemberImportVisibility` (`b3MemberLookupModulesR1981`);
+    //   · minus own modules (an own extension is a scan unit, found without an import) and the declaring file's imports;
+    //   · minus a module that declares a top-level type of the receiver's name (its readable sources, a chained report's published
+    //     types, or κ's dependency roots): that module is the TWIN the use file's own lookup bound, never the value's type;
+    //   · and of the rest, a module the use file itself imports (main read the call there, so nothing it reached is dropped), or one
+    //     whose sources or chained report show the extension member (`extension N { func leaf }` / `<pkg>#N.leaf`).
+    // A receiver with no recorded name keeps L3's rule. Kill switch `CANDOR_TYPE_ID_B3_OFF` (also off with L3's).
+    let b3OffR1981 = CallCollector.l3OffR1938 || Env.on("CANDOR_TYPE_ID_B3_OFF")
+    var b3MivCacheR1981: [String: [String: MemberImportVisibilitySetting]] = [:]
+    func b3MemberLookupModulesR1981(_ use: String) -> Set<String> {
+        guard let idx = l2IndexR1938?.idx else { return Set(fileImports.store[use] ?? []) }
+        guard let m = idx.moduleOf(use) else { return idx.visibleModules(inFile: use) }
+        if let pkg = owningPackage(of: candorAbsolutePath((rootDir as NSString).appendingPathComponent(use))) {
+            if b3MivCacheR1981[pkg] == nil {
+                b3MivCacheR1981[pkg] = (try? String(contentsOfFile: (pkg as NSString).appendingPathComponent("Package.swift"), encoding: .utf8))
+                    .map(parsePackageMemberImportVisibility(manifestSource:)) ?? [:]
+            }
+            if b3MivCacheR1981[pkg]?[m] == .enabled { return idx.visibleModules(inFile: use) }
+        }
+        return idx.targetVisibleModules(ofModule: m)
+    }
+    func b3ReexportClosureR1981(_ m: String) -> Set<String> {
+        var closure = Set<String>(), queue = [m]
+        while let x = queue.popLast() {
+            guard closure.insert(x).inserted else { continue }
+            queue.append(contentsOf: deps.moduleReexports[x] ?? [])
+        }
+        return closure
+    }
+    /// Does module `m` (or a module it re-exports) declare a top-level type `n`? nil = no evidence either way (unreadable, unchained).
+    func b3DeclaresTypeR1981(_ m: String, _ n: String) -> Bool? {
+        if KAPPA_DEPENDENCY_ROOTS[n]?.contains(m) == true { return true }
+        var unknown = false
+        for x in b3ReexportClosureR1981(m).sorted() {
+            if let md = moduleDeclarations(x) {
+                if md.names[n] != nil { return true }
+                if md.opaque { unknown = true }
+                continue
+            }
+            let p = deps.pkgOfModule(x)
+            if deps.isChained(p) {
+                if deps.mentionedTypes.contains("\(p)#\(n)") || deps.surface.typeKeysSeen.contains("\(p)#\(n)") { return true }
+            } else { unknown = true }
+        }
+        return unknown ? nil : false
+    }
+    func b3ExtendsR1981(_ m: String, _ n: String, _ leaf: String) -> Bool {
+        for x in b3ReexportClosureR1981(m).sorted() {
+            if moduleExtensionMembers(x)?[n]?[leaf] == true { return true }
+            let p = deps.pkgOfModule(x)
+            if deps.isChained(p), deps.lookup("\(p)#\(n).\(leaf)") != nil { return true }
+        }
+        return false
+    }
+    /// R1066 names the module that DECLARES the receiver's type and stops there (R1071's extension arm answers only when none
+    /// does). Under a B3 overlay the declaring file sees the type's module AND the use site's extension modules, so the module
+    /// that EXTENDS the type with this member is named beside it (fx24 `UX24.ext_pipe`: `invisible:[DepA, DepAX]`, as the use
+    /// file read it on main), not dropped because the declaring module answered first. Empty outside a B3 overlay.
+    func b3ExtendingR1981(_ owner: String, _ leaf: String, _ file: String) -> Set<String> {
+        guard let o = fileImports.overlay, o.file == file else { return [] }
+        return sourceExtendingDepModules(of: owner, member: leaf, inFile: file)
+    }
+    func b3CallFileR1981(_ call: Call, _ f: FnInfo) -> String? {
+        fileImports.overlay = nil
+        if b3OffR1981 { return l3CallFileR1938(call, f) }
+        guard let d = call.declFileR1938 else { return nil }
+        let use = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        guard d != use else { return nil }
+        guard let raw = call.lsNameR1938 ?? call.extOwner,
+              case let n = String(raw.split(separator: ".").last ?? ""), n.first?.isUppercase == true
+        else { return l3CallFileR1938(call, f) }
+        let declImps = fileImports.store[d] ?? []
+        let useImps = Set(fileImports.store[use] ?? [])
+        let own = (l2IndexR1938?.idx.ownModules ?? []).union(projectModules)
+        var extra: [String] = [], twins: [String] = []
+        for m in b3MemberLookupModulesR1981(use).union(useImps).subtracting(declImps).sorted() where !own.contains(m) {
+            let platform = PLATFORM_MODULES.contains(m) || KAPPA_MODULES.contains(m)
+            if b3DeclaresTypeR1981(m, n) == true { twins.append(m); continue }
+            if useImps.contains(m) || (!platform && b3ExtendsR1981(m, n, call.leaf)) { extra.append(m) }
+        }
+        if !extra.isEmpty { fileImports.overlay = (d, declImps + extra) }
+        if lsProbeOnR1938 {
+            lsProbeR1938("IDB3\t\(f.qual)\t\(n).\(call.leaf)\t\(use)\t->\t\(d)\textra=\(extra.joined(separator: ","))\ttwins=\(twins.joined(separator: ","))")
+        }
+        return d
     }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
@@ -5799,7 +5892,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                       let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
                                                          && call.leaf == "init" && owner == f.enclosingType,
                                                      foreignIdentity: l2ForeignOwnerR1938(call, owner))
-                      return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                      return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t.union(b3ExtendingR1981(owner, call.leaf, file))   // R1981
                   }(), !mods.isEmpty {
             // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
             // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
@@ -6542,7 +6635,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
-            callFileOverrideR1938 = l3CallFileR1938(call, f)   // SOUNDNESS R1938 (lane L3)
+            callFileOverrideR1938 = b3CallFileR1981(call, f)   // SOUNDNESS R1938 (lane L3); R1981 (lane B3)
             // SOUNDNESS R1938 (lane L2) — the `identity:foreign` arm (see `l2IdentityForeignR1938`), on a MEMBER call only (the
             // constructor of the same receiver is the binding, not a dispatch).
             if let n = l2NameR1938(call), !call.unqualified, call.path != n, call.leaf != "init", call.leaf != n {
@@ -8484,7 +8577,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                               let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
                                                                  && call.leaf == "init" && owner == f.enclosingType,
                                                              foreignIdentity: l2ForeignOwnerR1938(call, owner))
-                              return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
+                              return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t.union(b3ExtendingR1981(owner, call.leaf, file))   // R1981
                           }(), !mods.isEmpty {
                     // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
                     // SOUNDNESS R1066 — A MEMBER CALL ON A RECEIVER WHOSE TYPE A BLIND DEPENDENCY'S OWN SOURCES DECLARE
@@ -8636,6 +8729,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         callFileOverrideR1938 = nil   // SOUNDNESS R1938 (lane L3) — the override is per CALL; see `l3CallFileR1938`
+        fileImports.overlay = nil     // SOUNDNESS R1981 (lane B3) — and so is its import overlay
 
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
         // method; resolve ≤12 conformers, otherwise honest Unknown.

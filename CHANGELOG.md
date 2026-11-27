@@ -10,6 +10,22 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A declared value's call is routed by its declaration in every use file (SOUNDNESS R1981, type-identity lane B3)
+
+Lane L3 evaluated a call on a field, global, declared return or callee-typed closure parameter in the DECLARING file only when the use
+file imported nothing the declaring file did not; otherwise the use file's own imports re-resolved the value's type. A use file that
+imports a dependency declaring a same-named twin routed the member to the twin (executed, `TypeIdentity/fx23` `UB23.field_kit`: a pure
+`DepA.Kit23.tap23` charged `Fs` chained through `DepB#Kit23.tap23` on v0.43.0 and main), and one importing an own module with a twin
+dropped the call (`UC23.field_lib`: ABSENT chained over an executed write). The call is now always evaluated in the declaring file. The
+use site contributes only the modules that can supply an EXTENSION member of the receiver's type: the use target's import closure
+(module-wide plus `@_exported`; the use file's own imports under `MemberImportVisibility`), minus own modules and minus any module that
+declares a top-level type of the receiver's name (readable sources, a chained report's published types, κ's dependency roots), keeping
+a module the use file imports and adding one whose sources or chained report show the extension member. Under that overlay R1066 names
+the extending module beside the declaring one, and obligation 1's owner module is the declaring file's. Attack fixture
+`TypeIdentity/fx24` (44 executed cells: field, global, factory return, local, parameter field and T4 closure parameter from use files
+importing a twin dependency, an own twin module, a twin plus an extending third package, both modules, and a declaration in another
+own module). Kill switch `CANDOR_TYPE_ID_B3_OFF` (L3's import-subset rule; also off under `CANDOR_TYPE_ID_L3_OFF`).
+
 ### ⚠ A field, global, declared return or callee-typed closure parameter reads the type its DECLARATION names (SOUNDNESS R1938 lane L3, R1927, R1928)
 
 Lane L2 decided a type spelling in the unit that wrote it. A field, a global, a declared return and a closure parameter typed from its

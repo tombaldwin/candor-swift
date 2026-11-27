@@ -207,4 +207,32 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("B22.b_nested", has: ["Lib22.wipe22"]),
         ])
     }
+
+    /// fx23 (Fable's L3 review) and fx24 (lane B3, SOUNDNESS R1981): a declared value's call routed by its DECLARATION from use files
+    /// whose imports are not a subset of the declaring file's. Beyond the readings, the MODULE is pinned: once B3 has landed no row
+    /// names the twin-declaring DepB, in `invisible` or `dispatchesOn`, for a value whose type is DepA's (main names DepB on both).
+    func testFx23_Fx24_B3RoutedByDeclaration() throws {
+        let st = try H.stage(Self.self); defer { st.cleanup() }
+        let a23 = try H.run(X.fx23, in: st, label: "fx23")
+        let a24 = try H.run(X.fx24, in: st, label: "fx24")
+        guard TypeIdentityTarget.expect.contains(.b3) else { return }
+        let routed = ["UB23.field_lib", "UB23.field_kit", "UB23.ret_lib", "UB24.field_lib", "UB24.field_kit", "UB24.global_lib",
+                      "UB24.global_kit", "UB24.ret_lib", "UB24.ret_kit", "UB24.local_lib", "UB24.local_kit", "UB24.param_lib",
+                      "UB24.param_kit", "UB24.closure_lib", "UB24.closure_kit", "UB24.ext_lib", "UX24.field_lib", "UX24.field_kit",
+                      "UX24.ext_lib", "UAB24.field_lib", "UAB24.field_kit", "UAB24.ret_lib", "UXC24.tool", "UXC24.gear"]
+        for (label, arms) in [("fx23", a23), ("fx24", a24)] {
+            for (arm, scan) in [("un", arms.un), ("ch", arms.ch)] + (arms.unr.map { [("unr", $0)] } ?? []) {
+                for fn in routed where (label == "fx23") == fn.contains("23.") {
+                    guard let r = scan.rows[fn] else { XCTFail("\(label) \(fn) \(arm): no row"); continue }
+                    XCTAssertFalse(r.invisible.contains("DepB"), "\(label) \(fn) \(arm): names the twin DepB in invisible \(r.invisible)")
+                    XCTAssertFalse(r.dispatchesOn.contains { $0.hasPrefix("DepB#") }, "\(label) \(fn) \(arm): keyed on the twin \(r.dispatchesOn)")
+                    XCTAssertTrue(r.dispatchesOn.contains { $0.hasPrefix("DepA#") }, "\(label) \(fn) \(arm): the declaration's module DepA must key the member \(r.dispatchesOn)")
+                }
+            }
+        }
+        // the extension member a third package supplies is named beside the type's module standalone (R1066 + R1071 under B3)
+        for fn in ["UX24.ext_pipe", "UX24.ext_lib", "UXC24.ext_pipe"] {
+            XCTAssertTrue(a24.un.rows[fn]?.invisible.contains("DepAX") ?? false, "fx24 \(fn) un: DepAX supplies the member: \(a24.un.rows[fn]?.invisible ?? [])")
+        }
+    }
 }

@@ -466,4 +466,77 @@ C22.c_ext WRITES -+inv|Fs+inc|-+inv
 W22.w_witness WRITES Fs+inc|Fs+inc|Fs+inc # a dependency type conforming to a scan protocol by a scan extension whose member is the witness (pool: vapor FormDataEncoder); round 1 dropped it to -+U
 """
 
+    // lane B3 (SOUNDNESS R1981): Fable's fx23. decl.swift imports DepA only and declares every binder; useB.swift imports DepB
+    // (same-named twins, opposite loudness), useC.swift an own module Core23 with a pure `Lib23`. The value's type is DepA's in
+    // every use file. `b3` targets: lib cells charge chained, kit mirrors lose DepB's write (the pure-only DepA entry keeps `-+U`).
+    static let fx23 = """
+UB23.field_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+U+inv
+UB23.field_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv # Fable's fabrication: DepB's loud tap23 on DepA's pure Kit23
+UB23.bare_lib pure -+inv|-+U|-+inv
+UB23.bare_kit WRITES -+inv|Fs+inc|-+inv
+UB23.ret_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+U+inv
+UC23.field_lib WRITES -+inv|ABSENT|-+inv b3 -+inv|Fs+inc|-+U+inv # Fable's silence: the own pure twin
+UC23.bare_lib pure ABSENT|ABSENT|ABSENT
+UT23.t4_overload_lib WRITES -+U+inv|-+U|-+U+inv
+UT23.t4_overload_kit pure -+U+inv|-+U|-+U+inv
+UT23.t4_generic WRITES -+U+inv|-+U|-+U+inv
+UT23.t4_shadow pure -+U+inv|-+U|-+U+inv
+W23.w_default WRITES Fs+U+inc|Fs+U+inc|Fs+U+inc
+W23.w_refined WRITES Fs+U+inc|Fs+U+inc|Fs+U+inc
+W23.w_cond WRITES Fs+U+inc|Fs+U+inc|Fs+U+inc
+W23.live WRITES -+inv|Fs+inc|-+inv
+"""
+
+    // lane B3 (SOUNDNESS R1981) attack matrix: every binder (field, global, factory return, a local bound from a field, a parameter's
+    // field, a T4 closure parameter) declared in decl.swift (imports DepA) and called from use files whose imports are NOT a subset
+    // of decl.swift's: useB (DepB twins), useC (own Core24 twins), useX (DepB + DepAX, the module of a third package ExtA extending DepA's types),
+    // useAB (DepA + DepB), useXC (the declaration in ANOTHER own module, Core24/hc.swift). useN (no imports) is L3's subset case,
+    // here only for the extension members DepAX supplies through a sibling's import. Each loud `*_lib` has its pure `*_kit` mirror.
+    static let fx24 = """
+UB24.field_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.field_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UB24.global_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.global_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UB24.ret_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.ret_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UB24.local_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.local_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UB24.param_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.param_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UB24.closure_lib WRITES -+U+inv|-+U|-+U+inv b3 -+U+inv|Fs+U+inc|-+U+inv
+UB24.closure_kit pure -+U+inv|Fs+U+inc|-+U+inv b3 -+U+inv|-+U/-|-+U+inv
+UB24.ext_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UB24.bare_lib pure -+inv|-+U|-+inv
+UB24.bare_kit WRITES -+inv|Fs+inc|-+inv
+UC24.field_lib WRITES -+inv|ABSENT|-+inv b3 -+inv|Fs+inc|-+inv
+UC24.field_kit pure -+inv|ABSENT|-+inv b3 -+inv|-+U/-|-+inv
+UC24.global_lib WRITES -+inv|ABSENT|-+inv b3 -+inv|Fs+inc|-+inv
+UC24.global_kit pure -+inv|ABSENT|-+inv b3 -+inv|-+U/-|-+inv
+UC24.ret_lib WRITES -+inv|ABSENT|-+inv b3 -+inv|Fs+inc|-+inv
+UC24.ret_kit pure -+inv|ABSENT|-+inv b3 -+inv|-+U/-|-+inv
+UC24.param_lib WRITES ABSENT|ABSENT|ABSENT b3 -+inv|Fs+inc|-+inv
+UC24.param_kit pure ABSENT|ABSENT|ABSENT b3 -+inv|-+U/-|-+inv
+UC24.closure_lib WRITES -+U+inv|-+U|-+U+inv b3 -+U+inv|Fs+U+inc|-+U+inv
+UC24.closure_kit pure -+U+inv|-+U|-+U+inv
+UC24.bare_lib pure ABSENT|ABSENT|ABSENT
+UC24.bare_kit WRITES Fs+inc|Fs+inc|Fs+inc
+UX24.ext_pipe WRITES -+inv|Fs+inc|-+inv
+UX24.ext_quiet pure -+inv|ABSENT|-+inv b3 -+inv|-|-+inv
+UX24.ext_lib WRITES -+inv|Fs+inc|-+inv
+UX24.field_lib WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UX24.field_kit pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UN24.ext_pipe WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv # DepAX is imported by a SIBLING file only (edit 3: target-wide)
+UN24.ext_quiet pure -+inv|-|-+inv
+UN24.field_lib WRITES -+inv|Fs+inc|-+inv
+UN24.field_kit pure -+inv|-+U|-+inv
+UAB24.field_lib WRITES -+U+inv|Fs+inc|-+U+inv ^b3 -+inv|Fs+inc|-+inv # the ambiguity hedge goes with DepB; slot (c): DepA's chain charges
+UAB24.field_kit pure -+U+inv|Fs+inc|-+U+inv b3 -+inv|-+U/-|-+inv
+UAB24.ret_lib WRITES -+U+inv|Fs+inc|-+U+inv ^b3 -+inv|Fs+inc|-+inv
+H24.live WRITES -+inv|Fs+inc|-+inv
+UXC24.tool WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv
+UXC24.gear pure -+inv|Fs+inc|-+inv b3 -+inv|-+U/-|-+inv
+UXC24.ext_pipe WRITES -+inv|Fs+inc|-+inv
+UXC24.ext_quiet pure -+inv|ABSENT|-+inv b3 -+inv|-|-+inv
+"""
+
 }

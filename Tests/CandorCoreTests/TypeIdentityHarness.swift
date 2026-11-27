@@ -21,7 +21,7 @@ import Foundation
 /// This lane changes NO engine behaviour, so every `main` reading here is a measurement of the branch point, and
 /// `TypeIdentityTargetCalibrationTests` proves the `target` column is not vacuous (it fails when a lane's flag is forced on).
 
-enum TypeIdentityLane: String, CaseIterable { case ls, l2, l3, l4, l5 }
+enum TypeIdentityLane: String, CaseIterable { case ls, l2, l3, b3, l4, l5 }
 
 enum TypeIdentityTarget {
     /// The lanes whose target readings are asserted. EMPTY at L0: no lane has landed. A later lane adds itself HERE, in the commit
@@ -31,7 +31,8 @@ enum TypeIdentityTarget {
         // LS landed (SOUNDNESS R1938 lane LS, the narrow platform-name shadow): its target column is the assertion now.
         // L2 landed (SOUNDNESS R1938 lane L2, the use-unit guard; R1947, R1950): likewise.
         // L3 landed (SOUNDNESS R1938 lane L3, identity recorded at the declaration; R1927, R1928).
-        var s: Set<TypeIdentityLane> = [.ls, .l2, .l3]
+        // B3 landed (SOUNDNESS R1981 lane B3, a declared value's call routed by its declaration in every use file).
+        var s: Set<TypeIdentityLane> = [.ls, .l2, .l3, .b3]
         let env = ProcessInfo.processInfo.environment
         if let e = env["CANDOR_IDENT_EXPECT_TARGET"] {
             if e == "all" { s = Set(TypeIdentityLane.allCases) }
@@ -42,8 +43,9 @@ enum TypeIdentityTarget {
         }
         // A landed lane's KILL SWITCH takes its flag down with it, so `CANDOR_TYPE_ID_L2_OFF=1 swift test` is the switch-off arm
         // (every L2 cell must read main again, every other lane's as before).
-        if env["CANDOR_TYPE_ID_L2_OFF"] == "1" { s.remove(.l2); s.remove(.l3) }   // L3 is built on L2's index: its switch goes too
-        if env["CANDOR_TYPE_ID_L3_OFF"] == "1" { s.remove(.l3) }
+        if env["CANDOR_TYPE_ID_L2_OFF"] == "1" { s.remove(.l2); s.remove(.l3); s.remove(.b3) }   // L3 is built on L2's index: its switch goes too
+        if env["CANDOR_TYPE_ID_L3_OFF"] == "1" { s.remove(.l3); s.remove(.b3) }   // B3 routes L3's facts
+        if env["CANDOR_TYPE_ID_B3_OFF"] == "1" { s.remove(.b3) }
         if env["CANDOR_TYPE_ID_SHADOW_OFF"] == "1" { s.remove(.ls) }
         return s
     }

@@ -326,7 +326,7 @@ func l2SpelledNamesR1938(_ body: Syntax?) -> Set<String> {
 //   · `file` — the declaring file. A use unit in another file (B3: `extension Holder` in a file with no `import Guess`, legal in
 //     Swift 5 because member visibility is module-wide) resolves the receiver's MODULE where the declaration resolved it: the
 //     Driver evaluates the call's dependency route (join key, `invisible`, `identity:foreign`) in the declaring file, not in the
-//     use file, when the use file imports nothing the declaring file does not (DESIGN §3; see `l3CallFileR1938`);
+//     use file (L3: when the use file imported nothing the declaring file did not; R1981 lane B3: always, see `FileImportsR1981`);
 //   · `spelled` — the type string the merged tables hold for the binder: the fact applies only while the use unit's table still
 //     holds exactly that (an overlay that retyped the field — R1481, R1513 — keeps its own reading).
 // Kill switch `CANDOR_TYPE_ID_L3_OFF` (no facts are built; every reading is L2's).
@@ -347,4 +347,35 @@ struct L3DeclFactsR1938 {
     /// a declaring file -> its imports (a qualified spelling `Guess.Lib` is read with the DECLARING file's modules)
     var importsByFile: [String: Set<String>] = [:]
     var isEmpty: Bool { fields.isEmpty && globals.isEmpty && returns.isEmpty && importsByFile.isEmpty }   // (T4 contexts register their files)
+}
+
+// SOUNDNESS R1981 (type-identity lane B3) — THE IMPORT SET A DECLARED VALUE'S CALL IS ROUTED THROUGH.
+//
+// L3 evaluated a call on a value bound through a declaration (a field, a global, a declared return, a callee-typed closure
+// parameter) in the DECLARING file only when the use file imported nothing the declaring file did not; otherwise the use file's own
+// imports re-resolved the value's type. A use file importing a dependency that declares a same-named twin then routed the member to
+// the twin (fx23 `UB23.field_kit`: a pure DepA member charged with DepB's write), and one importing an own module with a twin bound
+// the scan's type (fx23 `UC23.field_lib`: ABSENT over a write). The value's type is a fact of its declaration, so the call is now
+// ALWAYS evaluated in the declaring file. The use site contributes only what Swift lets it contribute: EXTENSION members, visible
+// target-wide (Swift 5/6 language modes; the use file alone under `MemberImportVisibility`, SE-0444). Those modules are added to the
+// declaring file's imports for that one call (`overlay`), and only modules that cannot be the receiver's type: a module that declares
+// a top-level type of the receiver's name (readable sources, or a chained report's published types) is the twin and is never added.
+//
+// `fileImports` is read through this wrapper so the overlay reaches every route question the call asks (join packages, the
+// `invisible` ledger, obligation 1's owner, the C12 evidence) without threading a parameter through each; `store` is the merged
+// table, read directly by the questions that are about the DECLARATION's spelling (aliases, generics), not the route.
+// Kill switch `CANDOR_TYPE_ID_B3_OFF` (L3's import-subset rule; also off under `CANDOR_TYPE_ID_L3_OFF`).
+struct FileImportsR1981 {
+    var store: [String: [String]] = [:]
+    /// (declaring file, the imports the current call is routed through); nil outside a B3 call
+    var overlay: (file: String, imports: [String])? = nil
+    subscript(_ f: String) -> [String]? {
+        get { if let o = overlay, o.file == f { return o.imports }; return store[f] }
+        set { store[f] = newValue }
+    }
+    /// A cache keyed by a file whose answer reads the imports must not serve (or keep) an overlaid answer under the plain key.
+    func cacheTag(_ f: String) -> String {
+        guard let o = overlay, o.file == f else { return "" }
+        return "\u{5}" + o.imports.joined(separator: ",")
+    }
 }

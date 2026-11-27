@@ -1,0 +1,15 @@
+UB23.field_lib WRITES
+UB23.field_kit pure
+UB23.bare_lib pure
+UB23.bare_kit WRITES
+UB23.ret_lib WRITES
+UC23.field_lib WRITES
+UC23.bare_lib pure
+UT23.t4_overload_lib WRITES
+UT23.t4_overload_kit pure
+UT23.t4_generic WRITES
+UT23.t4_shadow pure
+W23.w_default WRITES
+W23.w_refined WRITES
+W23.w_cond WRITES
+W23.live WRITES
