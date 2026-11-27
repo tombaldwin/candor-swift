@@ -2113,6 +2113,7 @@ final class CallCollector: SyntaxVisitor {
         return dealiasRelease(name)
     }
     private func dealiasRelease(_ name: String) -> String {
+        if let ls = lsCtxR1938, name == ls { return name }   // SOUNDNESS R1938 LS — see `canonicalTypeRef`
         var n = name, hops = 0
         while !localTypes.contains(n), let u = typeAliases[n], u != n, hops < 16 {
             n = u; hops += 1
@@ -2167,6 +2168,10 @@ final class CallCollector: SyntaxVisitor {
             if let dot = s.firstIndex(of: "."), isModuleQualifier(String(s[..<dot])) {
                 s = String(s[s.index(after: dot)...]); continue
             }
+            // SOUNDNESS R1938 (lane LS) — the name this node reads "as if undeclared" is the PLATFORM's here: the Driver proved
+            // no scan type, member alias, generic or visible top-level alias answers it from this unit, so no alias table may
+            // either (the module-wide nested-alias fallback below would bind `Data` to an unrelated `S.Data = Quiet` — fx12).
+            if let n = lsCtxR1938, s == n { return aiReport(spelled, (s, false)) }
             if localTypes.contains(s) { return aiReport(spelled, (s, true)) }
             if !Self.aiNdOff, !s.contains("."), ai.genericNames.contains(s) { return aiReport(spelled, (s, false)) }
             if let dot = s.firstIndex(of: ".") {

@@ -8,6 +8,10 @@ O12.rebind_block WRITES
 String.fe_data WRITES
 L12.body_local pure
 Sp12.sp_data WRITES
+Plain12.pe_data WRITES
+Conf12.ce_data WRITES
+Wit12.w_data pure
+Wit12b.wb_data pure
 H12.own_top WRITES
 H12.own_top_pure pure
 H12.b3r_plat WRITES

@@ -421,6 +421,7 @@ final class DeclCollector: SyntaxVisitor {
     var lgInits: [(ty: String, shape: LocalGenericInit)] = []               // explicit and memberwise inits
     var lgReturnArgs: [String: [String]?] = [:]                             // leaf -> `-> Box<E>`'s direct args
     var lgAssocNames: Set<String> = []                                      // every protocol's associated types
+    var assocTypesByProtocolR1938: [String: Set<String>] = [:]             // SOUNDNESS R1938 LS — protocol path -> its associated types
     /// Fields whose recorded type is MONOMORPHIZED rather than erased: a field typed as the enclosing
     /// type's generic param (`struct Pipe<T: Saver> { var item: T }` — resolved to `Saver` below), or one
     /// spelled `some P`. Whoever instantiates `Pipe` picks the single conforming type, so the conformers
@@ -1405,6 +1406,7 @@ final class DeclCollector: SyntaxVisitor {
         }
         for p in node.primaryAssociatedTypeClause?.primaryAssociatedTypes ?? [] { assocTypes.insert(p.name.text) }
         lgAssocNames.formUnion(assocTypes)   // SOUNDNESS R1044 residual — see `LocalGenericFacts.nonTypeNames`
+        assocTypesByProtocolR1938[protoPath, default: []].formUnion(assocTypes)   // SOUNDNESS R1938 LS
         for member in node.memberBlock.members {
             if let f = member.decl.as(FunctionDeclSyntax.self) { methods.insert(f.name.text) }
             // PROPERTY requirements (`var payload: Int { get }`) and SUBSCRIPT requirements — recorded

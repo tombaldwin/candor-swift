@@ -18,6 +18,10 @@ cell("O12.rebind_block") { try o.rebind_block($0) }
 cell("String.fe_data") { try "x".fe_data($0) }
 cell("L12.body_local") { L12().body_local($0) }
 cell("Sp12.sp_data") { try Sp12().sp_data($0) }
+cell("Plain12.pe_data") { try Conf12().pe_data($0) }
+cell("Conf12.ce_data") { try Conf12().ce_data($0) }
+cell("Wit12.w_data") { Wit12().w_data($0) }
+cell("Wit12b.wb_data") { Wit12b().wb_data($0) }
 cell("H12.own_top") { h.own_top($0) }
 cell("H12.own_top_pure") { h.own_top_pure($0) }
 cell("H12.b3r_plat") { h.b3r_plat($0) }

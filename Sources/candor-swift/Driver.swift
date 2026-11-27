@@ -4639,14 +4639,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (n, ms) in tops where ms.contains("\u{0}unattributed") { tops[n] = ms.union(idx.ownModules) }
         var declByLeaf: [String: Set<String>] = [:]
         for p in declaredTypePathsAI { declByLeaf[p.split(separator: ".").last.map(String.init) ?? p, default: []].insert(p) }
-        var assoc: Set<String> = []
-        for c in collectors { assoc.formUnion(c.lgAssocNames) }
+        var assoc: [String: Set<String>] = [:]
+        for c in collectors { for (pp, a) in c.assocTypesByProtocolR1938 { assoc[pp, default: []].formUnion(a) } }
         return LsShadowIndexR1938(candidates: cands, idx: idx, topLevelModules: tops, privateAliasFiles: privAliases,
                                   localTypePaths: localTypePaths, declaredTypePaths: declaredTypePathsAI,
                                   memberAliasNamesByPath: memberTypeAliasesByPathAll.mapValues { Set($0.keys) },
                                   memberAliasNamesBySimple: memberTypeAliasesAll.mapValues { Set($0.keys) },
-                                  assocNames: assoc, pathsByLeaf: declByLeaf, supertypesBySimple: supertypesOf,
-                                  supertypesByPath: supertypePathsOf, typeGenericNames: typeGenericParamNamesAI)
+                                  assocByProtocol: assoc, protocolPaths: protocolPaths, pathsByLeaf: declByLeaf, supertypesBySimple: supertypesOf,
+                                  supertypesByPath: supertypePathsOf, protocolSupers: protocolSupers,
+                                  typeGenericNames: typeGenericParamNamesAI)
     }()
     // the extended-only top-level names: `extension Data { … }` keeps `Data` in `localTypes` even with no scan declaration
     let lsExtendedTopLevelR1938: Set<String> = {

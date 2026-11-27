@@ -32,3 +32,20 @@ public struct L12 { public init() {}
 open class Sp12: NSObject {
     public func sp_data(_ p: String) throws { try Data("x".utf8).write(to: URL(fileURLWithPath: p)) }
 }
+// A scan protocol WITHOUT a member named Data: its extension and its conformers see Foundation's Data
+public protocol Plain12 {}
+extension Plain12 {
+    public func pe_data(_ p: String) throws { try Data("x".utf8).write(to: URL(fileURLWithPath: p)) }    // Foundation: WRITES
+}
+public struct Conf12: Plain12, Swift.Error { public init() {}
+    public func ce_data(_ p: String) throws { try Data("x".utf8).write(to: URL(fileURLWithPath: p)) } } // Foundation: WRITES
+// A scan protocol whose associated type IS named Data, reached through a refinement: the conformer's bare `Data` is the WITNESS
+public protocol HasData12 { associatedtype Data = Quiet12 }
+public protocol Refines12: HasData12 {}
+public struct Wit12: Refines12 { public init() {}
+    public typealias Data = Quiet12
+    public func w_data(_ p: String) { let d = Data(); d.write(to: p) } }                                // Quiet12: pure
+public struct Quiet12 { public init() {}; public func write(to p: String) {} }
+// the witness is the associated type's DEFAULT, reached through the refinement, with no alias in the conformer
+public struct Wit12b: Refines12 { public init() {}
+    public func wb_data(_ p: String) { let d = Data(); d.write(to: p) } }                              // Quiet12: pure

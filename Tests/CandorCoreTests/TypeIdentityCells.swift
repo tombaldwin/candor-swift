@@ -349,6 +349,10 @@ O12.rebind_block WRITES ABSENT ls Fs
 String.fe_data WRITES ABSENT ls Fs # a platform enclosing type whose nested types the generated table lists
 L12.body_local pure ABSENT # LS refusal: a body-local Data
 Sp12.sp_data WRITES ABSENT # LS refusal: a superclass the scan does not declare (NSObject); pre-existing silence, L4
+Plain12.pe_data WRITES ABSENT ls Fs # an extension of a scan protocol with no member named Data
+Conf12.ce_data WRITES ABSENT ls Fs # a conformer of that protocol and of `Swift.Error` (a qualified platform supertype)
+Wit12.w_data pure ABSENT # LS refusal: the conformer's member alias Data = Quiet12
+Wit12b.wb_data pure ABSENT # LS refusal: an associated type Data (default Quiet12) through a refinement
 H12.own_top WRITES Fs+inc
 H12.own_top_pure pure ABSENT
 H12.b3r_plat WRITES Fs+inc # field: must not move

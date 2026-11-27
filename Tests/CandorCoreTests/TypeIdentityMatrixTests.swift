@@ -116,7 +116,11 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),
             E("O12.rebind_closure", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),
             E("O12.rebind_block", has: ["Outer12.Data.write", "Data.write"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Data.write"]),
-            E("O12.as_cast", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
+            // `targetHasNot Quiet12.*`: with `Data` out of `localTypes`, the module-wide nested-alias fallback bound it to Wit12's
+            // `typealias Data = Quiet12` until canonicalTypeRef was told the platform name answers itself (measured, fx12)
+            E("O12.as_cast", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)", "Quiet12.write", "Quiet12.init"]),
+            E("Plain12.pe_data", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Quiet12.write"]),
+            E("Wit12.w_data", has: ["Data.write"]), E("Wit12b.wb_data", has: ["Data.write"]),
             E("H12.b_found", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
             E("H12.own_top", has: ["Data.wipe12"]), E("H12.own_top_pure", has: ["Data.write"]),
             E("H12.b3r_plat", has: ["Data.wipe12"]), E("H12.b3r_plat_pure", has: ["Data.write"]), E("H12.b3r_copy", has: ["Data.wipe12"]),

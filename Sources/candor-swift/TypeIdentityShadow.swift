@@ -28,7 +28,8 @@ import SwiftSyntax
 //   · an enclosing type with a supertype the scan does not declare that is not a stdlib protocol (a dependency superclass or
 //     protocol may contribute a member type or an associated type named N), or a stdlib protocol whose associated type is N
 //     (`Clock.Duration`);
-//   · a scan supertype nesting N, aliasing N, or a scan protocol declaring an associated type N (L4 owns that walk);
+//   · a scan supertype nesting N, aliasing N, or a scan protocol (enclosing or a supertype) declaring an associated type N (L4
+//     owns that walk);
 //   · a κ PACKAGE name (`File`, `Storage`, `Logger` (swift-log half), `Channel`, …) unless the file sees one of that package's modules.
 //
 // SCOPE (DESIGN §7.1): this index decides; CallCollector applies the answer ONLY to spellings whose scope is the unit — a local
@@ -79,16 +80,31 @@ struct LsShadowIndexR1938 {
     /// type path -> member alias names declared on it; simple owner -> member alias names.
     let memberAliasNamesByPath: [String: Set<String>]
     let memberAliasNamesBySimple: [String: Set<String>]
-    /// the associated-type names of every scan protocol (one set: a conservative over-refusal)
-    let assocNames: Set<String>
+    /// scan protocol path -> its associated types (and primary associated types)
+    let assocByProtocol: [String: Set<String>]
+    let protocolPaths: Set<String>
     /// simple name -> its declared full paths
     let pathsByLeaf: [String: Set<String>]
     let supertypesBySimple: [String: Set<String>]
     let supertypesByPath: [String: Set<String>]
+    /// protocol -> the protocols it refines (kept out of `supertypes*` by the Driver, so closed over here)
+    let protocolSupers: [String: Set<String>]
     let typeGenericNames: [String: Set<String>]
 
     func isScanDeclared(_ seg: String) -> Bool {
-        declaredTypePaths.contains(seg) || !(pathsByLeaf[seg]?.isEmpty ?? true)
+        declaredTypePaths.contains(seg) || protocolPaths.contains(seg) || !(pathsByLeaf[seg]?.isEmpty ?? true)
+            || protocolPaths.contains { $0 == seg || $0.hasSuffix("." + seg) }
+    }
+    /// A scan protocol named `s` (simple or path) declares an associated type `n`.
+    private func protocolAssoc(_ s: String, _ n: String) -> Bool {
+        if assocByProtocol[s]?.contains(n) == true { return true }
+        let leaf = s.split(separator: ".").last.map(String.init) ?? s
+        return assocByProtocol.contains { (p, a) in (p == leaf || p.hasSuffix("." + leaf)) && a.contains(n) }
+    }
+    /// A supertype spelled with a platform module qualifier (`Swift.Error`, `Foundation.LocalizedError`) is that platform name.
+    private func unqualifiedPlatform(_ s: String) -> String {
+        for m in ["Swift.", "Foundation.", "_Concurrency.", "Dispatch."] where s.hasPrefix(m) { return String(s.dropFirst(m.count)) }
+        return s
     }
 
     /// Does scan type `s` (a simple name or a path) make N visible as a member type of its subtypes?
@@ -129,6 +145,14 @@ struct LsShadowIndexR1938 {
             supers.formUnion(supertypesByPath[p] ?? [])
             supers.formUnion(supertypesBySimple[segs[i]] ?? [])
         }
+        // an enclosing PROTOCOL's refinements, and every supertype's, transitively (associated types and extension aliases are
+        // inherited through refinement)
+        for (i, p) in prefixes.enumerated() where protocolPaths.contains(p) || assocByProtocol[segs[i]] != nil { supers.insert(segs[i]) }
+        var frontier = Array(supers)
+        while let x = frontier.popLast() {
+            let leaf = x.split(separator: ".").last.map(String.init) ?? x
+            for q in (protocolSupers[x] ?? []).union(protocolSupers[leaf] ?? []) where supers.insert(q).inserted { frontier.append(q) }
+        }
         var genericAll = generics
         for s in segs { genericAll.formUnion(typeGenericNames[s] ?? []) }
         for n in candidates.sorted() {
@@ -140,9 +164,13 @@ struct LsShadowIndexR1938 {
             if let p = prefixes.first(where: { localTypePaths.contains($0 + "." + n) || memberAliasNamesByPath[$0]?.contains(n) == true }) {
                 refused[n] = "visible-nested:\(p).\(n)"; continue
             }
-            if let s = supers.sorted().first(where: { sup in
-                if isScanDeclared(sup) { return supertypeContributes(sup, n) || (assocNames.contains(n)) }
-                if STDLIB_PROTOCOLS.contains(sup) || PLATFORM_LEAVES.contains(sup) { return LS_STDLIB_ASSOC_COLLISIONS_R1938.contains(n) }
+            if let p = prefixes.first(where: { protocolPaths.contains($0) && protocolAssoc($0, n) }) { refused[n] = "assoc:\(p).\(n)"; continue }
+            if let s = supers.sorted().first(where: { sup0 in
+                let sup = unqualifiedPlatform(sup0)
+                if isScanDeclared(sup) { return supertypeContributes(sup, n) || protocolAssoc(sup, n) }
+                if STDLIB_PROTOCOLS.contains(sup) || PLATFORM_LEAVES.contains(sup) || STDLIB_NOMINALS.contains(sup) {
+                    return LS_STDLIB_ASSOC_COLLISIONS_R1938.contains(n) || STDLIB_NOMINALS.contains(sup + "." + n)
+                }
                 return true
             }) {
                 refused[n] = "supertype:\(s)"; continue
