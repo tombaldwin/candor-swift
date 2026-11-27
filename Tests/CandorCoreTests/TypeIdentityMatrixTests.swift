@@ -235,4 +235,21 @@ final class TypeIdentityMatrixTests: XCTestCase {
             XCTAssertTrue(a24.un.rows[fn]?.invisible.contains("DepAX") ?? false, "fx24 \(fn) un: DepAX supplies the member: \(a24.un.rows[fn]?.invisible ?? [])")
         }
     }
+
+    /// fx25 (Fable, B3 merge review): a twin module that ALSO extends the identity's type with the called member keeps that member.
+    /// Pinned by module: standalone the extending twin is named beside DepA for the extension call only, and every call keys DepA.
+    func testFx25_TwinThatExtendsTheIdentity() throws {
+        let st = try H.stage(Self.self); defer { st.cleanup() }
+        let a = try H.run(X.fx25, in: st, label: "fx25")
+        guard TypeIdentityTarget.expect.contains(.b3) else { return }
+        for fn in ["UB25.ext_twin", "UB25.ext_twin_quiet", "UB25.field"] {
+            for (arm, scan) in [("un", a.un), ("ch", a.ch)] {
+                guard let r = scan.rows[fn] else { XCTFail("fx25 \(fn) \(arm): no row"); continue }
+                XCTAssertFalse(r.dispatchesOn.contains { $0.hasPrefix("DepB#") }, "fx25 \(fn) \(arm): keyed on the twin \(r.dispatchesOn)")
+                XCTAssertTrue(r.dispatchesOn.contains { $0.hasPrefix("DepA#") }, "fx25 \(fn) \(arm): DepA must key the member \(r.dispatchesOn)")
+            }
+        }
+        XCTAssertTrue(a.un.rows["UB25.ext_twin"]?.invisible.contains("DepB") ?? false, "fx25 ext_twin un: DepB supplies the extension member")
+        XCTAssertFalse(a.un.rows["UB25.field"]?.invisible.contains("DepB") ?? true, "fx25 field un: the twin's own member is not the identity's")
+    }
 }

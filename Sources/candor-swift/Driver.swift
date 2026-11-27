@@ -5159,6 +5159,34 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         guard let o = fileImports.overlay, o.file == file else { return [] }
         return sourceExtendingDepModules(of: owner, member: leaf, inFile: file)
     }
+    /// A TWIN module (it declares its own top-level `n`) can still extend the IDENTITY's type: `extension DepA.Lib { func m }` in
+    /// DepB beside DepB's own `Lib` (Fable's fx25 `UB25.ext_twin`, executed WRITES). An unqualified `extension Lib` there extends the
+    /// twin itself, and a chained report's `DepB#Lib.m` cannot say which `Lib` it is a member of, so only a READABLE extension whose
+    /// head names the type through one of the identity's modules (`owners`: the declaring file's imports that declare `n`) and declares
+    /// `leaf` counts. Anything else keeps the twin out (the call keeps L3's true-reason hedge).
+    var b3QualExtCacheR1981: [String: [String: [String: Bool]]?] = [:]
+    func b3TwinExtendsIdentityR1981(_ m: String, _ n: String, _ leaf: String, owners: Set<String>) -> Bool {
+        guard !owners.isEmpty else { return false }
+        for x in b3ReexportClosureR1981(m).sorted() {
+            if b3QualExtCacheR1981[x] == nil {
+                var out: [String: [String: Bool]]? = nil
+                if let files = deps.moduleSwiftSources[x], !files.isEmpty {
+                    var all: [String: [String: Bool]] = [:], ok = true
+                    for path in files where path.hasSuffix(".swift") {
+                        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                        for (t, ms) in topLevelExtensionMembers(source: text, keyByFullHead: true).members {
+                            for (k, v) in ms { all[t, default: [:]][k] = (all[t]?[k] ?? false) || v }
+                        }
+                    }
+                    if ok { out = all }
+                }
+                b3QualExtCacheR1981[x] = .some(out)
+            }
+            guard let table = b3QualExtCacheR1981[x] ?? nil else { continue }
+            for o in owners.sorted() where table["\(o).\(n)"]?[leaf] != nil { return true }
+        }
+        return false
+    }
     func b3CallFileR1981(_ call: Call, _ f: FnInfo) -> String? {
         fileImports.overlay = nil
         if b3OffR1981 { return l3CallFileR1938(call, f) }
@@ -5172,9 +5200,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let useImps = Set(fileImports.store[use] ?? [])
         let own = (l2IndexR1938?.idx.ownModules ?? []).union(projectModules)
         var extra: [String] = [], twins: [String] = []
+        // the identity's own modules: the declaring file's imports that declare `n` (an extension head `DepA.Lib` names it through one)
+        let owners = Set(declImps.filter { b3DeclaresTypeR1981($0, n) == true })
         for m in b3MemberLookupModulesR1981(use).union(useImps).subtracting(declImps).sorted() where !own.contains(m) {
             let platform = PLATFORM_MODULES.contains(m) || KAPPA_MODULES.contains(m)
-            if b3DeclaresTypeR1981(m, n) == true { twins.append(m); continue }
+            if b3DeclaresTypeR1981(m, n) == true {
+                if !platform && b3TwinExtendsIdentityR1981(m, n, call.leaf, owners: owners) { extra.append(m) } else { twins.append(m) }
+                continue
+            }
             if useImps.contains(m) || (!platform && b3ExtendsR1981(m, n, call.leaf)) { extra.append(m) }
         }
         if !extra.isEmpty { fileImports.overlay = (d, declImps + extra) }

@@ -25,6 +25,9 @@ the extending module beside the declaring one, and obligation 1's owner module i
 `TypeIdentity/fx24` (44 executed cells: field, global, factory return, local, parameter field and T4 closure parameter from use files
 importing a twin dependency, an own twin module, a twin plus an extending third package, both modules, and a declaration in another
 own module). Kill switch `CANDOR_TYPE_ID_B3_OFF` (L3's import-subset rule; also off under `CANDOR_TYPE_ID_L3_OFF`).
+A twin module whose readable sources extend the IDENTITY's type with the called member, through one of the identity's modules
+(`extension DepA.Lib25 { func extWipe25 }` beside DepB's own `Lib25`), is kept for that member (Fable's `TypeIdentity/fx25`
+`UB25.ext_twin`: `Fs` chained again, where the twin exclusion read a true-reason `Unknown`); its own same-named members stay out.
 
 ### ⚠ A field, global, declared return or callee-typed closure parameter reads the type its DECLARATION names (SOUNDNESS R1938 lane L3, R1927, R1928)
 

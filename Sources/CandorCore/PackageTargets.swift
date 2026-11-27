@@ -864,7 +864,9 @@ public func topLevelTypeAliases(source: String) -> (aliases: [String: (target: S
 /// visible to an importer (`public`/`open` on the member, or a `public`/`open` extension the member does not
 /// narrow). `private`/`fileprivate` members are not recorded. Functions and stored/computed properties only.
 /// `opaque` as in `topLevelTypeDeclarations`: a top-level macro expansion or an unread `#if` shape.
-public func topLevelExtensionMembers(source: String) -> (members: [String: [String: Bool]], opaque: Bool) {
+/// `keyByFullHead` (SOUNDNESS R1981): key by the extended type AS SPELLED (`extension DepA.Lib` -> `DepA.Lib`), generics stripped,
+/// so a caller can tell an extension of ANOTHER module's type from one of the file's own same-named type. Default: the simple name.
+public func topLevelExtensionMembers(source: String, keyByFullHead: Bool = false) -> (members: [String: [String: Bool]], opaque: Bool) {
     var out: [String: [String: Bool]] = [:]
     var opaque = false
     func vis(_ mods: DeclModifierListSyntax) -> String? {
@@ -903,7 +905,8 @@ public func topLevelExtensionMembers(source: String) -> (members: [String: [Stri
     func walkDecl(_ d: DeclSyntax) {
         if let e = d.as(ExtensionDeclSyntax.self) {
             let full = e.extendedType.trimmedDescription.split(separator: "<").first.map(String.init) ?? ""
-            guard let ty = full.split(separator: ".").last.map(String.init), !ty.isEmpty else { return }
+            guard let last = full.split(separator: ".").last.map(String.init), !last.isEmpty else { return }
+            let ty = keyByFullHead ? full : last
             let ev = vis(e.modifiers)
             if ev == "private" || ev == "fileprivate" { return }
             walkMembers(ty, e.memberBlock.members, ev)

@@ -539,4 +539,15 @@ UXC24.ext_pipe WRITES -+inv|Fs+inc|-+inv
 UXC24.ext_quiet pure -+inv|ABSENT|-+inv b3 -+inv|-|-+inv
 """
 
+    // lane B3 follow-up (SOUNDNESS R1981, Fable's fx25): DepB is a TWIN (its own pure `Lib25`) AND extends DepA's `Lib25` with the
+    // called member (`extension DepA.Lib25 { extWipe25 }`, loud). decl.swift imports DepA; useB.swift imports DepB only. Main (the
+    // use-file routing) reached `Fs` by accident; B3's twin exclusion read `Unknown` (true reason); a twin whose sources extend the
+    // identity's type THROUGH the identity's module keeps the member: `Fs` chained again, DepB named beside DepA standalone.
+    // `ext_twin` is a control (main and the target agree, the B3 commit 11351409 read `-+U` chained); `ext_twin_quiet` is its pure twin.
+    static let fx25 = """
+UB25.ext_twin WRITES -+inv|Fs+inc|-+inv
+UB25.ext_twin_quiet pure -+inv|-|-+inv
+UB25.field WRITES -+inv|-+U|-+inv b3 -+inv|Fs+inc|-+inv # the twin's own wipe25 is NOT an extension of DepA's type: DepB stays out
+L25.live WRITES -+inv|Fs+inc|-+inv
+"""
 }
