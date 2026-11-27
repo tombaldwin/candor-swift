@@ -140,7 +140,10 @@ final class R910OwnerKeyJoinProcessTests: XCTestCase {
         // The defect, as the kill switch reproduces it.
         XCTAssertEqual(inferred(off, "oneImport910"), [], "CANDOR_R910_OFF=1 must reproduce the silent row")
         XCTAssertEqual(inferred(off, "viaGo910"), [])
-        XCTAssertNil(off["viaProp910"], "the property read was ABSENT")
+        // the property read charged nothing. Since lane L4 (SOUNDNESS R1938) an unjoined property read on a dependency's type names
+        // its module (`[] + invisible:[PQ]`) instead of reading ABSENT; the defect the switch reproduces is the missing `Fs`
+        XCTAssertEqual(inferred(off, "viaProp910") ?? [], [], "the property read charged nothing")
+        if CandorEnvL4.on { XCTAssertEqual((off["viaProp910"]?["invisible"] as? [String]) ?? [], ["PQ"]) } else { XCTAssertNil(off["viaProp910"]) }
         // The resolution: the conformer's union entry, under the owner's key.
         XCTAssertTrue(inferred(on, "oneImport910")?.contains("Fs") == true, "a one-import file: \(String(describing: on["oneImport910"]))")
         XCTAssertTrue(inferred(on, "viaParam910")?.contains("Fs") == true)
@@ -210,5 +213,13 @@ final class R910OwnerKeyJoinProcessTests: XCTestCase {
         let u = try rows(root, deps: nil), uOff = try rows(root, deps: nil, off: true)
         XCTAssertEqual(Set(u.keys), Set(uOff.keys))
         for (fn, r) in uOff { XCTAssertEqual(NSDictionary(dictionary: r), NSDictionary(dictionary: u[fn] ?? [:]), fn) }
+    }
+}
+
+/// Lane L4's switch, read the way the engine reads it (`CANDOR_TYPE_ID_L4_OFF`, also off under `CANDOR_TYPE_ID_L2_OFF`).
+enum CandorEnvL4 {
+    static var on: Bool {
+        let e = ProcessInfo.processInfo.environment
+        return e["CANDOR_TYPE_ID_L4_OFF"] != "1" && e["CANDOR_TYPE_ID_L2_OFF"] != "1"
     }
 }
