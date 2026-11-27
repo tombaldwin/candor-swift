@@ -882,6 +882,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             ? String(raw.dropFirst(rootDir.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             : raw
         if let pkg = owningPackage(of: abs), let own = owningTarget(of: abs, in: pkg) {
+            identProbe("IDT\t\(rel)\t\(own)\t\(pkg)")
             // BOTH conjuncts: the file's TARGET can import it, AND this run actually read it.
             importableByFile[rel] = importable(forTarget: own, in: pkg)
             declaredByFile[rel] = declaredNames(forTarget: own, in: pkg)
@@ -909,6 +910,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // already knows each member's own dependency closure and admits only members that
             // contributed files: the run-analyzed conjunct, kept.
             var out = Set(xcodeModulesByFile[abs] ?? [])
+            identProbe("IDT\t\(rel)\t\((xcodeModulesByFile[abs] ?? []).sorted().joined(separator: "+"))\txcode")
             for dep in deps {
                 // The RESOLVER's membership, intersected with what this run analyzed. Re-deriving the
                 // membership here was the third instance in this branch of a consumer throwing away a
@@ -925,6 +927,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var surfaceCollectors: [TypeSurfaceCollector] = []   // ⟨0.40⟩ the declared-type surface producer
     var surfaceAliases: Set<String> = []
     var surfaceExported: Set<String> = []                // `@_exported import`s anywhere in the package
+    var identExportedByFile: [String: Set<String>] = [:]   // R1938: per-file `@_exported` set, kept ONLY when the identity probe is on
     // SOUNDNESS R859 — every name this package spells as an EXISTENTIAL (`any P`), package-wide. Swift
     // admits only a protocol after `any`, so this is the source's own statement that `P` is an
     // abstraction — the one fact about a DEPENDENCY's type the consumer can read without the dependency
@@ -988,6 +991,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         let tsc = TypeSurfaceCollector(file: rel)   // ⟨0.40⟩
         tsc.walk(tree)
         surfaceCollectors.append(tsc)
+        if identProbeOn { identExportedByFile[rel] = reexportedModules(in: tree) }   // R1938 (probe only)
         surfaceAliases.formUnion(TypeSurfaceCollector.aliasNames(in: tree))
         for item in tree.statements {
             if let imp = item.item.as(ImportDeclSyntax.self),
@@ -1031,6 +1035,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             } else { constStrings[k] = v }
         }
         for (k, v) in c.returnsTmp {
+            if let t = v { identProbe("IDS\t\(c.file)\t\(k)\t\(t)") }
             if let existing = returnsTmp[k] {
                 if existing != v { returnsTmp[k] = String?.none }
             } else {
@@ -1109,6 +1114,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (sub, sups) in c.pathSupers { pathSupers[sub, default: []].append(contentsOf: sups) }
         localTypes.formUnion(c.localTypes)
         localTypePaths.formUnion(c.localTypePaths)
+        identProbe("IDD\t\(c.file)\t\(swiftModuleOf(c.file))\t\(c.declaredTypePaths.sorted().joined(separator: ","))\t\(c.localTypePaths.sorted().joined(separator: ","))\t\(c.imports.joined(separator: ","))\t\(c.typeAliases.keys.sorted().joined(separator: ","))\t\(c.typeGenericParamNames.values.flatMap { $0 }.sorted().joined(separator: ","))")
         declaredTypes.formUnion(c.declaredTypes)
         declaredTypesUnconditional.formUnion(c.declaredTypesUnconditional)
         for (a, u) in c.typeAliases { typeAliases[a] = u }   // last-writer-wins (a redeclared alias is rare)
@@ -1163,6 +1169,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
         unresolvedGenericFields.append(contentsOf: c.unresolvedGenericFields)
         ctorPathFieldsR1896.append(contentsOf: c.ctorPathFieldsR1896)
+    }
+    // R1938 (L1): the module-identity probe (ModuleIdentityProbe.swift). Reads facts already computed above and writes ONLY to stderr;
+    // off by default.
+    if identProbeOn {
+        let facts = moduleIdentityFacts(sourcePaths: sourcePaths, rootDir: rootDir, owningPackage: { owningPackage(of: $0) },
+                                        owningTarget: { owningTarget(of: $0, in: $1) }, xcodeModulesByFile: xcodeModulesByFile,
+                                        swiftModuleOf: { swiftModuleOf($0) })
+        emitModuleIdentityProbe(facts, imports: fileImports, exported: identExportedByFile, reexports: deps.moduleReexports,
+                                manifestSource: { try? String(contentsOfFile: ($0 as NSString).appendingPathComponent("Package.swift"), encoding: .utf8) })
     }
     // SOUNDNESS R1105 audit (swiftagent-audit1105) — THE GETTER VIEW IS A PROPERTY OF THE QUAL. A read of `T.p` edges
     // `T.p.<get>` whenever ANY binding under `T.p` has a setter side, so every getter-side body under that qual must
@@ -2344,6 +2359,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     f.scalar = scoped(f.scalar); f.arrayElem = scoped(f.arrayElem)
                     f.arrayElemNested = scoped(f.arrayElemNested); f.dictValue = scoped(f.dictValue)
                     if unresolvable { returnFactsTmp[k] = DeclaredFacts?.none; continue }
+                    if let sc = f.scalar { identProbe("IDR\t\(c.file)\t\(k)\t\(scope ?? "-")\t\(sc)\t\(gens.sorted().joined(separator: ","))") }
                     if let existing = returnFactsTmp[k] {
                         if existing != f { returnFactsTmp[k] = DeclaredFacts?.none }
                     } else { returnFactsTmp[k] = f }
@@ -2436,6 +2452,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 if pathKeyed { importedFieldModuleR1896[path, default: [:]][field] = comps[0] }
             }
             guard ok else { continue }
+            identProbe("IDF\t\(file)\t\(path)\t\(field)\t\(spelled)\t-\tR1896")
             if fields[ty]?[field] == nil { fields[ty, default: [:]][field] = (spelled, false) }
             if pathKeyed, fields[path]?[field] == nil { fields[path, default: [:]][field] = (spelled, false); r1492PathKeys.insert(path) }
         }

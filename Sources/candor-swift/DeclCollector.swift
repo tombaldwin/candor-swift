@@ -372,6 +372,10 @@ final class DeclCollector: SyntaxVisitor {
     private func setFieldR1492(_ ty: String, _ path: String, _ name: String, _ v: (name: String?, isFunction: Bool)) {
         fields[ty, default: [:]][name] = v
         if r1492Path(ty, path) { fieldsByPath[path, default: [:]][name] = v }
+        if let n = v.name, !v.isFunction {
+            let gens = typeStack.flatMap { typeGenericParamNames[$0] ?? [] }.sorted().joined(separator: ",")
+            identProbe("IDF\t\(file)\t\(path)\t\(name)\t\(n)\t\(gens)")
+        }
     }
     /// SOUNDNESS R585 (b4) — `type -> field -> the type whose METATYPE the field holds`.
     var fieldMetatypes: [String: [String: String]] = [:]
@@ -969,6 +973,7 @@ final class DeclCollector: SyntaxVisitor {
             }
             if let tn = info.name, !info.isFunction {
                 globalTypes[name] = tn
+                identProbe("IDG\t\(file)\t\(name)\tann\t\(tn)")
                 if isPublicGlobal { globalPublic.insert(name) }
             } else if let elem = arrayElementName(ann) {
                 globalArrayElem[name] = elem
@@ -987,6 +992,7 @@ final class DeclCollector: SyntaxVisitor {
            let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
             if ctor.baseName.text.first?.isUppercase == true {
                 globalTypes[name] = ctor.baseName.text
+                identProbe("IDG\t\(file)\t\(name)\tctor\t\(ctor.baseName.text)")
                 if isPublicGlobal { globalPublic.insert(name) }
             } else {
                 // a lowercase callee — a free-FACTORY call (`let x = makeX()`); its return type isn't
@@ -1001,6 +1007,7 @@ final class DeclCollector: SyntaxVisitor {
             // `let session = URLSession.shared` — the same singleton-field idiom `fields` recognises
             // for a type member, applied to a module-scope (or tuple-element) global.
             globalTypes[name] = base.baseName.text
+            identProbe("IDG\t\(file)\t\(name)\tsingleton\t\(base.baseName.text)")
             if isPublicGlobal { globalPublic.insert(name) }
         } else if let mb = Self.metatypeLiteralR1506(initVal) {
             // SOUNDNESS R1506 — `let gMeta = Loud.self`: the UNANNOTATED spelling of R585's b7 global (same residual).

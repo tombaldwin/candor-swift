@@ -10,6 +10,24 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### The type-identity attack matrix, an identity probe and module identity — NO behaviour change (SOUNDNESS R1938, lanes L0 + L1)
+
+First two stages of the type-identity design (`swift-type-identity-design/DESIGN.md` §7): the fixtures and instruments the later lanes
+(the platform-name shadow, a use-unit resolver, declaration-scoped binders) are built and judged against. **No report byte changes**: the
+final tier compares reports with the probe on and off, and against the previous `main`, over the 39-entry pool.
+
+- **L0 — `Tests/Fixtures/TypeIdentity/`**: the matrix as real SwiftPM packages (fx3–fx8 and the R1931 / R1896 fixtures, plus new fx9
+  S1×S12 / S12 / the LS refusal cells, fx10 the L4 rows, fx11 the S7e variants), each with a `Run*` executable that calls every cell
+  and an `exec-ground-truth.txt` produced by `tools/identity-exec.sh` (executed under swiftc, not argued). Process tests assert every
+  cell standalone, chained (live join proven by a count that differs between arms) and with the dependency's sources unreadable, as
+  two columns: `main` (today's reading) and `target` (the design's), the latter behind per-lane flags a later lane flips. A calibration
+  suite proves the target column is not vacuous. `g_own_nested_c`'s member was renamed so the pure control is pinned by its sidecar edge.
+- **Identity probe (`CANDOR_IDENT_PROBE`, stderr, off by default)** and the census analysers `tools/ident_census.py`,
+  `tools/kappa_shadow.py`, `tools/ident_modules.py`, run by `tools/identity-census.sh`; seeded on the fixtures at the design's numbers.
+- **L1 — `ModuleIdentityIndex`** (CandorCore): `moduleOf(file)` from the manifest or Xcode target, `visibleModules`,
+  `targetVisibleModules`, the module-wide `@_exported` closure and the manifest's `MemberImportVisibility` setting. Used ONLY by the
+  probe, which reports per file where the manifest answer and `swiftModuleOf` disagree and where no manifest answer exists.
+
 ### ⚠ The own-leaf C12 residue is hedged where a same-named member has effects (SOUNDNESS R1931)
 
 A C12 drop the hedge did not reach whose leaf only THIS package declares (a closure parameter, a `$0`, a pattern binder, a local

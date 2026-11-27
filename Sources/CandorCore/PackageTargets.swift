@@ -1045,20 +1045,7 @@ private let clangSourceExtensions: Set<String> = ["c", "m", "mm", "cc", "cpp", "
 /// §G's "ask the authority" rather than a fourth hand-written grammar. Every `#if` arm is walked, so a
 /// re-export in any arm counts — the disclosing direction.
 public func reexportedModules(source: String) -> Set<String> {
-    final class V: SyntaxVisitor {
-        var out: Set<String> = []
-        init() { super.init(viewMode: .sourceAccurate) }
-        override func visit(_ node: ImportDeclSyntax) -> SyntaxVisitorContinueKind {
-            let exported = node.attributes.contains {
-                $0.as(AttributeSyntax.self)?.attributeName.trimmedDescription == "_exported"
-            }
-            if exported, let m = node.path.first?.name.text { out.insert(m) }
-            return .skipChildren
-        }
-    }
-    let v = V()
-    v.walk(Parser.parse(source: source))
-    return v.out
+    reexportedModules(in: Parser.parse(source: source))   // R1938: the tree-taking form lives in ModuleIdentity.swift
 }
 
 /// `.binaryTarget(name:)` / `.systemLibrary(name:)` — declarations `TargetFinder` deliberately does not

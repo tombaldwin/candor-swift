@@ -2151,6 +2151,7 @@ final class CallCollector: SyntaxVisitor {
         return aiReport(spelled, (s, localTypes.contains(s)))
     }
     private func aiReport(_ spelled: String, _ r: (spelling: String, local: Bool)) -> (spelling: String, local: Bool) {
+        identProbe("IDU\t\(ai.file ?? "-")\t\(ai.enclosingTypePath ?? enclosingType ?? "-")\t\(spelled)\t\(r.spelling)\t\(r.local)")
         if Self.aiProbe, r.spelling != dealiasRelease(spelled) {
             FileHandle.standardError.write("AIHIT \(spelled) -> \(r.spelling) local=\(r.local) rel=\(dealiasRelease(spelled))\n".data(using: .utf8)!)
         }
@@ -13984,7 +13985,7 @@ final class CallCollector: SyntaxVisitor {
                     // so `x.m()` dropped (executed: ABSENT over a conformer that writes a file; the unannotated copy `let x = d` and the
                     // parameter itself dispatched over the bound). A parameter typed `D` already resolves through `genericBounds`.
                     if !Self.r1686Off, genericParamNamesFn.contains(tn), let b = genericBoundsR951[tn], localProtocols.contains(b) { vars[name] = b }
-                    else { vars[name] = tn }
+                    else { vars[name] = tn; identProbe("IDL\t\(ai.file ?? "-")\t\(ai.enclosingTypePath ?? enclosingType ?? "-")\t\(name)\tann\t\(tn)\t\(ai.genericNames.union(genericParamNamesFn).sorted().joined(separator: ","))") }
                 }
                 // SOUNDNESS R585 (b2/b3) — `let t: CBase.Type = CSub.self` / the `var` twin. `typeName`
                 // answers nil for a metatype, so this binder recorded NOTHING and `t.validate()` read
@@ -14147,6 +14148,7 @@ final class CallCollector: SyntaxVisitor {
                             // every other consumer of `vars` sees the bare type exactly as before.
                             if let m = explicitModule(of: v), !t.hasPrefix(m + ".") { vars[name] = "\(m).\(t)" }
                             else { vars[name] = t }
+                            identProbe("IDL\t\(ai.file ?? "-")\t\(ai.enclosingTypePath ?? enclosingType ?? "-")\t\(name)\tinit:\(v.as(FunctionCallExprSyntax.self)?.calledExpression.trimmedDescription.prefix(60) ?? "?")\t\(vars[name] ?? "-")\t\(ai.genericNames.union(genericParamNamesFn).sorted().joined(separator: ","))")
                             if info.opaqueHop, !Self.r610Off { opaqueVars.insert(name) }   // R610
                             // (R33's third and original call site stood here. The construction hook in
                             //  `visit(FunctionCallExprSyntax)` reaches this same initializer — this
