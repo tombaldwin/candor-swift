@@ -130,6 +130,8 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Plain15.p_data", has: ["Own15.Outer15.Data.write"], lane: .ls, targetHasNot: ["Own15.Outer15.Data.write", "Own15.Data.write"]),
         ])
     }
+    /// (R1950's constructor filter keeps a BARE-owner init beside the innermost one — `Store16.init` of the top-level type — since an
+    /// `extension N { init }` head is recorded bare and cannot be told apart: an over-edge, never a loss.)
     /// fx16 (lane L2): every moved cell's edge is pinned — the dependency-typed cells lose the scan twin's edges, the extension member
     /// keeps its own, and each R1950 cell binds exactly the innermost nested type.
     func testFx16_L2UseUnitGuard() throws {
@@ -145,8 +147,8 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("U16.m_kit", has: ["Kit16.tap16"], lane: .l2, targetHasNot: ["Kit16.init", "Kit16.tap16"]),
             E("U16.m_kit_inline", has: ["Kit16.tap16"], lane: .l2, targetHasNot: ["Kit16.init", "Kit16.tap16"]),
             E("Outer16.s4_own", has: ["Outer16.Box16.init", "Outer16.Box16.seal16"]),
-            E("Outer16a.r_inner_loud", has: ["Store16.put16"], lane: .l2, targetHas: ["Outer16a.Store16.init", "Outer16a.Store16.put16"], targetHasNot: ["Store16.init", "Store16.put16"]),
-            E("Outer16b.r_inner_pure", has: ["Pipe16.flow16"], lane: .l2, targetHas: ["Outer16b.Pipe16.flow16"], targetHasNot: ["Pipe16.init", "Pipe16.flow16"]),
+            E("Outer16a.r_inner_loud", has: ["Store16.put16"], lane: .l2, targetHas: ["Outer16a.Store16.init", "Outer16a.Store16.put16"], targetHasNot: ["Store16.put16"]),
+            E("Outer16b.r_inner_pure", has: ["Pipe16.flow16"], lane: .l2, targetHas: ["Outer16b.Pipe16.flow16"], targetHasNot: ["Pipe16.flow16"]),
             E("Plain16.r_plain_top", has: ["Pipe16.init", "Pipe16.flow16"]),
             E("Outer16c.Mid16.r_mid_pure", has: ["Outer16c.Mid16.Knob16.turn16", "Outer16c.Knob16.turn16"], lane: .l2,
               targetHas: ["Outer16c.Mid16.Knob16.init", "Outer16c.Mid16.Knob16.turn16"], targetHasNot: ["Outer16c.Knob16.init", "Outer16c.Knob16.turn16"]),

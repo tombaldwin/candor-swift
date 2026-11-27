@@ -143,6 +143,10 @@ struct Call { var path: String; var leaf: String; var strArg: String?; var typed
               /// SOUNDNESS R1938 (lane LS) — this call was collected under a platform name the unit's scope reads "as if
               /// undeclared" (TypeIdentityShadow.swift): the Driver must not resolve it onto the scan's same-named type.
               var lsNameR1938: String? = nil
+              /// SOUNDNESS R1950 (lane L2) — a constructor spelled bare (`N(…)`, `N.init(…)`) inside a type that nests `N`: the innermost
+              /// nested type's recorded path. The call keeps its simple path (the overload arms key on it) and the Driver drops only
+              /// the candidates that belong to a DIFFERENT dotted type of that leaf.
+              var innerR1950: String? = nil
               var argTypes: [String?] = []     // inferred simple type per positional arg (nil = unknown) — overloads
               /// SOUNDNESS R1086 — on a binary-operator call, aligned with `argTypes`: the operand's type is a GUESS (an
               /// unexplained hop, a convention). It may add a caller witness; it may never refuse an overload (R1081).
@@ -9843,8 +9847,11 @@ final class CallCollector: SyntaxVisitor {
         // dotted spelling `Outer.Data()` would be — not by the simple name every same-named nested type shares
         if let n = lsCtxR1938, let inner = lsCtxInnerR1938, localTypesAllR1938.contains(inner), before < calls.count {
             for j in before..<calls.count where calls[j].path == n || calls[j].path.hasPrefix(n + ".") {
-                calls[j].path = inner + calls[j].path.dropFirst(n.count)
-                lsProbeR1938("IDL2C\t\(r1455Qual)\t\(n)\t\(calls[j].path)\t\(calls[j].leaf)\ttyped=\(calls[j].typed)\tunq=\(calls[j].unqualified)")
+                // a constructor keeps its path (measured on the pool: a rewritten `Signal.Observer` path missed every labelled
+                // overload `Signal.Observer.init(Action,Bool)`, a 1->0); a static member is keyed by the full path
+                if calls[j].path == n || calls[j].path == n + ".init" { calls[j].innerR1950 = inner }
+                else { calls[j].path = inner + calls[j].path.dropFirst(n.count) }
+                lsProbeR1938("IDL2C\t\(r1455Qual)\t\(n)\t\(calls[j].path)\t\(calls[j].leaf)\ttyped=\(calls[j].typed)\tunq=\(calls[j].unqualified)\tinner=\(calls[j].innerR1950 ?? "-")")
             }
         }
         if let n = lsCtxR1938, lsCtxInnerR1938 == nil, before < calls.count {
@@ -13953,6 +13960,13 @@ final class CallCollector: SyntaxVisitor {
         for m in marks {
             guard let v = vars[m.name] else { continue }
             let decoded = Self.lsDecodeR1938(m.n)
+            // R1950 — a binding typed by a bare spelling of the innermost nested type holds that type's full path (the constructor
+            // call keeps its simple path for the overload arms, so the binder may have recorded the simple name)
+            if m.n == decoded, let inner = l2R1938.innermost[decoded], v == decoded, localTypesAllR1938.contains(inner) {
+                vars[m.name] = inner
+                lsProbeR1938("IDL2B\t\(r1455Qual)\t\(m.name)\t\(decoded)\t\(inner)")
+                continue
+            }
             if v == decoded { lsVarsR1938[m.name] = m.n }
             else if m.kind != "as!" && v == m.spelled && !m.spelled.isEmpty { lsVarsR1938[m.name] = m.n + "\u{2}" + v }
             else { continue }
