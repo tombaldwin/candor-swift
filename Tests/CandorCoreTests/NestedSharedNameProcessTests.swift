@@ -129,7 +129,11 @@ enum VO { struct PK { fileprivate typealias BK = QuietImpl; fileprivate var back
             XCTAssertNil(ProcessHarness.chargedNothing(by, fn), "\(fn) is pure (control)")
         }
         // The release: every one silent (or, for the closure field, only the `var`-less hedge it never had).
-        let off = try scan(root, env: ["CANDOR_R1513_OFF": "1"])
+        // (lane L2 OFF too: its R1950 innermost rewrite answers `NT.s` inside `NA.NT` on its own — asserted just below)
+        let off = try scan(root, env: ["CANDOR_R1513_OFF": "1", "CANDOR_TYPE_ID_L2_OFF": "1"])
+        let offL2On = try scan(root, env: ["CANDOR_R1513_OFF": "1"])
+        XCTAssertEqual(ProcessHarness.inferred(offL2On, "NA.NT.pStatic")?.contains("Fs"), true,
+                       "R1950 (lane L2): bare `NT` inside `NA.NT` is NA.NT itself, so `NT.s.eff()` is charged without R1513: \(offL2On["NA.NT.pStatic"] ?? [:])")
         for fn in ["NA.NT.pField", "NA.NT.pMeta", "NA.NT.pRet", "NA.NT.pStatic", "NA.pParam", "DA.Mid.Deep.pDeep",
                    "IA.CT.pInh", "XA.XT.pExtCb", "XA.XT.pExtRet"] {
             XCTAssertNil(ProcessHarness.inferred(off, fn)?.first { $0 == "Fs" }, "the release was silent on \(fn): \(off[fn] ?? [:])")

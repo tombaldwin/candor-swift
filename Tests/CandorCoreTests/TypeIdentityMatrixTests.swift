@@ -130,6 +130,35 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Plain15.p_data", has: ["Own15.Outer15.Data.write"], lane: .ls, targetHasNot: ["Own15.Outer15.Data.write", "Own15.Data.write"]),
         ])
     }
+    /// fx16 (lane L2): every moved cell's edge is pinned — the dependency-typed cells lose the scan twin's edges, the extension member
+    /// keeps its own, and each R1950 cell binds exactly the innermost nested type.
+    func testFx16_L2UseUnitGuard() throws {
+        try matrix(X.fx16, "fx16", edges: [
+            E("U16.s1_ann", has: ["Lib16.init", "Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.init", "Lib16.wipe16"]),
+            E("U16.s1_inline", has: ["Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.init", "Lib16.wipe16"]),
+            E("U16.s1_as", has: ["Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.wipe16"]),
+            E("U16.s1_ext", has: ["Lib16.extWipe16"], lane: .l2, targetHas: ["Lib16.extWipe16"], targetHasNot: ["Lib16.init"]),
+            E("U16.s1_ext_quiet", has: ["Lib16.extQuiet16"], lane: .l2, targetHas: ["Lib16.extQuiet16"]),
+            E("U16.s2_nested", has: ["Outer16.Box16.seal16"], lane: .l2, targetHasNot: ["Outer16.Box16.init", "Outer16.Box16.seal16"]),
+            E("U16.s3_qual", has: ["Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.wipe16"]),
+            E("U16.s5_alias", has: ["Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.wipe16"]),
+            E("U16.m_kit", has: ["Kit16.tap16"], lane: .l2, targetHasNot: ["Kit16.init", "Kit16.tap16"]),
+            E("U16.m_kit_inline", has: ["Kit16.tap16"], lane: .l2, targetHasNot: ["Kit16.init", "Kit16.tap16"]),
+            E("Outer16.s4_own", has: ["Outer16.Box16.init", "Outer16.Box16.seal16"]),
+            E("Outer16a.r_inner_loud", has: ["Store16.put16"], lane: .l2, targetHas: ["Outer16a.Store16.init", "Outer16a.Store16.put16"], targetHasNot: ["Store16.init", "Store16.put16"]),
+            E("Outer16b.r_inner_pure", has: ["Pipe16.flow16"], lane: .l2, targetHas: ["Outer16b.Pipe16.flow16"], targetHasNot: ["Pipe16.init", "Pipe16.flow16"]),
+            E("Plain16.r_plain_top", has: ["Pipe16.init", "Pipe16.flow16"]),
+            E("Outer16c.Mid16.r_mid_pure", has: ["Outer16c.Mid16.Knob16.turn16", "Outer16c.Knob16.turn16"], lane: .l2,
+              targetHas: ["Outer16c.Mid16.Knob16.init", "Outer16c.Mid16.Knob16.turn16"], targetHasNot: ["Outer16c.Knob16.init", "Outer16c.Knob16.turn16"]),
+            E("Outer16c.r_outer_loud", has: ["Outer16c.Knob16.turn16"], lane: .l2, targetHas: ["Outer16c.Knob16.turn16"], targetHasNot: ["Outer16c.Mid16.Knob16.turn16"]),
+            E("Outer16d.q_found_pure", has: ["Outer16d.Data.append"], lane: .l2, targetHasNot: ["Outer16d.Data.append", "Outer16d.Data.init"]),
+            E("Outer16d.q_nested_loud", has: ["Outer16d.Data.append"]),
+            E("Outer16e.q_dep", has: ["Lib16.wipe16"], lane: .l2, targetHasNot: ["Lib16.wipe16", "Outer16e.Lib16.wipe16"]),
+            E("Outer16e.q_nested_pure", has: ["Lib16.wipe16"], lane: .l2, targetHas: ["Outer16e.Lib16.init", "Outer16e.Lib16.wipe16"], targetHasNot: ["Lib16.wipe16"]),
+            // the innermost rewrite must not reach a nested type declared by an extension in a module this file cannot see
+            E("Outer16f.r_unseen_nested", has: ["Tank16.init", "Tank16.fill16"], hasNot: ["Outer16f.Tank16.fill16"]),
+        ])
+    }
     func testFx12_LSAttack() throws {
         try matrix(X.fx12, "fx12", edges: [
             E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),
@@ -143,7 +172,9 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("H12.b_found", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
             E("H12.own_top", has: ["Data.wipe12"]), E("H12.own_top_pure", has: ["Data.write"]),
             E("H12.b3r_plat", has: ["Data.wipe12"]), E("H12.b3r_plat_pure", has: ["Data.write"]), E("H12.b3r_copy", has: ["Data.wipe12"]),
-            E("Outer12.inner_nested", has: ["Data.write"]), E("L12.body_local", has: ["Data.write"]), E("Sp12.sp_data", has: ["Data.write"]),
+            // R1950 (lane L2): inside `Outer12`, bare `Data` is the innermost nested `Outer12.Data`, not Core12's top-level key `Data`
+            E("Outer12.inner_nested", has: ["Data.write"], lane: .l2, targetHas: ["Outer12.Data.init", "Outer12.Data.write"], targetHasNot: ["Data.write", "Node12.Data.init()"]),
+            E("L12.body_local", has: ["Data.write"]), E("Sp12.sp_data", has: ["Data.write"]),
         ])
     }
 }

@@ -4611,10 +4611,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     }
     // SOUNDNESS R1938 (lane LS) — the narrow platform-name shadow (TypeIdentityShadow.swift). Built only when some scan file
     // DECLARES a type named like a platform/κ name; nil otherwise, so a package without the shape pays nothing.
-    let lsShadowR1938: LsShadowIndexR1938? = {
-        guard !CallCollector.lsShadowOff else { return nil }
-        let cands = declaredTypes.filter { !$0.contains(".") && LS_PLATFORM_NAMES_R1938.contains($0) }
-        guard !cands.isEmpty else { return nil }
+    // (lane L2 builds the same index over the NON-platform names: `makeShadowIndexR1938` is shared.)
+    func makeShadowIndexR1938(_ cands: Set<String>) -> LsShadowIndexR1938 {
         let facts = moduleIdentityFacts(sourcePaths: sourcePaths, rootDir: rootDir, owningPackage: { owningPackage(of: $0) },
                                         owningTarget: { owningTarget(of: $0, in: $1) }, xcodeModulesByFile: xcodeModulesByFile,
                                         swiftModuleOf: { swiftModuleOf($0) })
@@ -4656,7 +4654,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         for p in declW { declByLeaf[p.split(separator: ".").last.map(String.init) ?? p, default: []].insert(p) }
         var assoc: [String: Set<String>] = [:]
         for c in collectors { for (pp, a) in c.assocTypesByProtocolR1938 { assoc[pp, default: []].formUnion(a) } }
-        return LsShadowIndexR1938(candidates: cands, idx: idx, topLevelModules: tops, privateAliasFiles: privAliases,
+        var r = LsShadowIndexR1938(candidates: cands, idx: idx, topLevelModules: tops, privateAliasFiles: privAliases,
                                   localTypePaths: widen(localTypePaths), declaredTypePaths: declW,
                                   memberAliasNamesByPath: widenKeys(memberTypeAliasesByPathAll.mapValues { Set($0.keys) }, { $0.union($1) }),
                                   memberAliasNamesBySimple: memberTypeAliasesAll.mapValues { Set($0.keys) },
@@ -4665,14 +4663,124 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                   supertypesByPath: widenKeys(supertypePathsOf.mapValues(widen), { $0.union($1) }),
                                   protocolSupers: widenKeys(protocolSupers.mapValues(widen), { $0.union($1) }),
                                   typeGenericNames: typeGenericParamNamesAI, stripOwnModule: strip)
+        // R1950 — a widened (stripped) path names its recorded spelling, so a rewrite lands on the key the units are filed under
+        for p in localTypePaths { if let q = strip(p), !localTypePaths.contains(q) { r.recordedPath[q] = p } }
+        return r
+    }
+    let lsShadowR1938: LsShadowIndexR1938? = {
+        guard !CallCollector.lsShadowOff else { return nil }
+        let cands = declaredTypes.filter { !$0.contains(".") && LS_PLATFORM_NAMES_R1938.contains($0) }
+        guard !cands.isEmpty else { return nil }
+        return makeShadowIndexR1938(cands)
+    }()
+    // SOUNDNESS R1938 (lane L2) — the same per-unit rule over every OTHER declared simple name (TypeIdentityShadow.swift, L2). Built
+    // whenever the scan declares a type at all; a unit decides only the names its body spells.
+    let l2IndexR1938: LsShadowIndexR1938? = {
+        guard !CallCollector.l2OffR1938 else { return nil }
+        let cands = declaredTypes.filter { !$0.contains(".") && !LS_PLATFORM_NAMES_R1938.contains($0) }
+        // R1950's innermost rewrite also needs the PLATFORM names (a nested `Data` inside its own enclosing type): the index
+        // decides them too, and the Driver keeps only `innermost` for them (LS owns their "as if undeclared" reading)
+        let plat = declaredTypes.filter { !$0.contains(".") && LS_PLATFORM_NAMES_R1938.contains($0) }
+        guard !cands.isEmpty || !plat.isEmpty else { return nil }
+        return makeShadowIndexR1938(cands.union(plat))
     }()
     // the extended-only top-level names: `extension Data { … }` keeps `Data` in `localTypes` even with no scan declaration
     let lsExtendedTopLevelR1938: Set<String> = {
-        guard let ls = lsShadowR1938 else { return [] }
+        let cands = (lsShadowR1938?.candidates ?? []).union(l2IndexR1938?.candidates ?? [])
+        guard !cands.isEmpty else { return [] }
         var out: Set<String> = []
-        for c in collectors { for p in c.localTypePaths.subtracting(c.declaredTypePaths) where ls.candidates.contains(p) { out.insert(p) } }
+        for c in collectors { for p in c.localTypePaths.subtracting(c.declaredTypePaths) where cands.contains(p) { out.insert(p) } }
         return out
     }()
+    // SOUNDNESS R1938 (lane L2) — module-level typealiases whose target the ALIAS's own file reads "as if undeclared" (fx4
+    // `typealias DepLib = Lib` in a file that imports Guess and not Core): alias -> (target name, the alias's module). An alias
+    // name declared twice, or fileprivate, or whose target is not a bare (or `Module.`-qualified dependency) name, is left alone.
+    let l2AliasesR1938: [String: (target: String, module: String)] = {
+        guard let l2 = l2IndexR1938 else { return [:] }
+        var out: [String: (target: String, module: String)] = [:], poisoned: Set<String> = []
+        for c in collectors {
+            for (a, t0) in c.fileTypeAliases where !c.filePrivateTypeAliases.contains(a) {
+                if out[a] != nil || poisoned.contains(a) { poisoned.insert(a); out[a] = nil; continue }
+                guard let m = l2.idx.moduleOf(c.file) else { poisoned.insert(a); continue }
+                var t = t0
+                if let dot = t.firstIndex(of: ".") {
+                    let head = String(t[..<dot])
+                    // `typealias A = Guess.Lib`: a module this scan does not own and the alias's file imports
+                    guard !l2.idx.ownModules.contains(head), !projectModules.contains(head), !localTypes.contains(head),
+                          (fileImports[c.file] ?? []).contains(head) else { poisoned.insert(a); continue }
+                    t = String(t[t.index(after: dot)...])
+                    guard !t.contains("."), l2.candidates.contains(t) || LS_PLATFORM_NAMES_R1938.contains(t) else { poisoned.insert(a); continue }
+                    out[a] = (t, m); continue
+                }
+                guard !t.contains("<"), l2.candidates.contains(t) else { poisoned.insert(a); continue }
+                let r = l2.decide(file: c.file, enclosingPath: nil, generics: [], bodyDecls: [], only: [t])
+                if r.ok.contains(t) { out[a] = (t, m) } else { poisoned.insert(a) }
+            }
+        }
+        for a in poisoned { out[a] = nil }
+        return out
+    }()
+    // SOUNDNESS R1950 (lane L2) — the modules that declare each nested type path (as recorded, and own-module-stripped): an
+    // innermost rewrite is taken only where the unit's file can SEE a declaring module. A type nested by an `extension Outer` in a
+    // module the file does not import is not a member type there (attack cell: `extension Hold17 { struct Tank17 }` in Ext17 read
+    // from Core17's `Hold17` bound the loud nested type over Core17's pure top-level `Tank17`, a fabrication, before this filter).
+    let l2PathModulesR1950: [String: Set<String>] = {
+        guard let l2 = l2IndexR1938 else { return [:] }
+        var out: [String: Set<String>] = [:]
+        for c in collectors {
+            let m = l2.idx.moduleOf(c.file) ?? "\u{0}unattributed"
+            for p in c.localTypePaths where p.contains(".") {
+                out[p, default: []].insert(m)
+                if let q = l2.stripOwnModule(p) { out[q, default: []].insert(m) }
+            }
+        }
+        return out
+    }()
+    // SOUNDNESS R1938 (lane L2) — a call collected under one of L2's NON-platform names (the unit's scope reads `n` as a type the
+    // scan does not declare there). The collector still types the receiver `n` where some extension keeps `n` in `localTypes`
+    // (fx4 `extension Lib: Wiper {}` beside Core's unrelated `class Lib`), so the Driver must not land it on the SCAN's units of
+    // that name: a unit `n.m` is kept only where its OWN file reads `n` "as if undeclared" too (an extension of the same non-scan
+    // type), and a unit of a nested scan type whose leaf is `n` never.
+    func l2NameR1938(_ call: Call) -> String? {
+        guard let n = call.lsNameR1938, l2IndexR1938 != nil, !LS_PLATFORM_NAMES_R1938.contains(n) else { return nil }
+        return n
+    }
+    var l2KeepCacheR1938: [String: Bool] = [:]
+    /// SOUNDNESS R1938 (lane L2) — THE `identity:foreign` EVIDENCE ARM (DESIGN §3, Fable's edit 4). A unit's spelling of `n` names a
+    /// type the scan does not declare there; whose it is must come from a dependency. Where a READABLE module the file imports
+    /// declares a type `n`, the identity is that dependency's and the join / `invisible` answers it. Where none does and the file's
+    /// target names a dependency module NOBODY CAN READ (no sources, no chained report), the identity is not provable: the type
+    /// may be that module's and its member may do anything. Without this arm such a member call read `invisible` only, which no
+    /// `deny E Unknown` gate sees (fx4-unr's nested-only `Vault`, fx16-unr). True by construction for exactly those calls.
+    var l2ForeignCacheR1938: [String: Bool] = [:]
+    func l2IdentityForeignR1938(_ n: String, inFile file: String) -> Bool {
+        let key = file + "\u{0}" + n
+        if let c = l2ForeignCacheR1938[key] { return c }
+        var foreign = false
+        let imports = Set(fileImports[file] ?? [])
+        let readableDeclares = imports.contains { m in moduleDeclarations(m)?.names[n] != nil }
+        if !readableDeclares {
+            let declared = declaredByFile[file] ?? []
+            let unreadable = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
+                .filter { declared.contains($0) && moduleDeclarations($0) == nil && !deps.coversModule($0) && !PLATFORM_MODULES.contains($0) }
+            foreign = !unreadable.isEmpty
+        }
+        l2ForeignCacheR1938[key] = foreign
+        return foreign
+    }
+    func l2KeepsTargetR1938(_ t: String, _ n: String) -> Bool {
+        guard let l2 = l2IndexR1938 else { return true }
+        let q = t.prefix { $0 != "(" && $0 != "#" }
+        guard let dot = q.lastIndex(of: ".") else { return true }   // a free function: not a member of `n`
+        let owner = String(q[..<dot])
+        if owner != n { return !(owner.hasSuffix("." + n)) }          // another type's member stays; a NESTED scan `…n` goes
+        let file = String((locOf[t] ?? "").prefix { $0 != ":" })
+        let key = file + "\u{0}" + n
+        if let c = l2KeepCacheR1938[key] { return c }
+        let keep = !file.isEmpty && l2.decide(file: file, enclosingPath: nil, generics: [], bodyDecls: [], only: [n]).ok.contains(n)
+        l2KeepCacheR1938[key] = keep
+        return keep
+    }
     var aiBase = AiTypeIndex()
     var aiSharedPaths = Set<String>()      // the FULL paths added above — the canonicaliser's precise spellings
     if !CallCollector.aiOff {
@@ -5700,7 +5808,36 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    }
                                    return r.ok
                                }(),
-                               lsKeepLocalR1938: lsExtendedTopLevelR1938)
+                               lsKeepLocalR1938: lsExtendedTopLevelR1938,
+                               l2FactsR1938: {                                                        // R1938 L2
+                                   guard let l2 = l2IndexR1938 else { return L2UnitFactsR1938() }
+                                   let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                   var facts = L2UnitFactsR1938()
+                                   facts.qualified = true
+                                   let spelled = l2SpelledNamesR1938(Syntax(body))
+                                   let r = l2.decide(file: file, enclosingPath: f.enclosingTypePath ?? f.enclosingType,
+                                                     generics: f.genericParamNames.union(f.genericBounds.keys),
+                                                     bodyDecls: lsBodyDeclNamesR1938(Syntax(body)), only: spelled)
+                                   facts.names = r.ok.filter { !LS_PLATFORM_NAMES_R1938.contains($0) }
+                                   if let m = l2.idx.moduleOf(file) {
+                                       let vis = l2.idx.visibleModules(inFile: file)
+                                       // R1950 — only a nested type whose declaring module the file can see (see `l2PathModulesR1950`)
+                                       facts.innermost = r.innermost.filter { (_, p) in
+                                           let ms = l2PathModulesR1950[p] ?? []
+                                           return !ms.contains("\u{0}unattributed") && (ms.contains(m) || !ms.isDisjoint(with: vis))
+                                       }
+                                       for a in spelled { if let x = l2AliasesR1938[a], x.module == m || vis.contains(x.module) { facts.aliases[a] = x.target } }
+                                   }
+                                   if lsProbeOnR1938 {
+                                       for n in facts.names.sorted() { lsProbeR1938("IDL2\t\(file)\t\(f.qual)\tas-undeclared\t\(n)") }
+                                       for (n, p) in facts.innermost.sorted(by: { $0.key < $1.key }) { lsProbeR1938("IDL2\t\(file)\t\(f.qual)\tinnermost\t\(n)\t\(p)") }
+                                       for (a, t) in facts.aliases.sorted(by: { $0.key < $1.key }) { lsProbeR1938("IDL2\t\(file)\t\(f.qual)\talias\t\(a)\t\(t)") }
+                                       for (n, why) in r.refused.sorted(by: { $0.key < $1.key }) where !LS_PLATFORM_NAMES_R1938.contains(n) {
+                                           lsProbeR1938("IDL2R\t\(file)\t\(f.qual)\t\(n)\t\(why)")
+                                       }
+                                   }
+                                   return facts
+                               }())
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
@@ -6074,6 +6211,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            // SOUNDNESS R1938 (lane L2) — the `identity:foreign` arm (see `l2IdentityForeignR1938`), on a MEMBER call only (the
+            // constructor of the same receiver is the binding, not a dispatch).
+            if let n = l2NameR1938(call), !call.unqualified, call.path != n, call.leaf != "init", call.leaf != n {
+                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                if l2IdentityForeignR1938(n, inFile: file) {
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(call.leaf)")
+                    if c12Probe { FileHandle.standardError.write("C12HEDGE\t\(f.qual)\t\(call.leaf)\tidentity:foreign\n".data(using: .utf8)!) }
+                }
+            }
             // SOUNDNESS R1873 — a TYPE-base method reference (`[p].map(HTTPClient.spawn)`) is a call only when the member
             // is STATIC; an unapplied instance method (`HTTPClient.get`) invokes nothing. Without that proof the
             // reference forms nothing, which is the release's reading.
@@ -6519,17 +6666,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 }
             } else if call.typed {
-                let typedTargets = resolveQual(call.path)   // hoisted: the else-if chain below reads it once
-                if !CallCollector.aiOff, !overloadedBases.contains(call.path), overloadedBasesPath.contains(call.path) {
+                // SOUNDNESS R1938 (lane L2) — see `l2KeepsTargetR1938`: a receiver the unit reads as a NON-scan type reaches
+                // only the units that extend that type; when none is left the chain below answers as for an undeclared type.
+                let l2n = l2NameR1938(call)
+                let l2Keep: (String) -> Bool = { t in l2n.map { l2KeepsTargetR1938(t, $0) } ?? true }
+                let typedTargets = resolveQual(call.path).filter(l2Keep)   // hoisted: the else-if chain below reads it once
+                let l2OverPath = l2n == nil || matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
+                let l2Over = l2n == nil || matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)).contains(where: l2Keep)
+                if !CallCollector.aiOff, !overloadedBases.contains(call.path), overloadedBasesPath.contains(call.path), l2OverPath {
                     // VEIN A(i) — the exact overload set of a canonical FULL path (see the loop head).
-                    for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                    for t in matchOverloadsPath(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) where l2Keep(t) {
                         edges[f.qual, default: []].insert(t)
                         callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         resolved = true
                     }
-                } else if overloadedBases.contains(call.path) {
+                } else if overloadedBases.contains(call.path), l2Over {
                     var admitted = 0
-                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) {
+                    for t in matchOverloads(call.path, argc, call.argTypes, swiftModuleOf(f.loc)) where l2Keep(t) {
                         resolved = true
                         guard extensionInitLabelsAdmit(call, t), operatorOperandsAdmit(call, t) else { continue }   // R1047, R1081
                         edges[f.qual, default: []].insert(t); admitted += 1
@@ -6878,7 +7031,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // Swift sees no scan `Data`): the scan's same-named type is not this call's type, so the local-constructor arms
                 // below must not claim it (they would edge `Node.Data.init` + `Outer.Data.init`). An extension-only top-level
                 // `extension Data { init… }` keeps its arms: there the local inits ARE the platform type's.
-                let lsCtorR1938 = call.lsNameR1938 != nil && call.lsNameR1938 == call.path && !lsExtendedTopLevelR1938.contains(call.path)
+                // SOUNDNESS R1938 (lane L2) — for a NON-platform name the extension exception holds only where an extension of the
+                // same non-scan type declares an init (`l2KeepsTargetR1938`); the scan's own `Lib.init` is not this call's
+                let l2CtorN = l2NameR1938(call).flatMap { $0 == call.path ? $0 : nil }
+                let l2CtorKeep: (String) -> Bool = { t in l2CtorN.map { l2KeepsTargetR1938(t, $0) } ?? true }
+                let l2CtorForeign = l2CtorN != nil && !(resolveQual("\(call.path).init")
+                    + matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc))).contains(where: l2CtorKeep)
+                let lsCtorR1938 = (call.lsNameR1938 != nil && call.lsNameR1938 == call.path && !lsExtendedTopLevelR1938.contains(call.path))
+                    || l2CtorForeign
                 let localCtorR1938 = localTypes.contains(call.path) && !lsCtorR1938
                 let freeArmWouldClaim = overloadedBases.contains(call.path)
                     || (freeFnByName[call.path]?.count == 1)
@@ -7068,7 +7228,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 } else if localCtorR1938, overloadedBases.contains("\(call.path).init") {
                     // R1047 — `resolved` keeps the release's answer (a matched overload); only the EDGE is filtered.
                     var admitted = 0
-                    for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) {
+                    for t in matchOverloads("\(call.path).init", argc, call.argTypes, swiftModuleOf(f.loc)) where l2CtorKeep(t) {
                         if extensionInitLabelsAdmit(call, t) { edges[f.qual, default: []].insert(t); admitted += 1 }
                         resolved = true
                     }
@@ -7081,7 +7241,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // so mark resolved REGARDLESS of whether an explicit `init` unit exists — a synthesized
                     // init has no unit to edge to but the construction is still local; without this the caller
                     // was falsely tagged `invisible` (the over-disclosure regression, sweep [36]).
-                    let admittedR1504 = resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) }
+                    let admittedR1504 = resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) && l2CtorKeep($0) }
                     edges[f.qual, default: []].formUnion(admittedR1504)
                     if admittedR1504.isEmpty { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                     resolved = true
@@ -7264,9 +7424,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                STD_PURE_PROTOCOLS.contains(owner) {
                 stdlibRequirementDispatchR1473(owner, call.leaf, f, site: "call")
             }
-            if !resolved, !call.typed || r651Extended, !call.unqualified, !call.opaqueRecv,
+            // SOUNDNESS R1938 (lane L2) — LAYER 2: `localTypes.contains(owner)` is the package-wide simple name, and the unit read
+            // this owner as a type the scan does not declare there (`l2NameR1938`): the dependency's member is named on the row
+            // (obligation 1's key) exactly as it is where the scan declares no such name (fx5nw `Guess#Lib.wipeLib`).
+            let l2OwnerForeignR1938 = call.extOwner != nil && l2NameR1938(call) == call.extOwner
+            if !resolved, !call.typed || r651Extended || l2OwnerForeignR1938, !call.unqualified, !call.opaqueRecv,
                let owner = call.extOwner,
-               !localTypes.contains(owner) || r651Extended, !STD_PURE_PROTOCOLS.contains(owner),
+               !localTypes.contains(owner) || r651Extended || l2OwnerForeignR1938, !STD_PURE_PROTOCOLS.contains(owner),
                !RAW_VALUE_BASE_TYPES.contains(owner),
                // SOUNDNESS R1463 — see `Call.spelledRecvR1463`: a platform nominal read off the receiver's spelling.
                !(call.spelledRecvR1463 && STDLIB_NOMINALS.contains(owner)) {

@@ -60,7 +60,17 @@ public func f02other() { _ = Y.AF.unix }
         try (policy + "\n").write(to: pf, atomically: true, encoding: .utf8)
         return try ProcessHarness.run(bin, [root.path, "--policy", pf.path, "--json"], env: env).code
     }
-    static let off = ["CANDOR_R983_OFF": "1"]
+    // (lane L2 off too: R1950's innermost rewrite answers the bare `AF` inside `NS` on its own — `s04inner`/`s05innerf` stay charged
+    // with only R983 off, which `testR1950AnswersTheBareInnerSpellingWithoutR983` pins)
+    static let off = ["CANDOR_R983_OFF": "1", "CANDOR_TYPE_ID_L2_OFF": "1"]
+
+    func testR1950AnswersTheBareInnerSpellingWithoutR983() throws {
+        let root = try ProcessHarness.makeFilesPackage(["a.swift": Self.source], name: "T")
+        defer { try? FileManager.default.removeItem(at: root) }
+        for p in ["deny Env NS.s04inner", "deny Env NS.s05innerf"] {
+            XCTAssertEqual(try gate(root, p, env: ["CANDOR_R983_OFF": "1"]), 1, "`\(p)`: bare `AF` inside `NS` is NS.AF (R1950, lane L2)")
+        }
+    }
 
     static let silences = ["deny Env s01var", "deny Env s02let", "deny Env s03hop", "deny Env NS.s04inner",
                            "deny Env NS.s05innerf", "deny Env s06deepvar", "deny Env s07deepfunc", "deny Env s08nested"]

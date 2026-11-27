@@ -3,13 +3,13 @@
 
 enum TypeIdentityCells {
     static let fx3 = """
-N.n_nested WRITES -+U|-+U|ABSENT l5 -+inv|Fs|-+U+inv
-N.n_nested_ctor WRITES -+U|-+U|ABSENT l5 -+inv|Fs|-+U+inv
+N.n_nested WRITES -+U|-+U|ABSENT l5 -+inv|Fs|-+U+inv ^l2 -+U+inv|-+U|-+inv
+N.n_nested_ctor WRITES -+U|-+U|ABSENT l5 -+inv|Fs|-+U+inv ^l2 -+U+inv|-+U|-+U+inv
 N.n_nested_own pure -+U|-+U|ABSENT
 N.t_twin WRITES -+U|-+U|-+U
 N.t_twin_ann WRITES Fs+inc|Fs+inc|Fs+inc
-N.r73_ctor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-N.r73_ctor_ann WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+N.r73_ctor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
+N.r73_ctor_ann WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
 N.n_live WRITES -+inv|Fs+inc|-+inv
 """
 
@@ -30,29 +30,29 @@ C.l_ctor_vault WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
 C.l_qann_lib WRITES -+inv|-|-+inv l2 -+inv|Fs|-+inv
 C.l_qctor_lib WRITES -+inv|-|-+inv l2 -+inv|Fs|-+inv
 C.l_alias_lib WRITES -+inv|ABSENT|-+inv l2 -+inv|Fs|-+inv
-C.l_fac_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.l_fac_vault WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.l_upper_lib WRITES -|-|-+inv
+C.l_fac_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv # L2: `mkLib`'s body `Lib()` is a use-unit spelling (+inv propagates); the RETURN binding is L3's
+C.l_fac_vault WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
+C.l_upper_lib WRITES -|-|-+inv ^l2 -+inv|-|-+inv
 C.l_inline_lib WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
 C.l_inline_vault WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
-C.l_closure_lib WRITES -+U|-+U|-+U l3 -+inv|Fs|-+U+inv
-C.l_closure_named WRITES -+U|-+U|-+U l3 -+inv|Fs|-+U+inv
-C.l_generic WRITES -|-|- l2 -+U/-+inv|Fs|-+U/-+inv
+C.l_closure_lib WRITES -+U|-+U|-+U l3 -+inv|Fs|-+U+inv ^l2 -+U+inv|-+U|-+U+inv # L2: `withLib`'s body `f(Lib())` is a use-unit spelling (+inv propagates); the T4 closure-parameter binding is unchanged
+C.l_closure_named WRITES -+U|-+U|-+U l3 -+inv|Fs|-+U+inv ^l2 -+U+inv|-+U|-+U+inv
+C.l_generic WRITES -|-|- l3 -+U/-+inv|Fs|-+U/-+inv ^l2 -+inv|-|-+inv # moved from l2 (lane L2 premise check): the dispatch is `GB.run`'s `v.wipeLib` over `Wiper` conformers, and the conformer is `extension Lib: Wiper {}` — a DECLARATION-scope binder (which Lib it extends), not a use-unit spelling; fx5 (no collision) reads -+U chained too
 C.l_own_nested pure ABSENT|ABSENT|ABSENT
 C.l_mirror_kit pure Fs+inc|Fs+inc|Fs+inc l2 -+inv|-|-+inv
-C.g_ann_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.g_ctor_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.g_ann_vault_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.g_ctor_vault_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+C.g_ann_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv # L2: the global's own initializer `Lib()` is a use-unit spelling (Guess.Lib, +inv); the BINDING `g.wipeLib` is L3's and still edges Core's Lib.wipeLib
+C.g_ctor_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
+C.g_ann_vault_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
+C.g_ctor_vault_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
 C.g_qann_lib_c WRITES -+inv|-|-+inv l3 -+inv|Fs|-+inv
 C.g_qctor_lib_c WRITES -+U+inv|-+U|-+inv l3 -+inv|Fs|-+inv
 C.g_alias_lib_c WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
-C.g_fac_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-C.g_upper_lib_c WRITES -|-|-+inv
+C.g_fac_lib_c WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
+C.g_upper_lib_c WRITES -|-|-+inv ^l2 -+inv|-|-+inv
 C.g_own_nested_c pure ABSENT|ABSENT|ABSENT
-C.g_mirror_kit_c pure Fs+inc|Fs+inc|Fs+inc l3 -+inv|-|-+inv
+C.g_mirror_kit_c pure Fs+inc|Fs+inc|Fs+inc l3 -+inv|-|-+inv ^l2 Fs+inv+inc|Fs+inc|Fs+inv+inc
 C.live WRITES -+inv|Fs+inc|-+inv
-NI.ni_global_ctor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+NI.ni_global_ctor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
 NI.ni_global_qann WRITES -+inv|-|-+inv l3 -+inv|Fs|-+inv
 NI.ni_field_qann WRITES -+inv|-|-+inv l3 -+inv|Fs|-+inv
 Holder.niQann WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
@@ -205,7 +205,7 @@ H.h_hush pure -+U|-+U
 """
 
     static let f2 = """
-F.f_dep WRITES -+U|-+U l5 -+inv|Fs
+F.f_dep WRITES -+U|-+U l5 -+inv|Fs ^l2 -+U+inv|-+U
 F.f_live WRITES -+inv|Fs+inc
 """
 
@@ -386,6 +386,40 @@ Plain13.p_data WRITES ABSENT ls Fs
 Outer15.a_pure pure ABSENT
 Outer15.a_loud WRITES Fs+inc
 Plain15.p_data WRITES ABSENT ls Fs
+"""
+
+    // fx16 (lane L2): use-unit spellings of names a NON-imported sibling target (Core16) declares, with NO conformance on the
+    // dependency type (so no protocol hedge stands in for the binding in `un`/`unr`): B1 direction (scan pure, dependency loud) beside
+    // every mirror (scan loud, dependency pure), the scan's extension of the dependency type (must keep its edge), qualified and alias
+    // spellings; R1950's innermost nested type in both directions and two levels deep; R1947's qualified platform name inside a type
+    // nesting the same name, both directions.
+    static let fx16 = """
+U16.s1_ann WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
+U16.s1_inline WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
+U16.s1_as WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
+U16.s1_ext WRITES Fs+inc|Fs+inc|Fs+inc ^l2 Fs+inv+inc|Fs+inc|Fs+U+inv+inc # the scan's extension of Dep16.Lib16 keeps its edge
+U16.s1_ext_quiet pure ABSENT|ABSENT|ABSENT ^l2 -+inv|ABSENT|-+U+inv # pure twin of s1_ext (unique name): constructs Dep16.Lib16 (+inv)
+U16.s2_nested WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
+U16.s3_qual WRITES -+inv|-|-+inv l2 -+inv|Fs|-+U+inv
+U16.s3_qual_ann WRITES -+inv|-|-+inv l2 -+inv|Fs|-+U+inv
+U16.s5_alias WRITES -+inv|ABSENT|-+inv l2 -+inv|Fs|-+U+inv
+U16.m_kit pure Fs+inc|Fs+inc|Fs+inc l2 -+inv|-|-+U+inv
+U16.m_kit_inline pure Fs+inc|Fs+inc|Fs+inc l2 -+inv|-|-+U+inv
+U16.live WRITES -+inv|Fs+inc|-+inv
+Outer16.s4_own pure ABSENT|ABSENT|ABSENT
+Outer16a.r_inner_loud WRITES ABSENT|ABSENT|ABSENT l2 Fs|Fs|Fs
+Outer16a.r_inner_inline WRITES ABSENT|ABSENT|ABSENT l2 Fs|Fs|Fs
+Outer16b.r_inner_pure pure Fs+inc|Fs+inc|Fs+inc l2 ABSENT|ABSENT|ABSENT
+Outer16b.r_top_loud pure Fs+inc|Fs+inc|Fs+inc l2 ABSENT|ABSENT|ABSENT
+Plain16.r_plain_top WRITES Fs+inc|Fs+inc|Fs+inc
+Outer16c.Mid16.r_mid_pure pure Fs+inc|Fs+inc|Fs+inc l2 ABSENT|ABSENT|ABSENT
+Outer16c.r_outer_loud WRITES Fs+inc|Fs+inc|Fs+inc
+Outer16d.q_found_pure pure Fs+inv+inc|Fs+inc|Fs+inv+inc l2 -+inv|-|-+inv
+Outer16d.q_nested_loud WRITES Fs+inv+inc|Fs+inc|Fs+inv+inc
+Outer16d.q_found_write WRITES -+inv|-|-+inv l2 Fs|Fs|Fs
+Outer16e.q_dep WRITES -+inv|-|-+inv l2 -+inv|Fs|-+U+inv
+Outer16e.q_nested_pure pure ABSENT|ABSENT|ABSENT
+Outer16f.r_unseen_nested pure ABSENT|ABSENT|ABSENT # R1950 control: Ext16 nests a LOUD `Outer16f.Tank16` from a module Feat16 does not import
 """
 
 }

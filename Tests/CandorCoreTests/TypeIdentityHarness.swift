@@ -29,14 +29,20 @@ enum TypeIdentityTarget {
     /// FAIL on a branch that has not landed them.
     static var expect: Set<TypeIdentityLane> {
         // LS landed (SOUNDNESS R1938 lane LS, the narrow platform-name shadow): its target column is the assertion now.
-        var s: Set<TypeIdentityLane> = [.ls]
-        if let e = ProcessInfo.processInfo.environment["CANDOR_IDENT_EXPECT_TARGET"] {
+        // L2 landed (SOUNDNESS R1938 lane L2, the use-unit guard; R1947, R1950): likewise.
+        var s: Set<TypeIdentityLane> = [.ls, .l2]
+        let env = ProcessInfo.processInfo.environment
+        if let e = env["CANDOR_IDENT_EXPECT_TARGET"] {
             if e == "all" { s = Set(TypeIdentityLane.allCases) }
             // `main` asserts the main column for EVERY cell, landed lanes included: the kill-switch arm (a landed lane's switch
             // set must read main's column again)
             else if e == "main" { s = [] }
             else { for p in e.split(separator: ",") { if let l = TypeIdentityLane(rawValue: String(p)) { s.insert(l) } } }
         }
+        // A landed lane's KILL SWITCH takes its flag down with it, so `CANDOR_TYPE_ID_L2_OFF=1 swift test` is the switch-off arm
+        // (every L2 cell must read main again, every other lane's as before).
+        if env["CANDOR_TYPE_ID_L2_OFF"] == "1" { s.remove(.l2) }
+        if env["CANDOR_TYPE_ID_SHADOW_OFF"] == "1" { s.remove(.ls) }
         return s
     }
 }
@@ -162,22 +168,32 @@ enum TypeIdentityHarness {
             un = p[0]; ch = p.count > 1 ? p[1] : p[0]; unr = p.count > 2 && p[2] != "~" ? p[2] : nil
         }
     }
-    struct Cell { let fn: String; let truth: String; let main: Reads; let lane: TypeIdentityLane?; let target: Reads?; let note: String }
+    struct Cell { let fn: String; let truth: String; let main: Reads; let lane: TypeIdentityLane?; let target: Reads?; let note: String
+        /// `^lane un|ch[|unr]`: the reading once `lane` has landed and the cell's OWN lane has not — a NEIGHBOUR the landed lane moved
+        /// (asserted exactly, like `main`). Lane L2, e.g.: a global's own initializer `Lib()` is a use-unit spelling, so the global's
+        /// callers gain the initializer's `invisible` while the global's BINDING (L3's) is unchanged.
+        var after: [(TypeIdentityLane, Reads)] = [] }
 
-    /// A table is one cell per line:  `fn  truth  un|ch[|unr]  [lane  un|ch[|unr]]  [# note]`. `truth` is the EXECUTED reading
-    /// (`WRITES`, `pure`, `LOGS`). A `~` in the `unr` position means the cell has no unreadable-dependency arm.
+    /// A table is one cell per line:  `fn  truth  un|ch[|unr]  [lane  un|ch[|unr]]  [^lane un|ch[|unr]]…  [# note]`. `truth` is the
+    /// EXECUTED reading (`WRITES`, `pure`, `LOGS`). A `~` in the `unr` position means the cell has no unreadable-dependency arm.
     static func cells(_ table: String) -> [Cell] {
         var out: [Cell] = []
         for raw in table.split(separator: "\n") {
             var line = String(raw)
             var note = ""
             if let h = line.range(of: " # ") { note = String(line[h.upperBound...]); line = String(line[..<h.lowerBound]) }
-            let f = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            var f = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
             if f.isEmpty || f[0].hasPrefix("#") { continue }
+            var after: [(TypeIdentityLane, Reads)] = []
+            while f.count >= 2, f[f.count - 2].hasPrefix("^") {
+                guard let l = TypeIdentityLane(rawValue: String(f[f.count - 2].dropFirst())) else { preconditionFailure("bad ^lane in: \(raw)") }
+                after.insert((l, Reads(f[f.count - 1])), at: 0)
+                f.removeLast(2)
+            }
             precondition(f.count == 3 || f.count == 5, "bad cell row: \(raw)")
             let lane: TypeIdentityLane? = f.count == 5 ? TypeIdentityLane(rawValue: f[3]) : nil
             if f.count == 5 { precondition(lane != nil, "bad lane in: \(raw)") }
-            out.append(Cell(fn: f[0], truth: f[1], main: Reads(f[2]), lane: lane, target: f.count == 5 ? Reads(f[4]) : nil, note: note))
+            out.append(Cell(fn: f[0], truth: f[1], main: Reads(f[2]), lane: lane, target: f.count == 5 ? Reads(f[4]) : nil, note: note, after: after))
         }
         return out
     }
@@ -204,8 +220,10 @@ enum TypeIdentityHarness {
         for c in cells(table) {
             XCTAssertEqual(truth[c.fn], c.truth, "\(label) \(c.fn): the table's truth must be the EXECUTED one", file: file, line: line)
             let useTarget = c.lane.map { TypeIdentityTarget.expect.contains($0) } ?? false
-            let want = useTarget ? c.target! : c.main
-            let tag = useTarget ? "TARGET[\(c.lane!.rawValue)]" : "main"
+            // the LAST landed neighbour lane that moved this cell (a later lane's `^` reading supersedes an earlier one's)
+            let moved = useTarget ? nil : c.after.last { TypeIdentityTarget.expect.contains($0.0) }
+            let want = useTarget ? c.target! : (moved?.1 ?? c.main)
+            let tag = useTarget ? "TARGET[\(c.lane!.rawValue)]" : (moved.map { "after[\($0.0.rawValue)]" } ?? "main")
             func one(_ arm: String, _ got: String, _ w: String) {
                 let ok = useTarget ? w.split(separator: "/").contains { satisfies(got, String($0)) } : (got == w)
                 XCTAssertTrue(ok, "\(label) \(c.fn) \(arm): reads \(got), \(tag) says \(w)\(c.note.isEmpty ? "" : " — \(c.note)")", file: file, line: line)

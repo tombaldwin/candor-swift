@@ -10,6 +10,29 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A type name a unit's own scope cannot resolve to the scan's same-named type is read as the dependency's (SOUNDNESS R1938 lane L2, R1947, R1950)
+
+Lane LS's per-unit rule now covers every name the scan declares, not only platform names. A bare `Lib` that a sibling target the
+file does not import declares, or a `Vault` the scan declares only nested in an unrelated type, names the DEPENDENCY's type in that
+unit: the binding went to the scan's type instead (executed, fixtures `TypeIdentity/fx4`, `fx16`: 26+ WRITES cells ABSENT on v0.43.0
+and main, and the mirror — a loud scan `Kit` beside a pure dependency `Kit` — charged `Fs` to code that runs the pure one). For the
+spellings whose scope is the unit (local annotation, local constructor, inline constructor head, `as!`, and a receiver bound by one
+of those) the name now reads as in the same package with the invisible declaration renamed: `invisible` + obligation 1's
+`dispatchesOn` key standalone, the dependency's body chained. A unit `N.m` of the scan is reached only where its own file reads `N`
+the same way (an extension of the dependency type in the scan keeps its edge). Also:
+- `M.N` with `M` an imported module the scan does not own (`Guess.Lib`, `Foundation.Data`) is M's type even where the scan declares
+  or nests an `N` (SOUNDNESS R1947: `Foundation.Data(…).write(to:)` inside a type nesting `Data` read ABSENT over a write; the mirror
+  charged the nested type's loud member);
+- a module-level `typealias A = N` read from its own file the same way carries that reading to every use of `A`;
+- SOUNDNESS R1950: bare `N` inside a type that nests `N` is the INNERMOST nested type (when a module the file can see declares it),
+  not the package-wide simple key (fx16: a nested loud `Store16` beside a pure top-level one read ABSENT; the reverse read `Fs`).
+- **the `identity:foreign` evidence arm** (DESIGN §3): where such a name is declared by no readable module the file imports and the
+  file's target names a dependency nobody can read, the member call is `Unknown {dispatch:<untyped>.<m>}` — before, `invisible`
+  alone, which no `deny E Unknown` gate sees.
+Fields, globals, returns and closure parameters keep their binding (L3); their callers can gain the `invisible` of a callee body the
+rule now reads correctly (a global's own `Lib()` initializer). Kill switch `CANDOR_TYPE_ID_L2_OFF`; probe lines `IDL2`/`IDL2R`/`IDL2C`
+under `CANDOR_TYPE_ID_SHADOW_PROBE`.
+
 ### ⚠ A platform name a scan type shadows is read as the platform's where Swift cannot see that type (SOUNDNESS R1938, lane LS)
 
 The engine keys types by SIMPLE name, package-wide, so a scan type named like a platform or κ type — `Node.Data` nested in a target no

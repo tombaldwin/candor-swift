@@ -124,7 +124,7 @@ final class IdentityProbeProcessTests: XCTestCase {
         // The SEEDS are the instrument's calibration on the defect, so they run with lane LS switched off (SOUNDNESS R1938 lane
         // LS fixes the shape Pkg6 seeds): with LS on, Pkg6's local use-site answers for `Data` must go to 0 (asserted below).
         let r = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out.path],
-                                          env: ["CANDOR_TYPE_ID_SHADOW_OFF": "1"])
+                                          env: ["CANDOR_TYPE_ID_SHADOW_OFF": "1", "CANDOR_TYPE_ID_L2_OFF": "1"])   // …and lane L2, which moves App3/App4
         XCTAssertEqual(r.code, 0, r.err)
         var seeds: [String: (binder: Int, use: Int)] = [:]
         for l in r.out.split(separator: "\n") {
@@ -144,7 +144,8 @@ final class IdentityProbeProcessTests: XCTestCase {
         // the package-wide rule, so it does not move; the use-site census and kappa_shadow read the engine's real answers)
         let out2 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-census-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: out2) }
-        let r2 = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out2.path])
+        let r2 = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out2.path],
+                                           env: ["CANDOR_TYPE_ID_L2_OFF": "1"])
         XCTAssertEqual(r2.code, 0, r2.err)
         var seeds2: [String: (binder: Int, use: Int)] = [:]
         for l in r2.out.split(separator: "\n") {
@@ -154,5 +155,18 @@ final class IdentityProbeProcessTests: XCTestCase {
         XCTAssertEqual(seeds2["Pkg6"]?.use, 0, "Pkg6 with lane LS on: no local use-site answer for the shadowed platform name")
         XCTAssertTrue(r2.out.contains("Pkg6                           {'Data': (2, 0,"), "kappa_shadow with LS on: declarations kept, 0 local answers:\n\(r2.out)")
         for k in ["App3", "App4", "App5", "App5nw", "Pkg6c"] { XCTAssertEqual(seeds2[k]?.use, want[k]?.1, "\(k): LS must not move a non-platform name") }
+        // lane L2 ON (SOUNDNESS R1938 L2): the use-unit spellings leave the census — App3 4 -> 2 and App4 14 -> 12 (the rest are field,
+        // global and return answers: L3's) — and the controls do not move (App5/App5nw's 3 are the engine's own `Vlt` keys)
+        let out3 = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-census-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: out3) }
+        let r3 = try ProcessHarness.runRaw(URL(fileURLWithPath: "/bin/bash"), [script.path, "--fixtures", bin.path, out3.path])
+        XCTAssertEqual(r3.code, 0, r3.err)
+        var seeds3: [String: (binder: Int, use: Int)] = [:]
+        for l in r3.out.split(separator: "\n") {
+            let f = l.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+            if f.count == 3, let b = Int(f[1]), let u = Int(f[2]) { seeds3[f[0]] = (b, u) }
+        }
+        let want3: [String: Int] = ["App3": 2, "App4": 12, "App5": 3, "App5nw": 3, "Pkg6": 0, "Pkg6c": 0]
+        for (k, w) in want3 { XCTAssertEqual(seeds3[k]?.use, w, "\(k): use-site census with lanes LS and L2 on") }
     }
 }

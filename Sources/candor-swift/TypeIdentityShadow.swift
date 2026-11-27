@@ -96,6 +96,9 @@ struct LsShadowIndexR1938 {
     /// Swift's shadowing is per file). A wrong strip can only add a refusal, i.e. keep main's reading; the per-file rule is a
     /// design-queue row, not this lane's.
     let stripOwnModule: (String) -> String?
+    /// R1950 — a WIDENED (own-module-stripped) path -> the spelling the scan recorded it under (`Outer13.Data` ->
+    /// `Own13.Outer13.Data`), so a rewrite names the key the units are filed under. A recorded path maps to itself (absent).
+    var recordedPath: [String: String] = [:]
 
     static func ownModuleStripper(ownModules: Set<String>) -> (String) -> String? {
         return { p in
@@ -137,21 +140,36 @@ struct LsShadowIndexR1938 {
 
     /// The platform names whose bare in-unit spellings read "as if undeclared" in this unit, and why each refused one refused
     /// (for the probe). `bodyDecls` are the type/alias names declared inside the unit's own body.
-    func names(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>) -> (ok: Set<String>, refused: [String: String]) {
+    /// `only` (lane L2) restricts the decision to the names the unit's body spells: L2's candidates are every declared simple
+    /// name, and deciding all of them per unit would be units x names.
+    func names(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>, only: Set<String>? = nil) -> (ok: Set<String>, refused: [String: String]) {
         // an enclosing path spelled with an own module (`extension Own13.Outer13 { … }`) is decided under BOTH spellings, the
         // recorded one and the stripped one: a name is read "as if undeclared" only if neither refuses (Fable recheck B2 — adding a
         // spelling can only add a refusal)
-        let a = namesFor(file: file, enclosingPath: enclosingPath, generics: generics, bodyDecls: bodyDecls)
-        guard let ep = enclosingPath, let stripped = stripOwnModule(ep) else { return a }
-        let b = namesFor(file: file, enclosingPath: stripped, generics: generics, bodyDecls: bodyDecls)
-        return (a.ok.intersection(b.ok), a.refused.merging(b.refused) { x, _ in x })
+        let r = decide(file: file, enclosingPath: enclosingPath, generics: generics, bodyDecls: bodyDecls, only: only)
+        return (r.ok, r.refused)
     }
-    private func namesFor(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>) -> (ok: Set<String>, refused: [String: String]) {
-        var ok: Set<String> = [], refused: [String: String] = [:]
-        guard !candidates.isEmpty else { return (ok, refused) }
+    /// `names` plus, per refused name, the INNERMOST enclosing member type Swift binds it to (SOUNDNESS R1950), as the path the
+    /// scan RECORDED it under. Present only where the refusal is `visible-nested`, the hit is a nested TYPE (not a member alias),
+    /// no supertype of any enclosing type contributes a member of that name, and both spellings of an own-module-qualified
+    /// enclosing path agree.
+    func decide(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>, only: Set<String>? = nil)
+        -> (ok: Set<String>, refused: [String: String], innermost: [String: String]) {
+        let cands = only.map { candidates.intersection($0) } ?? candidates
+        let a = namesFor(file: file, enclosingPath: enclosingPath, generics: generics, bodyDecls: bodyDecls, cands: cands)
+        guard let ep = enclosingPath, let stripped = stripOwnModule(ep) else { return a }
+        let b = namesFor(file: file, enclosingPath: stripped, generics: generics, bodyDecls: bodyDecls, cands: cands)
+        var inner: [String: String] = [:]
+        for (n, p) in a.innermost where b.innermost[n] == p { inner[n] = p }
+        return (a.ok.intersection(b.ok), a.refused.merging(b.refused) { x, _ in x }, inner)
+    }
+    private func namesFor(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>, cands candidates: Set<String>)
+        -> (ok: Set<String>, refused: [String: String], innermost: [String: String]) {
+        var ok: Set<String> = [], refused: [String: String] = [:], innermost: [String: String] = [:]
+        guard !candidates.isEmpty else { return (ok, refused, innermost) }
         guard let module = idx.moduleOf(file) else {
             for n in candidates { refused[n] = "no-module" }
-            return (ok, refused)
+            return (ok, refused, innermost)
         }
         let visible = idx.visibleModules(inFile: file)
         let segs = (enclosingPath ?? "").split(separator: ".").map(String.init)
@@ -185,7 +203,21 @@ struct LsShadowIndexR1938 {
             if let fe = foreignEnclosing { refused[n] = "foreign-enclosing:\(fe)"; continue }
             if let pe = platformEnclosing.first(where: { STDLIB_NOMINALS.contains($0 + "." + n) }) { refused[n] = "platform-nested:\(pe).\(n)"; continue }
             if let p = prefixes.first(where: { localTypePaths.contains($0 + "." + n) || memberAliasNamesByPath[$0]?.contains(n) == true }) {
-                refused[n] = "visible-nested:\(p).\(n)"; continue
+                refused[n] = "visible-nested:\(p).\(n)"
+                // R1950 — Swift binds the INNERMOST enclosing member type (a nested type of `Outer.Mid` before one of `Outer`), not
+                // the package-wide simple key. Only a nested TYPE answers (a member alias keeps main's reading), and only when no
+                // supertype of an enclosing type could contribute a member of the name (L4 owns that walk).
+                if let q = prefixes.reversed().first(where: { localTypePaths.contains($0 + "." + n) || memberAliasNamesByPath[$0]?.contains(n) == true }),
+                   memberAliasNamesByPath[q]?.contains(n) != true,
+                   !supers.contains(where: { sup0 in
+                       let sup = unqualifiedPlatform(sup0)
+                       if isScanDeclared(sup) { return supertypeContributes(sup, n) || protocolAssoc(sup, n) }
+                       if let st = stripOwnModule(sup0), isScanDeclared(st) { return supertypeContributes(st, n) || protocolAssoc(st, n) }
+                       return STDLIB_NOMINALS.contains(sup + "." + n) || !(STDLIB_PROTOCOLS.contains(sup) || PLATFORM_LEAVES.contains(sup) || STDLIB_NOMINALS.contains(sup))
+                   }) {
+                    innermost[n] = recordedPath[q + "." + n] ?? (q + "." + n)
+                }
+                continue
             }
             if let p = prefixes.first(where: { protocolPaths.contains($0) && protocolAssoc($0, n) }) { refused[n] = "assoc:\(p).\(n)"; continue }
             // a supertype spelled with an own module refuses if EITHER spelling refuses (recheck B2: the strip only adds)
@@ -207,7 +239,7 @@ struct LsShadowIndexR1938 {
             if privateAliasFiles[n]?.contains(file) == true { refused[n] = "file-alias"; continue }
             ok.insert(n)
         }
-        return (ok, refused)
+        return (ok, refused, innermost)
     }
 }
 
@@ -223,6 +255,52 @@ func lsBodyDeclNamesR1938(_ body: Syntax?) -> Set<String> {
         override func visit(_ n: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
         override func visit(_ n: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
         override func visit(_ n: GenericParameterSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
+    }
+    let v = V(viewMode: .sourceAccurate)
+    v.walk(body)
+    return v.out
+}
+
+// SOUNDNESS R1938 (type-identity lane L2) — THE USE-UNIT GUARD, beside LS.
+//
+// LS reads a PLATFORM name "as if undeclared" where Swift cannot see the scan's same-named type from the unit. L2 applies the same
+// per-unit rule (`LsShadowIndexR1938.decide`, the same refusals) to every OTHER name the scan declares: a bare `Lib` that a
+// sibling target Feature does not import declares, or a `Vault` the scan declares only nested in an unrelated type, names a
+// DEPENDENCY's type in that unit (fx4: 26 executed-WRITES cells ABSENT on 0.43.0 and main; the mirror `Kit` charged the scan's
+// loud member to code that runs the dependency's pure one). It also owns three spellings LS does not touch:
+//   · `M.N` with `M` an IMPORTED module the scan does not own (`Guess.Lib`, `Foundation.Data` — SOUNDNESS R1947): the type is
+//     M's, whatever the scan declares, so N reads "as if undeclared" in that node only;
+//   · a module-level typealias `A = N` whose target N is read "as if undeclared" from the ALIAS's own file (fx4 `DepLib`): the
+//     use spelling `A` reads as N does there;
+//   · SOUNDNESS R1950: inside an enclosing type that nests N, bare N is the INNERMOST nested type, not the package-wide simple
+//     key (fx12 `Outer12.inner_nested` bound Core12's top-level `Data`; fx9r bound the union `Outer9.Data` + `Base9.Data`).
+// The scope is LS's: only spellings WRITTEN in the unit (local annotation, local constructor, inline constructor head, `N.init`,
+// `as!`, and a receiver bound by one of those). Fields, globals, returns and closure parameters typed from a callee are L3's: their
+// spelling's scope is a declaration elsewhere (fx7 `H.b3r`). Kill switch `CANDOR_TYPE_ID_L2_OFF`.
+struct L2UnitFactsR1938 {
+    /// non-platform names this unit's in-scope spellings read "as if undeclared"
+    var names: Set<String> = []
+    /// a module-level alias spelled in this unit -> the target name it reads as (decided in the alias's file)
+    var aliases: [String: String] = [:]
+    /// R1950: bare name -> the innermost enclosing member type's recorded path
+    var innermost: [String: String] = [:]
+    /// `M.N` with M an imported non-own module reads N "as if undeclared"
+    var qualified = false
+    var isEmpty: Bool { names.isEmpty && aliases.isEmpty && innermost.isEmpty && !qualified }
+}
+
+/// Every type-shaped identifier a unit's body spells (a type position, or an uppercase reference / member name in an expression):
+/// the names L2 decides for the unit. Over-inclusive on purpose (a value named `Lib` is still filtered at the binder).
+func l2SpelledNamesR1938(_ body: Syntax?) -> Set<String> {
+    guard let body else { return [] }
+    final class V: SyntaxVisitor {
+        var out: Set<String> = []
+        override func visit(_ n: IdentifierTypeSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
+        override func visit(_ n: MemberTypeSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
+        override func visit(_ n: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+            if n.baseName.text.first?.isUppercase == true { out.insert(n.baseName.text) }
+            return .visitChildren
+        }
     }
     let v = V(viewMode: .sourceAccurate)
     v.walk(body)
