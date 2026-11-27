@@ -122,6 +122,14 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Plain13.p_data", has: ["Base13.Data.write"], lane: .ls, targetHasNot: ["Base13.Data.write", "Own13.Outer13.Data.write", "Outer13b.Data.write"]),
         ])
     }
+    /// fx15 (Fable recheck B2): a module-qualified extension head whose module name some OTHER target uses for a top-level type is
+    /// still stripped; the scan type's edges stay on `Outer15`, and only `Plain15` moves.
+    func testFx15_ModuleNamedLikeASiblingType() throws {
+        try matrix(X.fx15, "fx15", edges: [
+            E("Outer15.a_pure", has: ["Own15.Outer15.Data.write"]), E("Outer15.a_loud", has: ["Own15.Outer15.Data.wipe15"]),
+            E("Plain15.p_data", has: ["Own15.Outer15.Data.write"], lane: .ls, targetHasNot: ["Own15.Outer15.Data.write", "Own15.Data.write"]),
+        ])
+    }
     func testFx12_LSAttack() throws {
         try matrix(X.fx12, "fx12", edges: [
             E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),

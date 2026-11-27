@@ -378,4 +378,14 @@ Sub13.s_loud WRITES Fs+inc
 Plain13.p_data WRITES ABSENT ls Fs
 """
 
+    // fx15 (Fable's recheck of lane LS round 2, B2): the own module `Own15` shares its name with a TOP-LEVEL type of a sibling target
+    // the file does not import (`Core15: struct Own15`). `extension Own15.Outer15 { struct Data }` is still module-qualified (Swift's
+    // shadowing is per file), so inside `Outer15` bare `Data` is that type: the pure member is the fabrication control, the loud one
+    // the silence control, `Plain15` the payoff that must stay `Fs`.
+    static let fx15 = """
+Outer15.a_pure pure ABSENT
+Outer15.a_loud WRITES Fs+inc
+Plain15.p_data WRITES ABSENT ls Fs
+"""
+
 }

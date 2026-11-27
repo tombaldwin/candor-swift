@@ -90,14 +90,17 @@ struct LsShadowIndexR1938 {
     /// protocol -> the protocols it refines (kept out of `supertypes*` by the Driver, so closed over here)
     let protocolSupers: [String: Set<String>]
     let typeGenericNames: [String: Set<String>]
-    /// `Own.T…` -> `T…` when `Own` is an own module and not a scan type's name (Fable merge review B1), else nil.
+    /// `Own.T…` -> `T…` when `Own` is an own module (Fable merge review B1), else nil. The stripped spelling is ADDED beside the
+    /// recorded one, never instead of it, and a head that is ALSO some scan type's name is stripped too (Fable recheck B2: a
+    /// package-wide "not a type name" exclusion missed `extension Own15.Outer15` when a sibling target declares `struct Own15`, though
+    /// Swift's shadowing is per file). A wrong strip can only add a refusal, i.e. keep main's reading; the per-file rule is a
+    /// design-queue row, not this lane's.
     let stripOwnModule: (String) -> String?
 
-    static func ownModuleStripper(ownModules: Set<String>, topLevelTypeNames: Set<String>) -> (String) -> String? {
+    static func ownModuleStripper(ownModules: Set<String>) -> (String) -> String? {
         return { p in
             guard let dot = p.firstIndex(of: ".") else { return nil }
-            let head = String(p[..<dot])
-            guard ownModules.contains(head), !topLevelTypeNames.contains(head) else { return nil }
+            guard ownModules.contains(String(p[..<dot])) else { return nil }
             return String(p[p.index(after: dot)...])
         }
     }
@@ -135,6 +138,15 @@ struct LsShadowIndexR1938 {
     /// The platform names whose bare in-unit spellings read "as if undeclared" in this unit, and why each refused one refused
     /// (for the probe). `bodyDecls` are the type/alias names declared inside the unit's own body.
     func names(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>) -> (ok: Set<String>, refused: [String: String]) {
+        // an enclosing path spelled with an own module (`extension Own13.Outer13 { … }`) is decided under BOTH spellings, the
+        // recorded one and the stripped one: a name is read "as if undeclared" only if neither refuses (Fable recheck B2 — adding a
+        // spelling can only add a refusal)
+        let a = namesFor(file: file, enclosingPath: enclosingPath, generics: generics, bodyDecls: bodyDecls)
+        guard let ep = enclosingPath, let stripped = stripOwnModule(ep) else { return a }
+        let b = namesFor(file: file, enclosingPath: stripped, generics: generics, bodyDecls: bodyDecls)
+        return (a.ok.intersection(b.ok), a.refused.merging(b.refused) { x, _ in x })
+    }
+    private func namesFor(file: String, enclosingPath: String?, generics: Set<String>, bodyDecls: Set<String>) -> (ok: Set<String>, refused: [String: String]) {
         var ok: Set<String> = [], refused: [String: String] = [:]
         guard !candidates.isEmpty else { return (ok, refused) }
         guard let module = idx.moduleOf(file) else {
@@ -142,9 +154,7 @@ struct LsShadowIndexR1938 {
             return (ok, refused)
         }
         let visible = idx.visibleModules(inFile: file)
-        // an enclosing path spelled with an own module (`extension Own13.Outer13 { … }`) is that path without it
-        let encl = enclosingPath.map { stripOwnModule($0) ?? $0 }
-        let segs = (encl ?? "").split(separator: ".").map(String.init)
+        let segs = (enclosingPath ?? "").split(separator: ".").map(String.init)
         var prefixes: [String] = []
         for i in segs.indices { prefixes.append(segs[0...i].joined(separator: ".")) }
         // the enclosing types must be scan-declared, or a PLATFORM nominal whose own nested types the generated table lists
@@ -178,13 +188,16 @@ struct LsShadowIndexR1938 {
                 refused[n] = "visible-nested:\(p).\(n)"; continue
             }
             if let p = prefixes.first(where: { protocolPaths.contains($0) && protocolAssoc($0, n) }) { refused[n] = "assoc:\(p).\(n)"; continue }
-            if let s = supers.sorted().first(where: { sup0 in
-                let sup = stripOwnModule(sup0) ?? unqualifiedPlatform(sup0)
+            // a supertype spelled with an own module refuses if EITHER spelling refuses (recheck B2: the strip only adds)
+            func supRefuses(_ sup: String) -> Bool {
                 if isScanDeclared(sup) { return supertypeContributes(sup, n) || protocolAssoc(sup, n) }
                 if STDLIB_PROTOCOLS.contains(sup) || PLATFORM_LEAVES.contains(sup) || STDLIB_NOMINALS.contains(sup) {
                     return LS_STDLIB_ASSOC_COLLISIONS_R1938.contains(n) || STDLIB_NOMINALS.contains(sup + "." + n)
                 }
                 return true
+            }
+            if let s = supers.sorted().first(where: { sup0 in
+                supRefuses(unqualifiedPlatform(sup0)) || (stripOwnModule(sup0).map(supRefuses) ?? false)
             }) {
                 refused[n] = "supertype:\(s)"; continue
             }

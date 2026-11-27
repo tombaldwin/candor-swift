@@ -4640,12 +4640,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // MODULE-QUALIFIED SPELLINGS OF OWN PATHS (Fable's merge review B1). `extension Own13.Outer13 { struct Data }` records
         // its head as spelled, so the nested type's path is `Own13.Outer13.Data` and the refusal's `Outer13.Data` lookup missed
         // it: inside `Outer13` bare `Data` IS that type (executed: a fabrication on the pure member, a 1->0 on the loud one).
-        // Every path set and map the refusal consults is WIDENED with the own-module-stripped spelling (`Own13.T…` -> `T…`, when
-        // `Own13` is an own module and not itself a scan type), the same strip `canonicalTypeRef`'s N-a arm makes at a use site.
+        // Every path set and map the refusal consults is WIDENED with the own-module-stripped spelling (`Own13.T…` -> `T…`, whenever
+        // `Own13` is an own module, even one some scan type is named like: recheck B2), the same strip `canonicalTypeRef`'s N-a arm makes at a use site.
         // Widening only ADDS spellings, so it can only add refusals.
         let ownMods = idx.ownModules.union(projectModules)
-        let topNames = Set(declaredTypePathsAI.filter { !$0.contains(".") }).union(protocolPaths.filter { !$0.contains(".") })
-        let strip = LsShadowIndexR1938.ownModuleStripper(ownModules: ownMods, topLevelTypeNames: topNames)
+        let strip = LsShadowIndexR1938.ownModuleStripper(ownModules: ownMods)
         func widen(_ xs: Set<String>) -> Set<String> { xs.union(xs.compactMap(strip)) }
         func widenKeys<V>(_ d: [String: V], _ merge: (V, V) -> V) -> [String: V] {
             var out = d
