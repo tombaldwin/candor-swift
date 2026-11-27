@@ -111,6 +111,17 @@ final class TypeIdentityMatrixTests: XCTestCase {
     func testFx11_S7eVariants() throws { try matrix(X.fx11, "fx11") }
     /// fx12 (lane LS): the inner binding of a rebind keeps its scan type and loses the platform ctor edge; a field keeps its
     /// declaration's type in a file that cannot see it; the refusals keep main's edges.
+    /// fx13 (Fable merge review B1): the refusal must see an own path spelled with its module (`extension Own13.Outer13`,
+    /// `class Sub13: Own13.Base13`). The scan type's edges stay; only `Plain13` (no nested Data) moves.
+    func testFx13_ModuleQualifiedOwnPaths() throws {
+        try matrix(X.fx13, "fx13", edges: [
+            E("Outer13.a_pure", has: ["Own13.Outer13.Data.write"]), E("Outer13.a_loud", has: ["Own13.Outer13.Data.wipe13"]),
+            E("Outer13.a_inline", has: ["Own13.Outer13.Data.wipe13"]),
+            E("Outer13b.b_pure", has: ["Outer13b.Data.write"]), E("Outer13b.b_loud", has: ["Outer13b.Data.wipe13"]),
+            E("Sub13.s_pure", has: ["Base13.Data.write"]), E("Sub13.s_loud", has: ["Base13.Data.wipe13"]),
+            E("Plain13.p_data", has: ["Base13.Data.write"], lane: .ls, targetHasNot: ["Base13.Data.write", "Own13.Outer13.Data.write", "Outer13b.Data.write"]),
+        ])
+    }
     func testFx12_LSAttack() throws {
         try matrix(X.fx12, "fx12", edges: [
             E("O12.rebind_for", has: ["Outer12.Data.write", "Node12.Data.init()"], lane: .ls, targetHas: ["Outer12.Data.write"], targetHasNot: ["Node12.Data.init()"]),

@@ -361,4 +361,21 @@ H12.b3r_copy WRITES Fs+inc
 H12.b_found WRITES ABSENT ls Fs
 """
 
+    // fx13 (Fable's merge review of lane LS, B1): a nested `Data` declared in a MODULE-QUALIFIED extension of the enclosing type
+    // (`extension Own13.Outer13 { struct Data }`, another file) is what bare `Data` names inside `Outer13`. Both directions pinned: the
+    // pure member is the fabrication control, the loud one the silence control; `Outer13b` is the unqualified twin, `Sub13` the
+    // module-qualified SUPERCLASS spelling. `Q13.q_url` is the pre-existing module-wide nested-alias fallback (not LS's), pinned at main.
+    static let fx13 = """
+Outer13.a_pure pure ABSENT
+Outer13.a_loud WRITES Fs+inc
+Outer13.a_inline WRITES Fs+inc
+Outer13b.b_pure pure ABSENT
+Outer13b.b_loud WRITES Fs+inc
+C13.c_alias pure ABSENT
+Q13.q_url TOUCHES ABSENT # pre-existing: `S13.URL = QuietURL13` binds every bare URL (aliasInScope's module-wide fallback); not LS
+Sub13.s_pure pure ABSENT
+Sub13.s_loud WRITES Fs+inc
+Plain13.p_data WRITES ABSENT ls Fs
+"""
+
 }

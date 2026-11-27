@@ -34,6 +34,7 @@ SPEC = {
     "fx10":  ("fx10/Pkg10",         "fx10/exec-ground-truth.txt",           ["fx10/Guess10"], "../Guess10", True),
     "fx11":  ("fx11/App11",         "fx11/exec-ground-truth.txt",           ["fx11/Dep11"], "../Dep11", True),
     "fx12":  ("fx12/Pkg12",         "fx12/exec-ground-truth.txt",           [], None, False),
+    "fx13":  ("fx13/Pkg13",         "fx13/exec-ground-truth.txt",           [], None, False),
 }
 
 def cell(r):

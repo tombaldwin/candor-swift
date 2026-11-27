@@ -90,6 +90,17 @@ struct LsShadowIndexR1938 {
     /// protocol -> the protocols it refines (kept out of `supertypes*` by the Driver, so closed over here)
     let protocolSupers: [String: Set<String>]
     let typeGenericNames: [String: Set<String>]
+    /// `Own.T…` -> `T…` when `Own` is an own module and not a scan type's name (Fable merge review B1), else nil.
+    let stripOwnModule: (String) -> String?
+
+    static func ownModuleStripper(ownModules: Set<String>, topLevelTypeNames: Set<String>) -> (String) -> String? {
+        return { p in
+            guard let dot = p.firstIndex(of: ".") else { return nil }
+            let head = String(p[..<dot])
+            guard ownModules.contains(head), !topLevelTypeNames.contains(head) else { return nil }
+            return String(p[p.index(after: dot)...])
+        }
+    }
 
     func isScanDeclared(_ seg: String) -> Bool {
         declaredTypePaths.contains(seg) || protocolPaths.contains(seg) || !(pathsByLeaf[seg]?.isEmpty ?? true)
@@ -131,7 +142,9 @@ struct LsShadowIndexR1938 {
             return (ok, refused)
         }
         let visible = idx.visibleModules(inFile: file)
-        let segs = (enclosingPath ?? "").split(separator: ".").map(String.init)
+        // an enclosing path spelled with an own module (`extension Own13.Outer13 { … }`) is that path without it
+        let encl = enclosingPath.map { stripOwnModule($0) ?? $0 }
+        let segs = (encl ?? "").split(separator: ".").map(String.init)
         var prefixes: [String] = []
         for i in segs.indices { prefixes.append(segs[0...i].joined(separator: ".")) }
         // the enclosing types must be scan-declared, or a PLATFORM nominal whose own nested types the generated table lists
@@ -166,7 +179,7 @@ struct LsShadowIndexR1938 {
             }
             if let p = prefixes.first(where: { protocolPaths.contains($0) && protocolAssoc($0, n) }) { refused[n] = "assoc:\(p).\(n)"; continue }
             if let s = supers.sorted().first(where: { sup0 in
-                let sup = unqualifiedPlatform(sup0)
+                let sup = stripOwnModule(sup0) ?? unqualifiedPlatform(sup0)
                 if isScanDeclared(sup) { return supertypeContributes(sup, n) || protocolAssoc(sup, n) }
                 if STDLIB_PROTOCOLS.contains(sup) || PLATFORM_LEAVES.contains(sup) || STDLIB_NOMINALS.contains(sup) {
                     return LS_STDLIB_ASSOC_COLLISIONS_R1938.contains(n) || STDLIB_NOMINALS.contains(sup + "." + n)

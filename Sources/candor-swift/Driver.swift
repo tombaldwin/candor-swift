@@ -4637,17 +4637,35 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         // the sentinel is visible from every attributed file: an unattributed top-level declaration refuses everywhere
         for (n, ms) in tops where ms.contains("\u{0}unattributed") { tops[n] = ms.union(idx.ownModules) }
+        // MODULE-QUALIFIED SPELLINGS OF OWN PATHS (Fable's merge review B1). `extension Own13.Outer13 { struct Data }` records
+        // its head as spelled, so the nested type's path is `Own13.Outer13.Data` and the refusal's `Outer13.Data` lookup missed
+        // it: inside `Outer13` bare `Data` IS that type (executed: a fabrication on the pure member, a 1->0 on the loud one).
+        // Every path set and map the refusal consults is WIDENED with the own-module-stripped spelling (`Own13.T…` -> `T…`, when
+        // `Own13` is an own module and not itself a scan type), the same strip `canonicalTypeRef`'s N-a arm makes at a use site.
+        // Widening only ADDS spellings, so it can only add refusals.
+        let ownMods = idx.ownModules.union(projectModules)
+        let topNames = Set(declaredTypePathsAI.filter { !$0.contains(".") }).union(protocolPaths.filter { !$0.contains(".") })
+        let strip = LsShadowIndexR1938.ownModuleStripper(ownModules: ownMods, topLevelTypeNames: topNames)
+        func widen(_ xs: Set<String>) -> Set<String> { xs.union(xs.compactMap(strip)) }
+        func widenKeys<V>(_ d: [String: V], _ merge: (V, V) -> V) -> [String: V] {
+            var out = d
+            for (k, v) in d { if let k2 = strip(k) { out[k2] = out[k2].map { merge($0, v) } ?? v } }
+            return out
+        }
+        let declW = widen(declaredTypePathsAI)
         var declByLeaf: [String: Set<String>] = [:]
-        for p in declaredTypePathsAI { declByLeaf[p.split(separator: ".").last.map(String.init) ?? p, default: []].insert(p) }
+        for p in declW { declByLeaf[p.split(separator: ".").last.map(String.init) ?? p, default: []].insert(p) }
         var assoc: [String: Set<String>] = [:]
         for c in collectors { for (pp, a) in c.assocTypesByProtocolR1938 { assoc[pp, default: []].formUnion(a) } }
         return LsShadowIndexR1938(candidates: cands, idx: idx, topLevelModules: tops, privateAliasFiles: privAliases,
-                                  localTypePaths: localTypePaths, declaredTypePaths: declaredTypePathsAI,
-                                  memberAliasNamesByPath: memberTypeAliasesByPathAll.mapValues { Set($0.keys) },
+                                  localTypePaths: widen(localTypePaths), declaredTypePaths: declW,
+                                  memberAliasNamesByPath: widenKeys(memberTypeAliasesByPathAll.mapValues { Set($0.keys) }, { $0.union($1) }),
                                   memberAliasNamesBySimple: memberTypeAliasesAll.mapValues { Set($0.keys) },
-                                  assocByProtocol: assoc, protocolPaths: protocolPaths, pathsByLeaf: declByLeaf, supertypesBySimple: supertypesOf,
-                                  supertypesByPath: supertypePathsOf, protocolSupers: protocolSupers,
-                                  typeGenericNames: typeGenericParamNamesAI)
+                                  assocByProtocol: widenKeys(assoc, { $0.union($1) }), protocolPaths: widen(protocolPaths),
+                                  pathsByLeaf: declByLeaf, supertypesBySimple: supertypesOf.mapValues(widen),
+                                  supertypesByPath: widenKeys(supertypePathsOf.mapValues(widen), { $0.union($1) }),
+                                  protocolSupers: widenKeys(protocolSupers.mapValues(widen), { $0.union($1) }),
+                                  typeGenericNames: typeGenericParamNamesAI, stripOwnModule: strip)
     }()
     // the extended-only top-level names: `extension Data { … }` keeps `Data` in `localTypes` even with no scan declaration
     let lsExtendedTopLevelR1938: Set<String> = {

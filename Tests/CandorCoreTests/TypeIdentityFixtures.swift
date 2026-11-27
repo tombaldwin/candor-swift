@@ -32,6 +32,8 @@ enum TypeIdentityFixtures {
 
     static let fx12  = F(app: "fx12/Pkg12", truthFile: "fx12/exec-ground-truth.txt", deps: [], spelling: nil, unr: false, live: [], table: TypeIdentityCells.fx12)
 
+    static let fx13  = F(app: "fx13/Pkg13", truthFile: "fx13/exec-ground-truth.txt", deps: [], spelling: nil, unr: false, live: [], table: TypeIdentityCells.fx13)
+
     static let all: [(String, F)] = [("fx3", fx3), ("fx4", fx4), ("fx5", fx5), ("fx5nw", fx5nw), ("fx6", fx6), ("fx6c", fx6c), ("fx7", fx7), ("fx8", fx8),
-        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12)]
+        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12), ("fx13", fx13)]
 }

@@ -1,0 +1,10 @@
+Outer13.a_pure pure
+Outer13.a_loud WRITES
+Outer13.a_inline WRITES
+Outer13b.b_pure pure
+Outer13b.b_loud WRITES
+C13.c_alias pure
+Q13.q_url TOUCHES
+Sub13.s_pure pure
+Sub13.s_loud WRITES
+Plain13.p_data WRITES

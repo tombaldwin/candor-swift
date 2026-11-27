@@ -28,7 +28,8 @@ without that name while such a node is collected, and the Driver keeps the const
 globals, returns and closure parameters keep their binding (their spelling's scope is a declaration elsewhere; fx12 pins the
 platform-name F-B3r analogue in both directions). Refused, keeping main's reading: a file with no manifest target, an enclosing type
 the scan does not declare (unless a platform nominal whose nested types the generated table lists), a supertype the scan does not
-declare, and κ package names (`File`, `Storage`, …) without one of the package's modules visible. A RESOLUTION, non-additive (it
+declare, and κ package names (`File`, `Storage`, …) without one of the package's modules visible. An own path spelled with its
+module (`extension Own.Outer { struct Data }`, `class Sub: Own.Base`) counts as the unqualified path in every refusal check. A RESOLUTION, non-additive (it
 removes the edges to the shadowing type), behind `CANDOR_TYPE_ID_SHADOW_OFF`; `CANDOR_TYPE_ID_SHADOW_PROBE` traces the moved sites.
 
 ### The type-identity attack matrix, an identity probe and module identity — NO behaviour change (SOUNDNESS R1938, lanes L0 + L1)
