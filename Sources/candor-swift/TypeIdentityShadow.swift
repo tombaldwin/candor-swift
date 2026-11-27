@@ -99,6 +99,8 @@ struct LsShadowIndexR1938 {
     /// R1950 — a WIDENED (own-module-stripped) path -> the spelling the scan recorded it under (`Outer13.Data` ->
     /// `Own13.Outer13.Data`), so a rewrite names the key the units are filed under. A recorded path maps to itself (absent).
     var recordedPath: [String: String] = [:]
+    /// SOUNDNESS R1938 lane L4 — the supertype walk's facts (nil under `CANDOR_TYPE_ID_L4_OFF`: the release-of-L3 refusals stand).
+    var l4: L4WalkFactsR1938? = nil
 
     static func ownModuleStripper(ownModules: Set<String>) -> (String) -> String? {
         return { p in
@@ -202,6 +204,33 @@ struct LsShadowIndexR1938 {
             if bodyDecls.contains(n) { refused[n] = "body-local"; continue }
             if let fe = foreignEnclosing { refused[n] = "foreign-enclosing:\(fe)"; continue }
             if let pe = platformEnclosing.first(where: { STDLIB_NOMINALS.contains($0 + "." + n) }) { refused[n] = "platform-nested:\(pe).\(n)"; continue }
+            // SOUNDNESS R1938 lane L4 — Swift's member-type lookup replaces the three refusals below (visible nested, enclosing
+            // associated type, a contributing supertype): innermost enclosing type first, its OWN members, then its supertypes'
+            // nearest first, then the next enclosing type out. A nested type or a member alias onto a scan type found that way is the
+            // binding (`innermost`, path-keyed); an associated type, an unknown supertype or a tie keeps main's reading.
+            if let w = l4 {
+                switch l4Walk(n, prefixes: prefixes, facts: w, file: file) {
+                case .some(.nested(let p, let via)):
+                    refused[n] = "\(via):\(p)"
+                    innermost[n] = recordedPath[p] ?? p
+                    continue
+                case .some(.refuse(let why)):
+                    refused[n] = why
+                    continue
+                case .some(.foreignNested):
+                    // a DEPENDENCY supertype whose readable sources nest N: N is that dependency's type here
+                    ok.insert(n)
+                    continue
+                case .none:
+                    break
+                }
+                let tops = topLevelModules[n] ?? []
+                if tops.contains(module) { refused[n] = "own-module-top-level"; continue }
+                if !tops.isDisjoint(with: visible) { refused[n] = "visible-module-top-level"; continue }
+                if privateAliasFiles[n]?.contains(file) == true { refused[n] = "file-alias"; continue }
+                ok.insert(n)
+                continue
+            }
             if let p = prefixes.first(where: { localTypePaths.contains($0 + "." + n) || memberAliasNamesByPath[$0]?.contains(n) == true }) {
                 refused[n] = "visible-nested:\(p).\(n)"
                 // R1950 — Swift binds the INNERMOST enclosing member type (a nested type of `Outer.Mid` before one of `Outer`), not
@@ -240,6 +269,181 @@ struct LsShadowIndexR1938 {
             ok.insert(n)
         }
         return (ok, refused, innermost)
+    }
+}
+
+// SOUNDNESS R1938 (type-identity lane L4) — THE SUPERTYPE WALK.
+//
+// LS/L2 refused every name a supertype of an enclosing type might contribute ("L4 owns that walk"), and the refusal kept main's
+// reading: the package-wide simple key. That key is not a Swift rule. A bare `Cfg` inside `class Sub: Mid` (Mid: Base, Base nests
+// `Cfg`) beside a top-level `Cfg` of the same module bound the TOP-LEVEL type (fx26 `Sub26.a_grand`: ABSENT over an executed
+// write; the mirror `a_grand_mirror` charged the top level's loud member to code that runs the nested pure one); a member alias a
+// superclass or a protocol extension declares lost to a same-named top-level type (`b_super_alias`, `b_proto_alias`); and an
+// enclosing type's own member alias lost the same way (`b_own_alias`, fx10 `M10.assoc_witness`). Where no top-level twin existed the
+// package-wide key happened to land on the one nested type with that leaf (the "unique leaf" fallback, DESIGN §0 point 2): fx7
+// `Sub.inh_nested` read right by accident, `Sub2.inh_shared` read the union of `Base2.Knob` and an unrelated `Other.Knob`.
+//
+// THE RULE (DESIGN §2.3 (a)). For each enclosing type path, innermost first: the type's OWN member types and member aliases (an
+// associated type if it is a protocol), then those of its supertypes, NEAREST FIRST (breadth-first over the direct supertypes; a
+// protocol's refinements are its supertypes); the first level that answers decides. Then the next enclosing type out. Answers:
+//   · a nested type `S.N` -> `nested` (the binding is that path, through R1950's `innermost` channel);
+//   · a member alias `S.N = T` whose target is a scan type -> `nested` at the target's path (the alias resolved in its owner's
+//     scope: the owner's enclosing path outward, then a declared path);
+//   · an associated type, a member alias onto a non-scan type, two different answers at one level, a supertype whose members the
+//     engine cannot know (a dependency's class or protocol, a platform type outside the generated tables) -> `refuse` (main's
+//     reading, as LS/L2 refused);
+//   · a DEPENDENCY supertype whose readable sources nest `N` -> `foreignNested`: N is that dependency's type, read "as if
+//     undeclared" (the scan's same-named type is not this spelling's).
+// A platform supertype the generated tables or the platform-class list know (`NSObject`, `Error`, the stdlib protocols) contributes
+// only the member types the generated table lists for it (`STDLIB_NOMINALS` `T.N`) or a scan extension of it declares; the walk
+// does not continue past it (its own supertypes are platform types too). SOUNDNESS R1948: `class Sp12: NSObject` no longer refuses
+// a bare `Data`. Kill switch `CANDOR_TYPE_ID_L4_OFF` (the facts are not built; every refusal is L2's).
+struct L4WalkFactsR1938 {
+    /// type path (as recorded and own-module-stripped) -> its DIRECT supertype spellings (generic arguments dropped)
+    let directSupers: [String: [String]]
+    /// type path -> member alias -> its target spellings (more than one: the alias is conditional or redeclared)
+    let aliasTargetsByPath: [String: [String: Set<String>]]
+    /// simple owner name -> member alias -> target spellings (a protocol extension's alias is keyed by the protocol's simple name)
+    let aliasTargetsBySimple: [String: [String: Set<String>]]
+    /// (file, a dependency supertype spelling, N): the dependency's readable sources nest a type N in that type. nil = not known.
+    let dependencyNests: (String, String, String) -> Bool?
+}
+
+enum L4WalkHitR1938: Equatable {
+    case nested(String, via: String)
+    case refuse(String)
+    case foreignNested(String)
+}
+
+/// Platform supertypes the walk may cross: their member types are the generated table's, and a package-declared name is not one.
+let L4_PLATFORM_SUPERS_R1938: Set<String> = STD_SUPERS_PUBLIC.union(PLATFORM_REFINES.keys).union(PLATFORM_LEAVES)
+    .union(STDLIB_PROTOCOLS.filter { !$0.contains(".") })
+
+extension LsShadowIndexR1938 {
+    /// A supertype spelling written in the declaration of `sub` -> the scan paths it names (Swift resolves an inheritance clause
+    /// from the subtype's own enclosing scope outward, then the module level): `sub`'s enclosing prefixes outward, then the
+    /// declared path itself, then a unique leaf (a nested base spelled bare from a sibling file's scope). Empty: not a scan type.
+    func l4SuperPaths(_ spelled: String, of sub: String) -> [String] {
+        let s = stripOwnModule(spelled) ?? spelled
+        var segs = sub.split(separator: ".").map(String.init)
+        segs.removeLast()
+        while !segs.isEmpty {
+            let c = segs.joined(separator: ".") + "." + s
+            if declaredTypePaths.contains(c) || protocolPaths.contains(c) { return [c] }
+            segs.removeLast()
+        }
+        if declaredTypePaths.contains(s) || protocolPaths.contains(s) { return [s] }
+        let leaf = s.split(separator: ".").last.map(String.init) ?? s
+        if !s.contains("."), let ps = pathsByLeaf[leaf], ps.count == 1, let p = ps.first { return [p] }
+        // a protocol is not in `declaredTypePaths`'s leaf index when it is only declared (protocolPaths holds its path)
+        let protos = protocolPaths.filter { $0 == s || $0.hasSuffix("." + s) }
+        return protos.count == 1 ? [protos.first!] : (pathsByLeaf[leaf].map { Array($0).sorted() } ?? [])
+    }
+
+    /// A member alias `N` declared on scan type `p` -> the scan path its target names (resolved from the owner's scope), or a
+    /// refusal reason.
+    private func l4AliasTarget(_ targets: Set<String>, owner p: String) -> Result<String, L4Refusal> {
+        guard targets.count == 1, var t = targets.first else { return .failure(L4Refusal("alias-ambiguous:\(p)")) }
+        if let lt = t.firstIndex(of: "<") { t = String(t[..<lt]) }
+        t = stripOwnModule(t) ?? t
+        var segs = p.split(separator: ".").map(String.init)
+        while !segs.isEmpty {
+            let c = segs.joined(separator: ".") + "." + t
+            if localTypePaths.contains(c) { return .success(c) }
+            segs.removeLast()
+        }
+        if declaredTypePaths.contains(t) { return .success(t) }
+        return .failure(L4Refusal("alias-nonscan:\(p)"))
+    }
+    struct L4Refusal: Error { let why: String; init(_ w: String) { why = w } }
+
+    /// What scan type path `p` contributes as a member named `n`, ignoring its supertypes.
+    private func l4Own(_ p: String, _ n: String, _ w: L4WalkFactsR1938, via: String) -> L4WalkHitR1938? {
+        if localTypePaths.contains(p + "." + n) { return .nested(p + "." + n, via: via) }
+        let leaf = p.split(separator: ".").last.map(String.init) ?? p
+        if let ts = w.aliasTargetsByPath[p]?[n] ?? (p.contains(".") ? nil : w.aliasTargetsBySimple[leaf]?[n]) {
+            switch l4AliasTarget(ts, owner: p) {
+            case .success(let t): return .nested(t, via: via + "-alias")
+            case .failure(let e): return .refuse(e.why)
+            }
+        }
+        // a protocol's extension alias is keyed by the protocol's simple name
+        if protocolPaths.contains(p), let ts = w.aliasTargetsBySimple[leaf]?[n] {
+            switch l4AliasTarget(ts, owner: p) {
+            case .success(let t): return .nested(t, via: via + "-alias")
+            case .failure(let e): return .refuse(e.why)
+            }
+        }
+        if protocolPaths.contains(p) && protocolAssoc(p, n) { return .refuse("assoc:\(p).\(n)") }
+        return nil
+    }
+
+    /// DESIGN §2.3 (a), the walk itself (see `L4WalkFactsR1938`).
+    func l4Walk(_ n: String, prefixes: [String], facts w: L4WalkFactsR1938, file: String) -> L4WalkHitR1938? {
+        for q in prefixes.reversed() {
+            if let own = l4Own(q, n, w, via: "member-type") { return own }
+            // breadth-first over q's supertypes; a level that answers decides
+            var level: [(spelled: String, sub: String)] = (w.directSupers[q] ?? []).map { ($0, q) }
+            if level.isEmpty, let leaf = q.split(separator: ".").last.map(String.init), protocolPaths.contains(q) {
+                level = (protocolSupers[q] ?? protocolSupers[leaf] ?? []).sorted().map { ($0, q) }
+            }
+            var seen: Set<String> = [q]
+            var depth = 0
+            while !level.isEmpty, depth < 32 {
+                depth += 1
+                var hits: [L4WalkHitR1938] = []
+                var next: [(spelled: String, sub: String)] = []
+                for (sp0, sub) in level {
+                    let sp = unqualifiedPlatformL4(sp0)
+                    let paths = l4SuperPaths(sp0, of: sub)
+                    if !paths.isEmpty {
+                        var answers: [L4WalkHitR1938] = []
+                        for p in paths where seen.insert(p).inserted {
+                            if let h = l4Own(p, n, w, via: "inherited") { answers.append(h); continue }
+                            next.append(contentsOf: (w.directSupers[p] ?? []).map { ($0, p) })
+                            let leaf = p.split(separator: ".").last.map(String.init) ?? p
+                            if protocolPaths.contains(p) { next.append(contentsOf: (protocolSupers[p] ?? protocolSupers[leaf] ?? []).sorted().map { ($0, p) }) }
+                        }
+                        if paths.count > 1, !answers.isEmpty { hits.append(.refuse("supertype-ambiguous:\(sp0)")) } else { hits.append(contentsOf: answers) }
+                        continue
+                    }
+                    // not a scan type: a scan EXTENSION of it may still nest N or alias it
+                    if localTypePaths.contains(sp + "." + n) { hits.append(.nested(sp + "." + n, via: "extension-of-supertype")); continue }
+                    if let ts = w.aliasTargetsBySimple[sp]?[n] {
+                        switch l4AliasTarget(ts, owner: sp) {
+                        case .success(let t): hits.append(.nested(t, via: "inherited-alias"))
+                        case .failure(let e): hits.append(.refuse(e.why))
+                        }
+                        continue
+                    }
+                    if L4_PLATFORM_SUPERS_R1938.contains(sp) || STDLIB_NOMINALS.contains(sp) {
+                        if STDLIB_NOMINALS.contains(sp + "." + n) { hits.append(.refuse("platform-nested:\(sp).\(n)")) }
+                        else if LS_STDLIB_ASSOC_COLLISIONS_R1938.contains(n) { hits.append(.refuse("platform-assoc:\(sp).\(n)")) }
+                        continue
+                    }
+                    // a dependency's (or an unknown platform module's) type: its member types are not the scan's to know
+                    switch w.dependencyNests(file, sp0, n) {
+                    case .some(true): hits.append(.foreignNested("dependency-nested:\(sp0).\(n)"))
+                    default: hits.append(.refuse("supertype:\(sp0)"))
+                    }
+                }
+                if !hits.isEmpty {
+                    let distinct = Set(hits.map { h -> String in
+                        switch h { case .nested(let p, _): return "n:" + p; case .refuse(let r): return "r:" + r; case .foreignNested: return "f" }
+                    })
+                    if distinct.count == 1 { return hits[0] }
+                    // two different answers at one level: refuse (Swift reports an ambiguity or picks by rules this walk does not model)
+                    if let r = hits.first(where: { if case .refuse = $0 { return true }; return false }) { return r }
+                    return .refuse("supertype-ambiguous:\(n)")
+                }
+                level = next
+            }
+        }
+        return nil
+    }
+    private func unqualifiedPlatformL4(_ s: String) -> String {
+        for m in ["Swift.", "Foundation.", "_Concurrency.", "Dispatch.", "ObjectiveC."] where s.hasPrefix(m) { return String(s.dropFirst(m.count)) }
+        return s
     }
 }
 

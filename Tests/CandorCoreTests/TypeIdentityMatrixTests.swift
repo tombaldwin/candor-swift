@@ -120,7 +120,10 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Outer13.a_pure", has: ["Own13.Outer13.Data.write"]), E("Outer13.a_loud", has: ["Own13.Outer13.Data.wipe13"]),
             E("Outer13.a_inline", has: ["Own13.Outer13.Data.wipe13"]),
             E("Outer13b.b_pure", has: ["Outer13b.Data.write"]), E("Outer13b.b_loud", has: ["Outer13b.Data.wipe13"]),
-            E("Sub13.s_pure", has: ["Base13.Data.write"]), E("Sub13.s_loud", has: ["Base13.Data.wipe13"]),
+            // lane L4: the module-qualified superclass's nested `Data` ALONE (main unioned every scan `Data` path)
+            E("Sub13.s_pure", has: ["Base13.Data.write"], lane: .l4, targetHas: ["Base13.Data.write"], targetHasNot: ["Outer13b.Data.write", "Own13.Outer13.Data.write"]),
+            E("Sub13.s_loud", has: ["Base13.Data.wipe13"], lane: .l4, targetHas: ["Base13.Data.wipe13"], targetHasNot: ["Outer13b.Data.wipe13", "Own13.Outer13.Data.wipe13"]),
+            E("C13.c_alias", has: ["Base13.Data.write"], lane: .l4, targetHas: ["Quiet13.write"], targetHasNot: ["Base13.Data.write"]),
             E("Plain13.p_data", has: ["Base13.Data.write"], lane: .ls, targetHasNot: ["Base13.Data.write", "Own13.Outer13.Data.write", "Outer13b.Data.write"]),
         ])
     }
@@ -186,13 +189,18 @@ final class TypeIdentityMatrixTests: XCTestCase {
             // `typealias Data = Quiet12` until canonicalTypeRef was told the platform name answers itself (measured, fx12)
             E("O12.as_cast", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)", "Quiet12.write", "Quiet12.init"]),
             E("Plain12.pe_data", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Quiet12.write"]),
-            E("Wit12.w_data", has: ["Data.write"]), E("Wit12b.wb_data", has: ["Data.write"]),
+            // lane L4: the conformer's OWN member alias `Data = Quiet12` is the binding; the associated type's default (no witness
+            // alias) is still refused and keeps main's edges
+            E("Wit12.w_data", has: ["Data.write"], lane: .l4, targetHas: ["Quiet12.write"], targetHasNot: ["Data.write"]),
+            E("Wit12b.wb_data", has: ["Data.write"]),
             E("H12.b_found", has: ["Data.write"], lane: .ls, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
             E("H12.own_top", has: ["Data.wipe12"]), E("H12.own_top_pure", has: ["Data.write"]),
             E("H12.b3r_plat", has: ["Data.wipe12"]), E("H12.b3r_plat_pure", has: ["Data.write"]), E("H12.b3r_copy", has: ["Data.wipe12"]),
             // R1950 (lane L2): inside `Outer12`, bare `Data` is the innermost nested `Outer12.Data`, not Core12's top-level key `Data`
             E("Outer12.inner_nested", has: ["Data.write"], lane: .l2, targetHas: ["Outer12.Data.init", "Outer12.Data.write"], targetHasNot: ["Data.write", "Node12.Data.init()"]),
-            E("L12.body_local", has: ["Data.write"]), E("Sp12.sp_data", has: ["Data.write"]),
+            E("L12.body_local", has: ["Data.write"]),
+            // lane L4 (R1948): NSObject nests no `Data`, so the subclass's bare `Data` is Foundation's
+            E("Sp12.sp_data", has: ["Data.write"], lane: .l4, targetHasNot: ["Data.write", "Node12.Data.init(S)"]),
         ])
     }
     /// fx22 (lane L3 attack): fields, a parameter's field, a local bound from a field, a global, a factory return and a T4 closure
@@ -202,9 +210,9 @@ final class TypeIdentityMatrixTests: XCTestCase {
         try matrix(X.fx22, "fx22", edges: [
             E("B22.b_field_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
             E("B22.b_global_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
-            // the nested field still binds the sibling's top-level `Lib22` (pre-existing; R1950 at the declaration is probe-only, L4)
-            E("O22.o_nested", has: ["Lib22.wipe22"], hasNot: ["O22.Lib22.wipe22"]),
-            E("B22.b_nested", has: ["Lib22.wipe22"]),
+            // R1984 (lane L4): the nested field binds its own `O22.Lib22` at the declaration (main bound the sibling's top level)
+            E("O22.o_nested", has: ["Lib22.wipe22"], hasNot: ["O22.Lib22.wipe22"], lane: .l4, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
+            E("B22.b_nested", has: ["Lib22.wipe22"], lane: .l4, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
         ])
     }
 
@@ -251,5 +259,24 @@ final class TypeIdentityMatrixTests: XCTestCase {
         }
         XCTAssertTrue(a.un.rows["UB25.ext_twin"]?.invisible.contains("DepB") ?? false, "fx25 ext_twin un: DepB supplies the extension member")
         XCTAssertFalse(a.un.rows["UB25.field"]?.invisible.contains("DepB") ?? true, "fx25 field un: the twin's own member is not the identity's")
+    }
+    /// fx26 (lane L4): the supertype walk's attack matrix. Every mirror sits beside its B1-direction cell; the pure twins share member
+    /// names with the loud types by design, so each is pinned by its sidecar edge.
+    func testFx26_L4SupertypeWalk() throws {
+        try matrix(X.fx26, "fx26", edges: [
+            E("Sub26.a_grand", has: ["Cfg26.wipeCfg26"], lane: .l4, targetHas: ["Base26.Cfg26.wipeCfg26"], targetHasNot: ["Cfg26.wipeCfg26"]),
+            E("Sub26.a_grand_mirror", has: ["Tap26.tap26"], lane: .l4, targetHas: ["Base26.Tap26.tap26"], targetHasNot: ["Tap26.tap26"]),
+            E("Sub26.a_nearer", has: ["Near26.near26"], lane: .l4, targetHas: ["Mid26.Near26.near26"], targetHasNot: ["Near26.near26", "Base26.Near26.near26"]),
+            E("Outer26.In26.a_in", has: ["Cfg26.wipeCfg26"], lane: .l4, targetHas: ["Base26.Cfg26.wipeCfg26"], targetHasNot: ["Outer26.Cfg26.wipeCfg26", "Cfg26.wipeCfg26"]),
+            E("SubF26.f_field_mirror", has: ["Tap26.tap26"], lane: .l4, targetHas: ["Base26.Tap26.tap26"], targetHasNot: ["Tap26.tap26"]),
+            E("ConfA26.b_proto_alias", has: ["Hand26.res26"], lane: .l4, targetHas: ["QuietRes26.res26"], targetHasNot: ["Hand26.res26"]),
+            E("OwnA26.b_own_alias_mirror", has: ["Hand26.res26"], lane: .l4, targetHas: ["QuietRes26.res26"], targetHasNot: ["Hand26.res26"]),
+            E("SubD26.d_dep_nested_mirror", has: ["Calm26.hush26"], lane: .l4, targetHasNot: ["Calm26.hush26"]),
+            E("OuterI26.i_twin", has: ["SubI26.init"], hasNot: ["LoudInit26.init"], lane: .l4, targetHas: ["LoudInit26.init"]),
+            E("OuterI26.i_lone", hasNot: ["LoudInit26.init"], lane: .l4, targetHas: ["LoudInit26.init"]),
+            E("Tbl26.e_field", has: ["Body26.mark26"], lane: .l4, targetHas: ["Mk26.mark26"], targetHasNot: ["Body26.mark26"]),
+            E("Plain26.e_top", has: ["Body26.mark26"], hasNot: ["Mk26.mark26"]),
+            E("Plain26.e_top_prop", has: ["Body26.markProp26"], hasNot: ["Mk26.markProp26"]),
+        ])
     }
 }

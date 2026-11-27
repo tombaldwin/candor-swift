@@ -46,6 +46,7 @@ fx22       fx22/exec-ground-truth.txt             fx22/Run22
 fx23       fx23/exec-ground-truth.txt             fx23/Run23
 fx24       fx24/exec-ground-truth.txt             fx24/Run24
 fx25       fx25/exec-ground-truth.txt             fx25/Run25
+fx26       fx26/exec-ground-truth.txt             fx26/Run26
 '
 fail=0
 while read -r name gt run; do

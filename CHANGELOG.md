@@ -10,6 +10,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A bare type name resolves through the supertypes Swift walks (SOUNDNESS R1938 type-identity lane L4; R1948, R1972, R1984)
+
+A bare type name inside a type is looked up the way Swift looks it up: the enclosing type's own member types and member aliases, then its
+supertypes' (nearest first), then the next enclosing type out. LS and L2 refused every name a supertype might contribute and kept the
+package-wide simple key. Where the same module also declared that simple name at top level, the key bound the top-level type (executed,
+`TypeIdentity/fx26`, on v0.43.0 and main): an inherited `Base.Cfg` read ABSENT over a write, and its mirror charged the top-level type's
+loud member to code that runs the nested pure one. A member alias a superclass, a protocol extension or the enclosing type declares
+(`typealias Res = LoudRes`) lost the same way, both directions. Where no top-level twin existed the key landed on the one nested type of
+that leaf by accident (fx7 `Sub2.inh_shared` read the union of `Base2.Knob` and an unrelated `Other.Knob`; now `Base2.Knob` alone).
+A platform superclass the generated tables know no longer refuses (`class Sp12: NSObject`: bare `Data` is Foundation's, R1948). A
+DEPENDENCY superclass whose readable sources nest the name makes it the dependency's type. Where its sources are not located and the
+target names a dependency nobody can read, the member call is hedged `dispatch:<untyped>.<m>` beside main's binding.
+Also in this lane:
+- a receiver typed by a nested type's full path climbs the supertypes keyed by path. A protocol-extension member reached through
+  `Tbl.Body` was dropped (fx26 `Tbl26.e_local`, ABSENT), and this is what made L3 withdraw the declaration-site innermost binding;
+- that binding is applied again: a field spelled `N` inside a type that nests or inherits `N` is that type (R1984, fx22 `O22.o_nested`);
+- a constructor of a scan class with no initializer of its own edges the initializer it inherits (R1972). `final class TopI: LoudB {}`
+  with `TopI()` read pure over an executed write, top-level or nested. The climb is additive.
+The "unique leaf" fallback is no longer reached by the bare spellings L2/L4 decide. It stays the last resort for a dotted head's lookup:
+retiring it there dropped `Summary.maxNodeSize` inside swift-collections' generic `Rope` with no hedge. Kill switch
+`CANDOR_TYPE_ID_L4_OFF` (also off under `CANDOR_TYPE_ID_L2_OFF`).
+
 ### ⚠ A declared value's call is routed by its declaration in every use file (SOUNDNESS R1981, type-identity lane B3)
 
 Lane L3 evaluated a call on a field, global, declared return or callee-typed closure parameter in the DECLARING file only when the use

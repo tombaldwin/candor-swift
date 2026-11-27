@@ -348,7 +348,7 @@ O12.rebind_closure pure ABSENT
 O12.rebind_block WRITES ABSENT ls Fs
 String.fe_data WRITES ABSENT ls Fs # a platform enclosing type whose nested types the generated table lists
 L12.body_local pure ABSENT # LS refusal: a body-local Data
-Sp12.sp_data WRITES ABSENT # LS refusal: a superclass the scan does not declare (NSObject); pre-existing silence, L4
+Sp12.sp_data WRITES ABSENT l4 Fs # LS refused a superclass the scan does not declare (NSObject); L4 walks it (R1948): NSObject nests no Data
 Plain12.pe_data WRITES ABSENT ls Fs # an extension of a scan protocol with no member named Data
 Conf12.ce_data WRITES ABSENT ls Fs # a conformer of that protocol and of `Swift.Error` (a qualified platform supertype)
 Wit12.w_data pure ABSENT # LS refusal: the conformer's member alias Data = Quiet12
@@ -443,6 +443,37 @@ U20.direct WRITES Fs+inc
 U20.alias_quiet pure ABSENT
 """
 
+
+    // lane L4 attack cells (fx26): a bare name reached as a member type or member alias of a SUPERTYPE (or of the enclosing type)
+    // where the module also declares that simple name top-level, so the package-wide key answered wrong in both directions; a
+    // dependency superclass nesting a name an imported own module declares top-level (hedged when its sources are not readable);
+    // inherited initializers (R1972); a protocol-extension member reached through a nested type's path (R1984's pool cost).
+    static let fx26 = """
+Sub26.a_grand WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Sub26.a_grand_inline WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Sub26.a_grand_mirror pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT
+Sub26.a_nearer pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT # Mid26.Near26 (nearer) shadows Base26's and the top level
+Sub26.a_ext WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Sub26.a_ext_mirror pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT
+Outer26.In26.a_in WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs # In26 inherits Base26.Cfg26 before Outer26's own pure Cfg26
+SubF26.f_field WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs # a field (declaration scope, L3's binder)
+SubF26.f_field_mirror pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT
+SubA26.b_super_alias WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+ConfA26.b_proto_alias pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT
+OwnA26.b_own_alias WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+OwnA26.b_own_alias_mirror pure Fs+inc|Fs+inc|Fs+inc l4 ABSENT|ABSENT|ABSENT
+SubD26.d_dep_nested WRITES ABSENT|ABSENT|ABSENT l4 -+inv|Fs|-+U # readable: the dependency's type; unreadable: hedged, main's binding kept
+SubD26.d_dep_nested_mirror pure Fs+inc|Fs+inc|Fs+inc l4 -+inv|-|Fs+U # unreadable: main's (fabricated) binding kept, hedged
+SubD26.live WRITES -+inv|Fs+inc|-+inv
+OuterI26.i_twin WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs # R1972: inherited LoudInit26.init
+OuterI26.i_lone WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Tbl26.e_field WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs # R1984: the field is Tbl26.Body26; Mk26.mark26 through its path
+Tbl26.e_local WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Plain26.e_top pure ABSENT|ABSENT|ABSENT
+Tbl26.e_field_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Tbl26.e_local_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
+Plain26.e_top_prop pure ABSENT|ABSENT|ABSENT
+"""
 
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling
     // importing Ext22X; c.swift imports Ext22X too (not evaluated as a.swift). Mirrors (`*_mirror`) beside every B1-direction cell.

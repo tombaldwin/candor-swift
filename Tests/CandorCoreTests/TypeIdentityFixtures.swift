@@ -49,6 +49,9 @@ enum TypeIdentityFixtures {
 
     static let fx25  = F(app: "fx25/App25", truthFile: "fx25/exec-ground-truth.txt", deps: ["fx25/DepA", "fx25/DepB"], spelling: "../DepA", unr: true, live: ["L25.live"], table: TypeIdentityCells.fx25)
 
+    // lane L4 (SOUNDNESS R1938 L4, R1948, R1972, R1984): the supertype walk's attack matrix
+    static let fx26  = F(app: "fx26/App26", truthFile: "fx26/exec-ground-truth.txt", deps: ["fx26/Dep26"], spelling: "../Dep26", unr: true, live: ["SubD26.live"], table: TypeIdentityCells.fx26)
+
     static let all: [(String, F)] = [("fx3", fx3), ("fx4", fx4), ("fx5", fx5), ("fx5nw", fx5nw), ("fx6", fx6), ("fx6c", fx6c), ("fx7", fx7), ("fx8", fx8),
-        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12), ("fx13", fx13), ("fx15", fx15), ("fx16", fx16), ("fx19", fx19), ("fx20", fx20), ("fx22", fx22), ("fx23", fx23), ("fx24", fx24), ("fx25", fx25)]
+        ("F1", f1), ("F2", f2), ("R", r), ("Rp", rp), ("RL", rl), ("Rlog2", rlog2), ("fx9", fx9), ("fx9r", fx9r), ("fx10", fx10), ("fx11", fx11), ("fx12", fx12), ("fx13", fx13), ("fx15", fx15), ("fx16", fx16), ("fx19", fx19), ("fx20", fx20), ("fx22", fx22), ("fx23", fx23), ("fx24", fx24), ("fx25", fx25), ("fx26", fx26)]
 }

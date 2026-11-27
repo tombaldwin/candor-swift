@@ -518,6 +518,8 @@ final class CallCollector: SyntaxVisitor {
     /// SOUNDNESS R1938 (lane L3) — the declaration-scoped binders' identities (TypeIdentityShadow.swift, L3).
     let l3R1938: L3DeclFactsR1938
     static let l3OffR1938 = Env.on("CANDOR_TYPE_ID_L3_OFF") || Env.on("CANDOR_TYPE_ID_L2_OFF")
+    /// SOUNDNESS R1938 (lane L4) — the supertype walk (TypeIdentityShadow.swift, L4). Off with L2's switch too (it is L2's index).
+    static let l4OffR1938 = Env.on("CANDOR_TYPE_ID_L4_OFF") || Env.on("CANDOR_TYPE_ID_L2_OFF")
     /// The context as STORED: a name, or `\u{1}N` for N spelled with an imported non-own module (`Guess.Lib`, `Foundation.Data`),
     /// which reads N "as if undeclared" even where bare N is the innermost nested type. Save and restore THIS, never the decoded name.
     private var lsCtxRawR1938: String? = nil
@@ -2484,9 +2486,28 @@ final class CallCollector: SyntaxVisitor {
         while !segs.isEmpty {
             let cand = segs.joined(separator: ".") + "." + name
             if ai.localTypePaths.contains(cand) { return cand }
+            // SOUNDNESS R1938 lane L4 — then the enclosing type's SUPERTYPES' member types (Swift's member lookup), before the
+            // next enclosing type out; two different answers refuse
+            if !Self.l4OffR1938, let leaf = segs.last {
+                var hits: Set<String> = []
+                for sup in ai.supertypes[leaf] ?? [] {
+                    let sl = sup.split(separator: ".").last.map(String.init) ?? sup
+                    for sp in (ai.pathsByLeaf[sl] ?? []).union(ai.localTypePaths.contains(sup) ? [sup] : []) where ai.localTypePaths.contains(sp + "." + name) {
+                        hits.insert(sp + "." + name)
+                    }
+                }
+                if hits.count == 1 { return hits.first }
+                if hits.count > 1 { return nil }
+            }
             segs.removeLast()
         }
         if ai.localTypePaths.contains(name) { return name }
+        // the "unique leaf" fallback (a bare name declared nested exactly once means that nested type) is not a Swift rule, and the
+        // supertype walk above now answers the case it stood in for (inheritance) first. It is KEPT as the last resort here: this
+        // lookup feeds dotted heads and R983's dotted key, where its absence drops the call with no hedge (measured on the pool,
+        // lane L4: swift-collections `Summary.maxNodeSize` inside `Rope<Element>`, a member alias of a generic parameter's
+        // associated type, lost its only edge and the `RopeSummary.maxNodeSize` key on 246 units). The bare spellings L2/L4
+        // decide never reach it.
         if let ps = ai.pathsByLeaf[name], ps.count == 1 { return ps.first }
         return nil
     }
@@ -9951,7 +9972,16 @@ final class CallCollector: SyntaxVisitor {
         // and a constructor or static spelled bare (`Data()`, `Data.make()`) is keyed by the innermost nested type's path, as the
         // dotted spelling `Outer.Data()` would be — not by the simple name every same-named nested type shares
         if let n = lsCtxR1938, let inner = lsCtxInnerR1938, localTypesAllR1938.contains(inner), before < calls.count {
+            let innerLeaf = inner.split(separator: ".").last.map(String.init) ?? inner
             for j in before..<calls.count where calls[j].path == n || calls[j].path.hasPrefix(n + ".") {
+                // SOUNDNESS R1938 lane L4 — a member ALIAS (`typealias Res = LoudRes`, on the enclosing type or a supertype) names a
+                // type of ANOTHER leaf: the call is that type's, spelled as the target would be (`LoudRes()`), so path and leaf move
+                if !CallCollector.l4OffR1938, innerLeaf != n {
+                    if calls[j].leaf == n { calls[j].leaf = innerLeaf }
+                    calls[j].path = inner + calls[j].path.dropFirst(n.count)
+                    lsProbeR1938("IDL4A\t\(r1455Qual)\t\(n)\t\(calls[j].path)\t\(calls[j].leaf)")
+                    continue
+                }
                 // a constructor keeps its path (measured on the pool: a rewritten `Signal.Observer` path missed every labelled
                 // overload `Signal.Observer.init(Action,Bool)`, a 1->0); a static member is keyed by the full path
                 if calls[j].path == n || calls[j].path == n + ".init" { calls[j].innerR1950 = inner }

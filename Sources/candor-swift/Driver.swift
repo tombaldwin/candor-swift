@@ -1445,8 +1445,16 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// `s.parentM()` was hedged `dispatch:NP.parentM` only because `NP` is not in `localTypes`. Used ONLY by the
     /// two provided-member lookups (the accessor climb and the protocol-extension-default arm), which edge real
     /// `<Sup>.<member>` units and nothing else, so a protocol that provides no such member adds nothing.
+    // SOUNDNESS R1938 lane L4 — a receiver typed by a NESTED type's FULL path (`Tbl.Body`, the binding R1950 and the supertype walk
+    // give a bare name) climbs the supertypes R266 keys by path. `supertypesOf` is keyed by the SIMPLE name, so a path-typed receiver
+    // found no conformance and its protocol-extension member was dropped (fx26 `Tbl26.e_local`: ABSENT over an executed write; on
+    // the pool this is what cost L3's declaration-site innermost binding, SOUNDNESS R1984). Filled once `supertypePathsOf` exists.
+    var l4PathSupersR1938: [String: Set<String>] = [:]
+    /// A dotted receiver type the simple-keyed tables do not hold, whose path-keyed supertypes are known.
+    func l4PathKeyedR1938(_ t: String) -> Bool { t.contains(".") && supertypesOf[t] == nil && l4PathSupersR1938[t] != nil }
+    func l4SupersOfR1938(_ t: String) -> Set<String> { supertypesOf[t] ?? (l4PathKeyedR1938(t) ? l4PathSupersR1938[t] ?? [] : []) }
     func providerSupers(_ t: String) -> [String] {
-        let direct = supertypesOf[t] ?? []
+        let direct = l4SupersOfR1938(t)
         guard !r1486Off else { return Array(direct) }
         var out = direct, queue = Array(direct).sorted()
         while let x = queue.popLast() {
@@ -2016,6 +2024,63 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         supertypePathsOf[sub] = seen.subtracting([sub])
+    }
+    if !CallCollector.l4OffR1938 {
+        for (p, sups) in supertypePathsOf where p.contains(".") && !sups.isEmpty && localTypePaths.contains(p) { l4PathSupersR1938[p] = sups }
+    }
+    // SOUNDNESS R1972 (type-identity lane L4) — AN INHERITED INITIALIZER. A class that declares no initializer inherits its
+    // superclass's designated initializers, so `Sub()` runs `Base.init`. The constructor arms edged `<T>.init` only, which a class with
+    // no init of its own does not have: `final class TopI: LoudB {}` + `TopI()` read PURE over an executed write (main and v0.43.0,
+    // top-level and nested alike; fx26 `OuterI26.i_lone`), and a nested one with a same-leaf top-level twin edged the twin's init
+    // (`i_twin`). The climb follows the CLASS supertypes by path (the first superclass spelling that resolves to a scan class; a
+    // protocol is never an initializer's owner here) to the first ancestor with init units, and edges those whose arity can take the
+    // call (all of them when none can: a default-argument shape the count does not model). ADDITIVE: the arms' own candidates stay.
+    // A superclass the scan does not declare stops the climb (its body is a dependency's or the platform's, which those arms answer).
+    var l4InitsByOwnerR1972: [String: [FnInfo]] = [:]
+    if !CallCollector.l4OffR1938 {
+        for f in allFns {
+            guard let ep = f.enclosingTypePath else { continue }
+            let head = f.qual.prefix { $0 != "(" && $0 != "#" }
+            if head == ep + ".init" { l4InitsByOwnerR1972[ep, default: []].append(f) }
+        }
+    }
+    func l4InheritedInitsR1972(_ start: String, argc: Int) -> [String] {
+        guard !CallCollector.l4OffR1938 else { return [] }
+        var cur = start, seen = Set<String>()
+        while seen.insert(cur).inserted {
+            let leaf = cur.split(separator: ".").last.map(String.init) ?? cur
+            guard classNamesAll.contains(leaf) else { return [] }
+            if let own = l4InitsByOwnerR1972[cur], !own.isEmpty {
+                guard cur != start else { return [] }
+                let fit = own.filter { $0.paramSig.count >= argc && $0.paramSig.dropFirst(argc).allSatisfy { $0.hasDefault || $0.variadic } }
+                return (fit.isEmpty ? own : fit).map(\.qual).sorted()
+            }
+            // the superclass: the direct supertype spellings that resolve to a scan CLASS (nearest enclosing scope first)
+            var next: [String] = []
+            for sp0 in pathSupers[cur] ?? [] {
+                let sp = sp0.firstIndex(of: "<").map { String(sp0[..<$0]) } ?? sp0
+                var segs = cur.split(separator: ".").map(String.init); segs.removeLast()
+                var hit: String? = nil
+                while hit == nil, !segs.isEmpty {
+                    let c = segs.joined(separator: ".") + "." + sp
+                    if localTypePaths.contains(c) { hit = c }
+                    segs.removeLast()
+                }
+                if hit == nil, localTypePaths.contains(sp) { hit = sp }
+                if hit == nil, let ps = typePathsBySimple[sp.split(separator: ".").last.map(String.init) ?? sp], ps.count == 1 { hit = ps.first }
+                if let h = hit, classNamesAll.contains(h.split(separator: ".").last.map(String.init) ?? h) { next.append(h) }
+            }
+            guard next.count == 1 else { return [] }
+            cur = next[0]
+        }
+        return []
+    }
+    /// The scan class a bare constructor spelling names: R1950's innermost path, else the one declared path of that simple name.
+    func l4CtorClassR1972(_ call: Call) -> String? {
+        if let inner = call.innerR1950 { return inner }
+        if localTypePaths.contains(call.path) { return call.path }
+        if let ps = typePathsBySimple[call.path], ps.count == 1 { return ps.first }
+        return nil
     }
 
     /// SOUNDNESS R265 — per-declaration ACCESS CONTROL, keyed on the FINAL qual (after the overload
@@ -4643,6 +4708,61 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // SOUNDNESS R1938 (lane LS) — the narrow platform-name shadow (TypeIdentityShadow.swift). Built only when some scan file
     // DECLARES a type named like a platform/κ name; nil otherwise, so a package without the shape pays nothing.
     // (lane L2 builds the same index over the NON-platform names: `makeShadowIndexR1938` is shared.)
+    // SOUNDNESS R1938 lane L4 — does a DEPENDENCY supertype (spelled `sup` in `file`) nest a type `n`? Read from the readable sources
+    // of the non-own modules the file imports (each module parsed once for its type paths). true: some imported module declares
+    // `sup` and nests `n` in it; nil: no readable module declares `sup` (unknown: the walk refuses, main's reading stands).
+    var l4DepTypePathsR1938: [String: Set<String>?] = [:]
+    func l4DepTypePaths(_ m: String) -> Set<String>? {
+        if let c = l4DepTypePathsR1938[m] { return c }
+        var out: Set<String>? = nil
+        if let files = deps.moduleSwiftSources[m], !files.isEmpty {
+            final class V: SyntaxVisitor {
+                var stack: [String] = [], paths: Set<String> = []
+                func push(_ n: String) { stack.append(n); paths.insert(stack.joined(separator: ".")) }
+                override func visit(_ n: StructDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); return .visitChildren }
+                override func visitPost(_ n: StructDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: ClassDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); return .visitChildren }
+                override func visitPost(_ n: ClassDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: EnumDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); return .visitChildren }
+                override func visitPost(_ n: EnumDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: ActorDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); return .visitChildren }
+                override func visitPost(_ n: ActorDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); return .visitChildren }
+                override func visitPost(_ n: ProtocolDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); stack.removeLast(); return .skipChildren }
+                override func visit(_ n: AssociatedTypeDeclSyntax) -> SyntaxVisitorContinueKind { push(n.name.text); stack.removeLast(); return .skipChildren }
+                override func visit(_ n: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
+                    stack.append(n.extendedType.trimmedDescription.split(separator: "<").first.map(String.init) ?? ""); return .visitChildren }
+                override func visitPost(_ n: ExtensionDeclSyntax) { stack.removeLast() }
+                override func visit(_ n: FunctionDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+                override func visit(_ n: InitializerDeclSyntax) -> SyntaxVisitorContinueKind { .skipChildren }
+            }
+            let v = V(viewMode: .sourceAccurate)
+            var ok = true
+            for path in files {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { ok = false; break }
+                v.walk(Parser.parse(source: text))
+            }
+            if ok { out = v.paths }
+        }
+        l4DepTypePathsR1938[m] = out
+        return out
+    }
+    func l4DependencyNestsR1938(_ file: String, _ sup: String, _ n: String) -> Bool? {
+        let own = ownTargetsByFile[file] ?? []
+        var head = sup
+        var mods = (fileImports.store[file] ?? []).filter { !own.contains($0) && !projectModules.contains($0) && !PLATFORM_MODULES.contains($0) }
+        if let dot = sup.firstIndex(of: "."), mods.contains(String(sup[..<dot])) {
+            mods = [String(sup[..<dot])]; head = String(sup[sup.index(after: dot)...])
+        }
+        var known = false
+        for m in mods.sorted() {
+            guard let ps = l4DepTypePaths(m), ps.contains(head) else { continue }
+            known = true
+            if ps.contains(head + "." + n) { return true }
+        }
+        return known ? false : nil
+    }
     func makeShadowIndexR1938(_ cands: Set<String>) -> LsShadowIndexR1938 {
         let facts = moduleIdentityFacts(sourcePaths: sourcePaths, rootDir: rootDir, owningPackage: { owningPackage(of: $0) },
                                         owningTarget: { owningTarget(of: $0, in: $1) }, xcodeModulesByFile: xcodeModulesByFile,
@@ -4696,6 +4816,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                   typeGenericNames: typeGenericParamNamesAI, stripOwnModule: strip)
         // R1950 — a widened (stripped) path names its recorded spelling, so a rewrite lands on the key the units are filed under
         for p in localTypePaths { if let q = strip(p), !localTypePaths.contains(q) { r.recordedPath[q] = p } }
+        // SOUNDNESS R1938 lane L4 — the supertype walk's facts (TypeIdentityShadow.swift, L4)
+        if !CallCollector.l4OffR1938 {
+            var direct: [String: [String]] = [:]
+            for (sub, sups) in pathSupers {
+                let ss = sups.map { s -> String in s.firstIndex(of: "<").map { String(s[..<$0]) } ?? s }
+                direct[sub, default: []].append(contentsOf: ss)
+                if let q = strip(sub) { direct[q, default: []].append(contentsOf: ss) }
+            }
+            r.l4 = L4WalkFactsR1938(directSupers: direct,
+                                   aliasTargetsByPath: widenKeys(memberTypeAliasesByPathAll, { $0.merging($1) { $0.union($1) } }),
+                                   aliasTargetsBySimple: memberTypeAliasesAll,
+                                   dependencyNests: { file, sup, n in l4DependencyNestsR1938(file, sup, n) })
+        }
         return r
     }
     let lsShadowR1938: LsShadowIndexR1938? = {
@@ -4763,7 +4896,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         var out: [String: Set<String>] = [:]
         for c in collectors {
             let m = l2.idx.moduleOf(c.file) ?? "\u{0}unattributed"
-            for p in c.localTypePaths where p.contains(".") {
+            // (lane L4: top-level paths too — a member alias's target, or an inherited type, may be top-level)
+            for p in c.localTypePaths where p.contains(".") || !CallCollector.l4OffR1938 {
                 out[p, default: []].insert(m)
                 if let q = l2.stripOwnModule(p) { out[q, default: []].insert(m) }
             }
@@ -5065,6 +5199,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// may be that module's and its member may do anything. Without this arm such a member call read `invisible` only, which no
     /// `deny E Unknown` gate sees (fx4-unr's nested-only `Vault`, fx16-unr). True by construction for exactly those calls.
     var l2ForeignCacheR1938: [String: Bool] = [:]
+    /// SOUNDNESS R1938 lane L4 — unit -> bare name -> the dependency supertype (spelling) whose member types could not be read.
+    var l4SuperUnknownR1938: [String: [String: String]] = [:]
     func l2IdentityForeignR1938(_ n: String, inFile file: String) -> Bool {
         let key = file + "\u{0}" + n + fileImports.cacheTag(file)   // R1981
         if let c = l2ForeignCacheR1938[key] { return c }
@@ -6120,6 +6256,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // (R1950 at the declaration is MEASURED, NOT APPLIED: typing the field by its nested path lost protocol-extension members the
         // engine resolves through simple-name supertype keys — swift-markdown `Table.isEmpty` -> `Markup.isEmpty`, swift-syntax
         // `SyntaxProtocol.range` — on the pool. Probe `IDL3I` lists the sites; the walk is L4's.)
+        // SOUNDNESS R1938 lane L4 / R1984 — APPLIED once a path-typed receiver climbs its path-keyed supertypes (`l4PathSupersR1938`):
+        // the field is the nested type (or the inherited one, or a member alias's target) Swift binds at the declaration.
+        if !CallCollector.l4OffR1938 {
+            for (k, fs) in l3InnerFieldsR1938 { for (field, x) in fs where unitFields[k]?[field]?.name == x.spelled { unitFields[k]![field] = (x.inner, false) } }
+        }
 
         // …and an `identity:foreign` field is a KNOWN, untyped field of its type (so the C12 drop names its head)
         for (k, fs) in l3ForeignFieldsR1938 { for (field, _) in fs where unitFields[k]?[field] == nil { unitFields[k, default: [:]][field] = (nil, false) } }
@@ -6275,6 +6416,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                                      generics: f.genericParamNames.union(f.genericBounds.keys),
                                                      bodyDecls: lsBodyDeclNamesR1938(Syntax(body)), only: spelled)
                                    facts.names = r.ok.filter { !LS_PLATFORM_NAMES_R1938.contains($0) }
+                                   // lane L4 — a name the walk could not decide because a DEPENDENCY supertype's member types are
+                                   // unknown (no readable sources declare it): the binding stays main's, and the unit's member calls
+                                   // on it are hedged below where the file's target names a dependency nobody can read
+                                   if !CallCollector.l4OffR1938 {
+                                       for (n, why) in r.refused where why.hasPrefix("supertype:") && !LS_PLATFORM_NAMES_R1938.contains(n) {
+                                           l4SuperUnknownR1938[f.qual, default: [:]][n] = String(why.dropFirst("supertype:".count))
+                                       }
+                                   }
                                    if let m = l2.idx.moduleOf(file) {
                                        let vis = l2.idx.visibleModules(inFile: file)
                                        // R1950 — only a nested type whose declaring module the file can see (see `l2PathModulesR1950`)
@@ -6365,13 +6514,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
             if !ts.isEmpty {
                 edges[f.qual, default: []].formUnion(view(ts))
-            } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) {
+            } else if let dot = pe.lastIndex(of: "."), localTypes.contains(String(pe[..<dot])) || l4PathKeyedR1938(String(pe[..<dot])) {
                 let type = String(pe[..<dot]), member = String(pe[pe.index(after: dot)...])
                 // R1486 — refined protocols too, EXCEPT where the type (or a supertype it spells) STORES a field of that
                 // name: a stored property shadows a protocol extension's member, so `values` read inside RxSwift's
                 // `ControlProperty` (`let values`) is that field, not `extension ObservableConvertibleType { var values }`
                 // (measured on the corpus A/B: the first cut edged it and fabricated `Clock`).
-                let directSups = supertypesOf[type] ?? []
+                // (lane L4: a path-typed receiver climbs its path-keyed supertypes, `l4SupersOfR1938`)
+                let directSups = l4SupersOfR1938(type)
                 let stores = fields[type]?[member] != nil || directSups.contains { fields[$0]?[member] != nil }
                 let provSups = stores ? Array(directSups) : providerSupers(type)
                 var provided = false
@@ -6671,6 +6821,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             callFileOverrideR1938 = b3CallFileR1981(call, f)   // SOUNDNESS R1938 (lane L3); R1981 (lane B3)
             // SOUNDNESS R1938 (lane L2) — the `identity:foreign` arm (see `l2IdentityForeignR1938`), on a MEMBER call only (the
             // constructor of the same receiver is the binding, not a dispatch).
+            // SOUNDNESS R1938 lane L4 — a member call on a receiver spelled `N` where the supertype walk met a DEPENDENCY supertype it
+            // cannot read before deciding `N` (`class SubD: DBase` with `DBase` from a module whose sources are not located): Swift
+            // binds `DBase.N` if that type nests one, and the engine kept the scan's same-named type. True by construction where the
+            // file's target names a dependency nobody can read (`l2IdentityForeignR1938`); main's binding is kept beside the hedge.
+            if let us = l4SuperUnknownR1938[f.qual], !call.unqualified, call.leaf != "init",
+               let dot = call.path.lastIndex(of: "."), let sup = us[String(call.path[..<dot])],
+               l2IdentityForeignR1938(String(call.path[..<dot]), inFile: unitFileR1938(f)) {
+                direct[f.qual, default: []].insert("Unknown")
+                whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(call.leaf)")
+                if c12Probe { FileHandle.standardError.write("C12HEDGE\t\(f.qual)\t\(call.leaf)\tidentity:supertype:\(sup)\n".data(using: .utf8)!) }
+            }
             if let n = l2NameR1938(call), !call.unqualified, call.path != n, call.leaf != "init", call.leaf != n {
                 let file = unitFileR1938(f)
                 if l2IdentityForeignR1938(n, inFile: file) {
@@ -7163,7 +7324,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     resolved = true
                 } else if let dot = call.path.lastIndex(of: "."),
-                          localTypes.contains(String(call.path[..<dot])) {
+                          (localTypes.contains(String(call.path[..<dot])) || l4PathKeyedR1938(String(call.path[..<dot]))) {
                     // PROTOCOL-EXTENSION DEFAULT via a CONCRETE receiver: `Job.emit` didn't resolve (Job
                     // declares no `emit`), but Job conforms to a protocol whose EXTENSION defaults `emit`.
                     // Edge to the default body on each conformed supertype that provides it (bounded by the
@@ -7179,7 +7340,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // dropped call — RSA `self.backing.…`, an associated-type `.init()`). R1492 closed those drops at
                     // their own sites; re-measured on b079d4f the hedge covers one row corpus-wide, whose own C call is
                     // still disclosed `invisible` (SOUNDNESS R1486, A/B in the commit). `CANDOR_R1486_HEDGE=1` restores it.
-                    let directSups = supertypesOf[type] ?? []
+                    let directSups = l4SupersOfR1938(type)
                     for sup in providerSupers(type) {
                         let base = "\(sup).\(member)"
                         let countsAsResolved = !r1486HedgeKept || directSups.contains(sup)
@@ -7257,13 +7418,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         // (`dependencyDeclaresType`) keeps the hedge the un-extended consumer carries. A platform type the
                         // consumer extends (`String`, `View`, `NSObject`) is left as it was: hedging it is a different, much
                         // wider question (hundreds of rows on the chained corpus) than a dependency class's subclass.
-                        let extSupers = (supertypesOf[type] ?? []).filter {
+                        let extSupers = l4SupersOfR1938(type).filter {
                             !localTypes.contains($0) || (!declaredTypes.contains($0) && !localProtocolNames.contains($0) && !protocolPaths.contains($0)
                                 && !STDLIB_NOMINALS.contains($0) && !RAW_VALUE_BASE_TYPES.contains($0) && !STD_PURE_PROTOCOLS.contains($0)
                                 && dependencyDeclaresType($0, f))
                         }.sorted()
                         let hedgeSupers: [String] = {
-                            let raw = supertypesOf[type] ?? []
+                            let raw = l4SupersOfR1938(type)
                             let legacy = extSupers
                             // A stdlib SCALAR (`RAND_ROOTS`: the integer, floating-point and Bool types) the scan does not
                             // declare, and whose operator no imported module's readable sources add in an `extension` of
@@ -7697,6 +7858,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                     if r1950CtorOn { resolved = true }   // R1950: a scan type's construction, whatever the filter left
                     if admitted == 0 { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
+                    if let c = l4CtorClassR1972(call) {   // R1972
+                        for t in l4InheritedInitsR1972(c, argc: argc) where edges[f.qual, default: []].insert(t).inserted {
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                        }
+                    }
                 } else if localCtorR1938 {
                     // `_ = C0()` — a constructor call edges to the declared init (the fuzzer's init_wired
                     // form caught this silent-pure hole on the harness's FIRST run: effects wired in an
@@ -7708,6 +7874,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let admittedR1504 = resolveQual("\(call.path).init").filter { extensionInitLabelsAdmit(call, $0) && l2CtorKeep($0) }
                     edges[f.qual, default: []].formUnion(admittedR1504)
                     if admittedR1504.isEmpty { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
+                    if let c = l4CtorClassR1972(call) {   // R1972
+                        for t in l4InheritedInitsR1972(c, argc: argc) where edges[f.qual, default: []].insert(t).inserted {
+                            callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
+                        }
+                    }
                     resolved = true
                 } else if !call.argRef, !call.argLabelled,
                           NATIVE_DISCLOSURE_C_FREE_FNS.contains(call.path),

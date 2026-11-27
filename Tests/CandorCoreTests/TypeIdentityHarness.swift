@@ -32,7 +32,8 @@ enum TypeIdentityTarget {
         // L2 landed (SOUNDNESS R1938 lane L2, the use-unit guard; R1947, R1950): likewise.
         // L3 landed (SOUNDNESS R1938 lane L3, identity recorded at the declaration; R1927, R1928).
         // B3 landed (SOUNDNESS R1981 lane B3, a declared value's call routed by its declaration in every use file).
-        var s: Set<TypeIdentityLane> = [.ls, .l2, .l3, .b3]
+        // L4 landed (SOUNDNESS R1938 lane L4, the supertype walk; R1948, R1972, R1984).
+        var s: Set<TypeIdentityLane> = [.ls, .l2, .l3, .b3, .l4]
         let env = ProcessInfo.processInfo.environment
         if let e = env["CANDOR_IDENT_EXPECT_TARGET"] {
             if e == "all" { s = Set(TypeIdentityLane.allCases) }
@@ -43,7 +44,8 @@ enum TypeIdentityTarget {
         }
         // A landed lane's KILL SWITCH takes its flag down with it, so `CANDOR_TYPE_ID_L2_OFF=1 swift test` is the switch-off arm
         // (every L2 cell must read main again, every other lane's as before).
-        if env["CANDOR_TYPE_ID_L2_OFF"] == "1" { s.remove(.l2); s.remove(.l3); s.remove(.b3) }   // L3 is built on L2's index: its switch goes too
+        if env["CANDOR_TYPE_ID_L2_OFF"] == "1" { s.remove(.l2); s.remove(.l3); s.remove(.b3); s.remove(.l4) }   // L3 and L4 are built on L2's index: their switches go too
+        if env["CANDOR_TYPE_ID_L4_OFF"] == "1" { s.remove(.l4) }
         if env["CANDOR_TYPE_ID_L3_OFF"] == "1" { s.remove(.l3); s.remove(.b3) }   // B3 routes L3's facts
         if env["CANDOR_TYPE_ID_B3_OFF"] == "1" { s.remove(.b3) }
         if env["CANDOR_TYPE_ID_SHADOW_OFF"] == "1" { s.remove(.ls) }
