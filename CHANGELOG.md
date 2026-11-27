@@ -10,6 +10,17 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ The report no longer depends on the process's hash seed (SOUNDNESS R1943)
+
+Two runs of one binary over one tree could differ: swift-collections' `BigString` read its Index comparison witnesses as
+`BigString.Index.<`/`==` on one run and `BigString._Chunk.Index.<`/`==` on the next, and `UniqueSet.init(RigidSet)` gained or
+lost `RigidSet.underestimatedCount`. Two sites, both iteration-order dependent. The R1526 index-witness lookup took its owner
+paths from `byOwnerMember.first { hasPrefix("<t>.") }` (an arbitrary dictionary entry, and one that also matched an extension
+spelled `<t>._Chunk`); it now uses the paths of the units whose enclosing type is `t`. The R1490 witness-question dedup key now
+includes the protocol, so the first overload to ask no longer decides whether the conformance guard answers. The report is
+byte-identical across runs (three whole-pool runs, 39 entries, chained and unchained, plus sidecars); `BigString` now always
+edges its own `Index`.
+
 ### ⚠ A type name a unit's own scope cannot resolve to the scan's same-named type is read as the dependency's (SOUNDNESS R1938 lane L2, R1947, R1950)
 
 Lane LS's per-unit rule now covers every name the scan declares, not only platform names. A bare `Lib` that a sibling target the

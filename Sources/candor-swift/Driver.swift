@@ -4551,6 +4551,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     if !CallCollector.r1526Off {
         let collProtos = ["Sequence", "Collection", "BidirectionalCollection", "RandomAccessCollection",
                           "MutableCollection", "RangeReplaceableCollection"]
+        var ownerPathsR1943: [String: Set<String>] = [:]
         var byOwnerMember: [String: [FnInfo]] = [:], byPathMember: [String: [FnInfo]] = [:]
         for f in allFns {
             guard let et = f.enclosingType else { continue }
@@ -4558,6 +4559,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 : String(f.simpleQual.split(separator: ".").last ?? "")
             let m = String(sq.prefix { $0 != "(" && $0 != "#" })
             byOwnerMember["\(et).\(m)", default: []].append(f)
+            if let tp0 = f.enclosingTypePath { ownerPathsR1943[et, default: []].insert(tp0) }
             if let tp = f.enclosingTypePath { byPathMember["\(tp).\(m)", default: []].append(f) }
         }
         for t in iterableLocalTypes.sorted() {
@@ -4594,7 +4596,12 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 for op in ["==", "<", "<=", ">", ">="] {
                     // keyed by the collection's FULL path (`BigSubstring.UTF16View.Index`): the bare leaf `Index` unions every
                     // type of that name in the scan (the first cut edged swift-collections' `RigidSet.Index.==`)
-                    let tPaths = Set((byOwnerMember.first { $0.key.hasPrefix("\(t).") }?.value ?? []).compactMap(\.enclosingTypePath))
+                    // R1943 — the paths of the units whose enclosing type IS `t`. This read `byOwnerMember.first { hasPrefix("\(t).") }`: an
+                    // arbitrary DICTIONARY entry, and one that also matches a nested/extended type spelled `t._Chunk` (swift-collections'
+                    // `BigString._Chunk`), so `BigString`'s Index witnesses came out as `BigString.Index.<` or
+                    // `BigString._Chunk.Index.<` depending on the process's hash seed.
+                    let tPaths = ownerPathsR1943[t] ?? Set((byOwnerMember.keys.sorted().filter { $0.hasPrefix("\(t).") })
+                        .flatMap { byOwnerMember[$0] ?? [] }.compactMap(\.enclosingTypePath))
                     let nested = tPaths.compactMap { byPathMember["\($0).\(i).\(op)"] }.flatMap { $0 }
                     let us = !nested.isEmpty ? nested : (byPathMember["\(t).\(i).\(op)"] ?? byOwnerMember["\(i).\(op)"] ?? [])
                     for f in us {
@@ -9093,7 +9100,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return false
     }
     func answerWitnessR1490(_ type: String, _ w: String, proto: String? = nil, caller: String, how: String) {
-        guard !r1490Off, !STDLIB_PROTOCOLS.contains(type), !localProtocolNames.contains(type), r1490Asked.insert("\(caller)\u{1}\(type)\u{1}\(w)").inserted else { return }
+        guard !r1490Off, !STDLIB_PROTOCOLS.contains(type), !localProtocolNames.contains(type), r1490Asked.insert("\(caller)\u{1}\(type)\u{1}\(w)\u{1}\(proto ?? "")").inserted else { return }
+        // R1943 — the dedup key carries `proto`: the same (caller, type, witness) is asked once per PROTOCOL it is required
+        // through, and the questions arrive in dictionary/Set order. Keyed without it, whichever came first consumed the key and
+        // the conformance guard below made the answer depend on that order (`UniqueSet.init(RigidSet)` gained
+        // `RigidSet.underestimatedCount` on about half of the runs).
         // A type this scan only EXTENDS (`extension Range: RangeExpression2`) answers a platform requirement with the
         // platform's own witness: a local same-named member is another overload (measured: swift-collections'
         // container-based `Range.relative(to:)` was edged for the stdlib `RangeExpression.relative(to:)` the generic runs).
