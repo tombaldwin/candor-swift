@@ -36,7 +36,9 @@ final class TypeIdentityMatrixTests: XCTestCase {
     func testFx5_control() throws { try matrix(X.fx5, "fx5", edges: [E("C.l_own_nested", has: ["Outer.Vlt.init", "Outer.Vlt.wipeVault"])]) }
     func testFx5nw_control() throws {
         try matrix(X.fx5nw, "fx5nw", edges: [E("C.l_own_nested", has: ["Outer.Vlt.init", "Outer.Vlt.wipeVault"]),
-                                             E("C.g_own_nested_c", has: ["g_own_nested"], hasNot: ["Outer.Vlt.quietOuterVault"])])
+                                             // L3 types `let g = Outer.Vlt()` by the nested path the scan declares (R1896's field rule)
+                                             E("C.g_own_nested_c", has: ["g_own_nested"], hasNot: ["Outer.Vlt.quietOuterVault"], lane: .l3,
+                                               targetHas: ["Outer.Vlt.quietOuterVault"])])
     }
     func testFx3_F3() throws { try matrix(X.fx3, "fx3") }
 
@@ -191,6 +193,17 @@ final class TypeIdentityMatrixTests: XCTestCase {
             // R1950 (lane L2): inside `Outer12`, bare `Data` is the innermost nested `Outer12.Data`, not Core12's top-level key `Data`
             E("Outer12.inner_nested", has: ["Data.write"], lane: .l2, targetHas: ["Outer12.Data.init", "Outer12.Data.write"], targetHasNot: ["Data.write", "Node12.Data.init()"]),
             E("L12.body_local", has: ["Data.write"]), E("Sp12.sp_data", has: ["Data.write"]),
+        ])
+    }
+    /// fx22 (lane L3 attack): fields, a parameter's field, a local bound from a field, a global, a factory return and a T4 closure
+    /// parameter, all decided in a.swift and read from b.swift (no imports) and c.swift (imports a module a.swift does not). The
+    /// mirrors lose the sibling's loud `Kit22.tap22`; the nested field binds its own `O22.Lib22` (R1950 at the declaration).
+    func testFx22_L3DeclarationScope() throws {
+        try matrix(X.fx22, "fx22", edges: [
+            E("B22.b_field_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
+            E("B22.b_global_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
+            E("O22.o_nested", has: ["Lib22.wipe22"], hasNot: ["O22.Lib22.wipe22"], lane: .l3, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
+            E("B22.b_nested", has: ["Lib22.wipe22"], lane: .l3, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
         ])
     }
 }

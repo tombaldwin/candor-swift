@@ -517,6 +517,9 @@ final class DeclCollector: SyntaxVisitor {
     /// `returnsTmp` poisons a leaf two declarations disagree on.
     var genericReturnArgTmp: [String: GenericReturnArg?] = [:]
     var conformers: [String: [String]] = [:]           // protocol -> conforming local types
+    /// SOUNDNESS R1938 (lane L3) — every conformance an EXTENSION head declares (`extension Lib: Wiper {}`), as spelled at
+    /// file scope: which type the head names is decided in this file's scope by the Driver (a dependency's `Lib`, here).
+    var extensionConformancesR1938: [(type: String, proto: String)] = []
     var caseAssoc: [String: Set<String>] = [:]         // enum case -> single-associated-value type(s) seen
     /// SOUNDNESS R585 (b10) — the METATYPE twin of `caseAssoc`: `case c(CBase.Type)`. Same
     /// single-value, unambiguous-name discipline; separate map for `globalMetatypes`' reason.
@@ -667,6 +670,8 @@ final class DeclCollector: SyntaxVisitor {
     // known on this first per-file pass, so it is deferred via `globalFactories`, mirroring
     // `staticFactoryFields` one scope up.
     var globalTypes: [String: String] = [:]
+    /// SOUNDNESS R1938 (lane L3) — a module global initialised by a qualified constructor (`let g = Guess.Lib()`), as spelled.
+    var globalQualCtorsR1938: [String: String] = [:]
     /// SOUNDNESS R585 (b7) — a module-scope global whose type is a METATYPE: `let gC: CBase.Type =
     /// CSub.self`. A SEPARATE map from `globalTypes` rather than an entry in it, because everything
     /// downstream of `globalTypes` reads it as "the type of the VALUE this name holds" — putting a
@@ -1001,6 +1006,12 @@ final class DeclCollector: SyntaxVisitor {
                 globalFactories.append((name, ctor.baseName.text))
                 if isPublicGlobal { globalPublic.insert(name) }
             }
+        } else if let call = initVal.as(FunctionCallExprSyntax.self), let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
+                  let base = ma.base?.as(DeclReferenceExprSyntax.self), base.argumentNames == nil, ma.declName.argumentNames == nil,
+                  ma.declName.baseName.text.first?.isUppercase == true {
+            // SOUNDNESS R1938 (lane L3) — `let g = Guess.Lib()`: recorded AS SPELLED for the Driver's declaration-scoped decision
+            // (`M.N` is M's type only when M is a module this file imports and M's sources declare a TYPE N). Not typed here.
+            globalQualCtorsR1938[name] = "\(base.baseName.text).\(ma.declName.baseName.text)"
         } else if let ma = initVal.as(MemberAccessExprSyntax.self),
                   let base = ma.base?.as(DeclReferenceExprSyntax.self),
                   base.baseName.text.first?.isUppercase == true,
@@ -1098,6 +1109,7 @@ final class DeclCollector: SyntaxVisitor {
         for inh in inheritance?.inheritedTypes ?? [] {
             if let pname = typeName(inh.type).name {
                 conformers[pname, default: []].append(name)
+                if isExtension, typeStack.count == 1 { extensionConformancesR1938.append((name, pname)) }
                 // R266 — the same edge, recorded against the subtype's FULL PATH. An `extension S: P`
                 // conformance counts exactly as a declaration-site one does, so this is not gated on
                 // `isExtension`.

@@ -173,15 +173,22 @@ extension Msg {
         let own = ["Msg.s_own", "Msg.s_nest", "ODerived.s_qinh", "ODerived.s_qinh_self"]
         // EXECUTED WRITES, `Guess.DepStore()` (a two-segment path of an imported module): chained it binds the dependency's body;
         // standalone the dependency cannot be read, so the typed call is disclosed `invisible`, as the local binder's is
-        let dep = ["Msg.s_bare", "Msg.s_self", "Msg.s_let", "Msg.s_ext", "Msg.s_init", "Msg.s_closure", "GenOwner.s_genowner"]
+        // SOUNDNESS R1938 (lane L3) — identity recorded at the declaration: `Guess.Teller()` beside the scan's own `Teller` (B1) is the
+        // dependency's type, and a use file with no `import Guess` (B3) reads it as its declaring file does. Executed WRITES; under
+        // `CANDOR_TYPE_ID_L3_OFF` they read main's C12 hedge again.
+        let env = ProcessInfo.processInfo.environment
+        let l3 = env["CANDOR_TYPE_ID_L3_OFF"] != "1" && env["CANDOR_TYPE_ID_L2_OFF"] != "1"
+        let l3Moved = ["Msg.s_b1", "Msg.s_b3", "Msg.s_b3_tc"]
+        var dep = ["Msg.s_bare", "Msg.s_self", "Msg.s_let", "Msg.s_ext", "Msg.s_init", "Msg.s_closure", "GenOwner.s_genowner"]
         // EXECUTED WRITES, field not typed by this change: the C12 hedge must remain, with its own token, in both arms
-        let hedged: [(String, String)] = [("Msg.s_dkind", "wipeKindDep"), ("Msg.s_mk", "wipeDep"), ("Msg.s_fac", "wipeDep"),
+        var hedged: [(String, String)] = [("Msg.s_dkind", "wipeKindDep"), ("Msg.s_mk", "wipeDep"), ("Msg.s_fac", "wipeDep"),
                                           ("Msg.s_gen", "wipeGen"),
                                           // an `T!` stored field nothing types: hedged on the call (a pure twin is hedged too — the reason is the untyped receiver)
                                           ("Msg.s_iuo", "wipeOwn"), ("Msg.s_iuo_pure", "calmOwn"),
                                           // Fable B1/B2: the scan also declares `Teller`; `Maker` is a free FUNCTION of the dependency (executed WRITES)
                                           ("Msg.s_b1", "settleUp"), ("Msg.s_b2", "wipeDep")]
         // EXECUTED pure twins
+        if l3 { dep += l3Moved; hedged.removeAll { l3Moved.contains($0.0) } }
         let pure = ["Msg.s_pure", "Msg.s_ownpure", "Msg.s_shadow_local", "Msg.s_shadow_param", "Msg.s_iuo_pure"]
         for chained in [true, false] {
             let r = try rows(fx, chained: chained)
@@ -200,7 +207,7 @@ extension Msg {
                 XCTAssertTrue(r[c]?.why.contains("dispatch:<untyped>.\(leaf)") ?? false, "chained=\(chained) \(c): the C12 hedge must stay — rows: \(r)")
             }
             // B3 (executed WRITES): the call is in a file that does not import `Guess`; main hedged it chained, standalone it is silent on every arm
-            if chained {
+            if chained, !l3 {
                 for (c, leaf) in [("Msg.s_b3", "wipeDep"), ("Msg.s_b3_tc", "settleUp")] {
                     XCTAssertTrue(r[c]?.why.contains("dispatch:<untyped>.\(leaf)") ?? false, "chained \(c): the C12 hedge must stay in a file that does not import the module — rows: \(r)")
                 }

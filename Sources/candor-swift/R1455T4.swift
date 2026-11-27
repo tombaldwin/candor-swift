@@ -30,10 +30,18 @@ struct ClosureSigT4 {
     let labels: [String]               // external labels per position (`_` = none)
     let sig: [(type: String?, hasDefault: Bool, variadic: Bool)]
     /// position -> the closure's parameter spellings, one per closure parameter (nil = that one cannot be typed)
-    let fnParams: [Int: [String?]]
+    var fnParams: [Int: [String?]]
     /// positions whose written type could accept a closure but cannot be read (a generic parameter, `Any`, an alias)
     let opaquePositions: Set<Int>
     let unreadable: Bool               // an accessor / something this index cannot speak for: refuse when it is a candidate
+    /// SOUNDNESS R1938 (lane L3) — the declaration's own scope (file, type path, generics in scope) and each closure parameter's
+    /// WRITTEN spelling (before `resolveInScope`), so the Driver can decide the spelling where it is written; `l3Raw` holds the
+    /// answer (`L3BindR1938.raw`) per position and closure parameter where that scope reads a scan name "as if undeclared".
+    var file: String? = nil
+    var scope: String? = nil
+    var generics: Set<String> = []
+    var spellings: [Int: [String?]] = [:]
+    var l3Raw: [Int: [String?]] = [:]
 }
 
 struct ClosureSigIndexT4 {
@@ -99,14 +107,26 @@ struct ClosureSigIndexT4 {
                 generics.formUnion(typeGenerics[String(seg)] ?? [])
             }
             let ownerAliases = owner.flatMap { memberTypeAliases[$0] } ?? [:]
+            // SOUNDNESS R1938 (lane L3) — the generics IN THIS DECLARATION'S SCOPE (Swift's rule), without the package-wide
+            // `nonTypeNames` refusal, for the Driver's declaration-scoped decision
+            var scopeGenerics = f.genericParamNames.union(stdAssocNames)
+            for seg in (f.enclosingTypePath ?? f.enclosingType ?? "").split(separator: ".") {
+                scopeGenerics.formUnion(typeGenerics[String(seg)] ?? [])
+            }
             var byIndex: [Int: TypeSyntax] = [:]
             for (n, i) in f.paramIndex { if let t = f.paramDeclTypes[n] { byIndex[i] = t } }
-            var fnParams: [Int: [String?]] = [:], opaque = Set<Int>()
+            var fnParams: [Int: [String?]] = [:], opaque = Set<Int>(), spellings: [Int: [String?]] = [:]
             var unreadable = byIndex.count != f.paramLabels.count || f.paramSig.count != f.paramLabels.count
             for i in 0..<f.paramLabels.count {
                 guard let t = byIndex[i] else { unreadable = true; continue }
                 switch functionTypeParams(t) {
                 case .function(let ps):
+                    spellings[i] = ps.map { p in
+                        guard let s = elementSpelling(p), s != FUNCTION_TYPE_ELEMENT else { return nil }
+                        let head = String(s.split(separator: ".").first ?? "")
+                        if scopeGenerics.contains(head) || ownerAliases[head] != nil || fnTypeAliases.contains(head) { return nil }
+                        return s
+                    }
                     fnParams[i] = ps.map { p in
                         guard let s = elementSpelling(p), s != FUNCTION_TYPE_ELEMENT else { return nil }
                         let head = String(s.split(separator: ".").first ?? "")
@@ -138,9 +158,11 @@ struct ClosureSigIndexT4 {
             if CallCollector.t4Debug {
                 FileHandle.standardError.write("T4SIG\t\(f.qual)\tunreadable=\(unreadable) labels=\(f.paramLabels) idx=\(byIndex.count) sig=\(f.paramSig.count) fn=\(fnParams) opaque=\(opaque)\n".data(using: .utf8)!)
             }
-            idx.byLeaf[leaf, default: []].append(ClosureSigT4(owner: owner, labels: f.paramLabels, sig: f.paramSig,
-                                                              fnParams: fnParams, opaquePositions: opaque,
-                                                              unreadable: unreadable))
+            var sigT4 = ClosureSigT4(owner: owner, labels: f.paramLabels, sig: f.paramSig,
+                                     fnParams: fnParams, opaquePositions: opaque, unreadable: unreadable)
+            sigT4.file = String(f.loc.prefix { $0 != ":" }); sigT4.scope = f.enclosingTypePath ?? f.enclosingType
+            sigT4.generics = scopeGenerics; sigT4.spellings = spellings
+            idx.byLeaf[leaf, default: []].append(sigT4)
         }
         return idx
     }

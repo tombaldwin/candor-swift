@@ -311,3 +311,40 @@ func l2SpelledNamesR1938(_ body: Syntax?) -> Set<String> {
     v.walk(body)
     return v.out
 }
+
+// SOUNDNESS R1938 (type-identity lane L3) — IDENTITY RECORDED AT THE DECLARATION.
+//
+// L2 decided a spelling in the unit that WROTE it. A field, a global and a declared return are spelled in a declaration
+// elsewhere — the declaring type's file and type path, the declaring file, the declaring function's scope (DESIGN §0 point 1,
+// Fable's fx7 `H.b3r`) — and every unit that reaches the value through it reads the type the DECLARATION names. So the Driver
+// decides each such spelling ONCE, in its own scope, with the same per-scope rule (`LsShadowIndexR1938.decide`), and hands the
+// answer to every collector as a fact keyed by the binder:
+//   · `ctx` — `\u{1}N` when the declaration's scope reads a scan-declared name N "as if undeclared" (fx4 `var f: Lib` in a file
+//     that imports Guess and not Core; `Guess.Ledger()` beside the scan's own `Ledger`). `\u{1}` because the USE unit's own
+//     innermost-nested rewrite (R1950) is not this spelling's scope. Empty when the declaration names a type the scan does not
+//     declare at all: nothing is shadowed, only the declaring file matters;
+//   · `file` — the declaring file. A use unit in another file (B3: `extension Holder` in a file with no `import Guess`, legal in
+//     Swift 5 because member visibility is module-wide) resolves the receiver's MODULE where the declaration resolved it: the
+//     Driver evaluates the call's dependency route (join key, `invisible`, `identity:foreign`) in the declaring file, not in the
+//     use file, when the use file imports nothing the declaring file does not (DESIGN §3; see `l3CallFileR1938`);
+//   · `spelled` — the type string the merged tables hold for the binder: the fact applies only while the use unit's table still
+//     holds exactly that (an overlay that retyped the field — R1481, R1513 — keeps its own reading).
+// Kill switch `CANDOR_TYPE_ID_L3_OFF` (no facts are built; every reading is L2's).
+struct L3BindR1938: Equatable {
+    let ctx: String
+    let file: String
+    let spelled: String
+    /// The stored context string (`\u{1}N\u{3}file`, or `\u{3}file`).
+    var raw: String { ctx + "\u{3}" + file }
+}
+struct L3DeclFactsR1938 {
+    /// owner key (simple name and full path, as `fields` keys them) -> field -> the binder's identity
+    var fields: [String: [String: L3BindR1938]] = [:]
+    /// global name -> its identity (module-wide: a global is visible in every file of its module)
+    var globals: [String: L3BindR1938] = [:]
+    /// function or method LEAF -> its declared return's identity (the key `returns` uses)
+    var returns: [String: L3BindR1938] = [:]
+    /// a declaring file -> its imports (a qualified spelling `Guess.Lib` is read with the DECLARING file's modules)
+    var importsByFile: [String: Set<String>] = [:]
+    var isEmpty: Bool { fields.isEmpty && globals.isEmpty && returns.isEmpty && importsByFile.isEmpty }   // (T4 contexts register their files)
+}

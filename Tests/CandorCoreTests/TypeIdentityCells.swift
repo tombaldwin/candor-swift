@@ -14,13 +14,13 @@ N.n_live WRITES -+inv|Fs+inc|-+inv
 """
 
     static let fx4 = """
-Holder.h_ann_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-Holder.h_ctor_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+Holder.h_ann_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
+Holder.h_ctor_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
 Holder.h_ann_vault WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
 Holder.h_ctor_vault WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-Holder.h_qann_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-Holder.h_qctor_lib WRITES -+U|-+U|ABSENT l3 -+inv|Fs|-+U+inv
-Holder.h_alias_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+Holder.h_qann_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
+Holder.h_qctor_lib WRITES -+U|-+U|ABSENT l3 -+inv/-+U|Fs|-+U+inv # L3: fx5 reads -+U standalone (its own-field C12 hedge); unr is the identity:foreign arm
+Holder.h_alias_lib WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
 Holder.h_own_nested pure ABSENT|ABSENT|ABSENT
 Holder.h_mirror_kit pure Fs+inc|Fs+inc|Fs+inc l3 -+inv|-|-+inv
 C.l_ann_lib WRITES ABSENT|ABSENT|ABSENT l2 -+inv|Fs|-+U+inv
@@ -55,8 +55,8 @@ C.live WRITES -+inv|Fs+inc|-+inv
 NI.ni_global_ctor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv ^l2 -+inv|ABSENT|-+inv
 NI.ni_global_qann WRITES -+inv|-|-+inv l3 -+inv|Fs|-+inv
 NI.ni_field_qann WRITES -+inv|-|-+inv l3 -+inv|Fs|-+inv
-Holder.niQann WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
-Holder.niCtor WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+Holder.niQann WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
+Holder.niCtor WRITES ABSENT|ABSENT|ABSENT l3 -+inv/-+U|Fs|-+U+inv/-+U # L3: the one-variable control is fx5 (these sources with the collisions renamed, `extension Lib: Wiper` kept), which reads -+U standalone: `dispatch:Wiper.wipeLib`; the design's -+inv came from fx5nw, which also drops Wiper
 """
 
     static let fx5 = """
@@ -65,7 +65,7 @@ Holder.h_ctor_lib WRITES -+U|Fs+inc|-+U
 Holder.h_ann_vault WRITES -+inv|Fs+inc|-+inv
 Holder.h_ctor_vault WRITES -+inv|Fs+inc|-+inv
 Holder.h_qann_lib WRITES -+U|Fs+inc|-+U
-Holder.h_qctor_lib WRITES -+U|-+U|ABSENT
+Holder.h_qctor_lib WRITES -+U|-+U|ABSENT ^l3 -+U|-+U|-+U+inv
 Holder.h_alias_lib WRITES -+U|Fs+inc|-+U
 Holder.h_own_nested pure ABSENT|ABSENT|ABSENT
 Holder.h_mirror_kit pure -+inv|-|-+inv
@@ -81,9 +81,9 @@ C.l_fac_vault WRITES -+inv|Fs+inc|-+inv
 C.l_upper_lib WRITES -|-|-+inv
 C.l_inline_lib WRITES -+U|Fs+inc|-+U
 C.l_inline_vault WRITES -+inv|Fs+inc|-+inv
-C.l_closure_lib WRITES -+U|-+U|-+U
-C.l_closure_named WRITES -+U|-+U|-+U
-C.l_generic WRITES -+U|-+U|-+U
+C.l_closure_lib WRITES -+U|-+U|-+U ^l3 -+U|Fs+U+inc|-+U
+C.l_closure_named WRITES -+U|-+U|-+U ^l3 -+U|Fs+U+inc|-+U
+C.l_generic WRITES -+U|-+U|-+U ^l3 -+U|Fs+inc|-+U
 C.l_own_nested pure ABSENT|ABSENT|ABSENT
 C.l_mirror_kit pure -+inv|-|-+inv
 C.g_ann_lib_c WRITES -+U|Fs+inc|-+U
@@ -91,18 +91,18 @@ C.g_ctor_lib_c WRITES -+U|Fs+inc|-+U
 C.g_ann_vault_c WRITES -+inv|Fs+inc|-+inv
 C.g_ctor_vault_c WRITES -+inv|Fs+inc|-+inv
 C.g_qann_lib_c WRITES -+U+inv|Fs+inc|-+U+inv
-C.g_qctor_lib_c WRITES -+U+inv|-+U|-+inv
+C.g_qctor_lib_c WRITES -+U+inv|-+U|-+inv ^l3 -+U+inv|Fs+inc|-+inv
 C.g_alias_lib_c WRITES -+U+inv|Fs+inc|-+U+inv
 C.g_fac_lib_c WRITES -+U|Fs+inc|-+U
 C.g_upper_lib_c WRITES -|-|-+inv
 C.g_own_nested_c pure ABSENT|ABSENT|ABSENT
 C.g_mirror_kit_c pure -+inv|-|-+inv
 C.live WRITES -+inv|Fs+inc|-+inv
-NI.ni_global_ctor WRITES -+U|-+U|-+U
-NI.ni_global_qann WRITES -+inv|-|-+inv
-NI.ni_field_qann WRITES -+inv|-|-+inv
-Holder.niQann WRITES ABSENT|ABSENT|ABSENT
-Holder.niCtor WRITES -+U|-+U|-+U
+NI.ni_global_ctor WRITES -+U|-+U|-+U ^l3 -+U|Fs+inc|-+U
+NI.ni_global_qann WRITES -+inv|-|-+inv ^l3 -+U+inv|Fs+inc|-+U+inv
+NI.ni_field_qann WRITES -+inv|-|-+inv ^l3 -+U+inv|Fs+inc|-+U+inv
+Holder.niQann WRITES ABSENT|ABSENT|ABSENT ^l3 -+U|Fs+inc|-+U
+Holder.niCtor WRITES -+U|-+U|-+U ^l3 -+U|Fs+inc|-+U
 """
 
     static let fx5nw = """
@@ -111,7 +111,7 @@ Holder.h_ctor_lib WRITES -+inv|Fs+inc|-+inv
 Holder.h_ann_vault WRITES -+inv|Fs+inc|-+inv
 Holder.h_ctor_vault WRITES -+inv|Fs+inc|-+inv
 Holder.h_qann_lib WRITES -+inv|Fs+inc|-+inv
-Holder.h_qctor_lib WRITES -+inv|Fs+inc|ABSENT
+Holder.h_qctor_lib WRITES -+inv|Fs+inc|ABSENT ^l3 -+inv|Fs+inc|-+U+inv
 Holder.h_alias_lib WRITES -+inv|Fs+inc|-+inv
 Holder.h_own_nested pure ABSENT|ABSENT|ABSENT
 Holder.h_mirror_kit pure -+inv|-|-+inv
@@ -127,8 +127,8 @@ C.l_fac_vault WRITES -+inv|Fs+inc|-+inv
 C.l_upper_lib WRITES -+inv|-|-+inv
 C.l_inline_lib WRITES -+inv|Fs+inc|-+inv
 C.l_inline_vault WRITES -+inv|Fs+inc|-+inv
-C.l_closure_lib WRITES -+U+inv|-+U|-+U+inv
-C.l_closure_named WRITES -+U+inv|-+U|-+U+inv
+C.l_closure_lib WRITES -+U+inv|-+U|-+U+inv ^l3 -+U+inv|Fs+U+inc|-+U+inv
+C.l_closure_named WRITES -+U+inv|-+U|-+U+inv ^l3 -+U+inv|Fs+U+inc|-+U+inv
 C.l_own_nested pure ABSENT|ABSENT|ABSENT
 C.l_mirror_kit pure -+inv|-|-+inv
 C.g_ann_lib_c WRITES -+inv|Fs+inc|-+inv
@@ -136,18 +136,18 @@ C.g_ctor_lib_c WRITES -+inv|Fs+inc|-+inv
 C.g_ann_vault_c WRITES -+inv|Fs+inc|-+inv
 C.g_ctor_vault_c WRITES -+inv|Fs+inc|-+inv
 C.g_qann_lib_c WRITES -+inv|Fs+inc|-+inv
-C.g_qctor_lib_c WRITES -+U+inv|-+U|-+inv
+C.g_qctor_lib_c WRITES -+U+inv|-+U|-+inv ^l3 -+inv|Fs+inc|-+inv
 C.g_alias_lib_c WRITES -+inv|Fs+inc|-+inv
 C.g_fac_lib_c WRITES -+inv|Fs+inc|-+inv
 C.g_upper_lib_c WRITES -+inv|-|-+inv
 C.g_own_nested_c pure ABSENT|ABSENT|ABSENT
 C.g_mirror_kit_c pure -+inv|-|-+inv
 C.live WRITES -+inv|Fs+inc|-+inv
-NI.ni_global_ctor WRITES -+inv|ABSENT|-+inv
-NI.ni_global_qann WRITES -+inv|-|-+inv
-NI.ni_field_qann WRITES -+inv|-|-+inv
-Holder.niQann WRITES ABSENT|ABSENT|ABSENT
-Holder.niCtor WRITES ABSENT|ABSENT|ABSENT
+NI.ni_global_ctor WRITES -+inv|ABSENT|-+inv ^l3 -+inv|Fs+inc|-+inv
+NI.ni_global_qann WRITES -+inv|-|-+inv ^l3 -+inv|Fs+inc|-+inv
+NI.ni_field_qann WRITES -+inv|-|-+inv ^l3 -+inv|Fs+inc|-+inv
+Holder.niQann WRITES ABSENT|ABSENT|ABSENT ^l3 -+inv|Fs+inc|-+inv
+Holder.niCtor WRITES ABSENT|ABSENT|ABSENT ^l3 -+inv|Fs+inc|-+inv
 """
 
     static let fx6 = """
@@ -180,7 +180,7 @@ Pure.other_knob pure ABSENT
 A8.a_ext WRITES -+inv|Fs+inc|-+inv
 A8.a_live WRITES -+inv|Fs+inc|-+inv
 B8.b_ext WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
-B8.b_ext_quiet pure -+inv|ABSENT|-+inv
+B8.b_ext_quiet pure -+inv|ABSENT|-+inv ^l3 -+inv|-|-+inv
 B8.b_own WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
 """
 
@@ -233,7 +233,7 @@ Msg3.c_reexport_ext WRITES -+U|-+U
 Msg3.c_aliascoll WRITES -+U|-+U
 Msg3.c_genalias WRITES -+inv|Fs+inc
 Msg3.c_scoped_import WRITES -+inv|Fs+inc
-GBox.c_genparam WRITES -+U|-+U
+GBox.c_genparam WRITES -+U|-+U ^l3 -+inv|Fs+inc
 """
 
     static let rp = """
@@ -272,7 +272,7 @@ ODerived.s_qinh_self WRITES Fs+inc|Fs+inc
 Msg.s_iuo WRITES -+U|-+U
 Msg.s_iuo_self WRITES ABSENT|ABSENT
 Msg.s_iuo_pure pure -+U|-+U
-Msg.s_b1 WRITES -+U|-+U
+Msg.s_b1 WRITES -+U|-+U ^l3 -+inv|Fs+inc
 Msg.s_b2 WRITES -+U|-+U
 Msg.s_b3 WRITES ABSENT|-+U l3 -+inv|Fs
 Msg.s_b3_tc WRITES ABSENT|-+U l3 -+inv|Fs
@@ -325,9 +325,9 @@ Holder11.a_live WRITES -+inv|Fs+inc|-+inv
 B11.b_ext_field WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
 B11.b_ext_factory WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
 B11.b_ext_local WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
-B11.b_ext_quiet pure -+inv|ABSENT|-+inv
+B11.b_ext_quiet pure -+inv|ABSENT|-+inv ^l3 -+inv|-|-+inv
 B11.b_own_field WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs|-+inv
-Holder11.b_ext_self WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv
+Holder11.b_ext_self WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs|-+U+inv/-+inv # L3: no collision here (Pipe11 is only Dep11's), so unr reads what the importing-file control `a_field` reads, -+inv
 HolderMi.mi_ext WRITES -+inv|Fs+inc|-+inv
 HolderMi.mi_ext_quiet pure -+inv|-|-+inv
 HolderMi.mi_own WRITES -+inv|Fs+inc|-+inv
@@ -441,6 +441,28 @@ U20.alias_generic WRITES Fs+inc
 U20.alias_plain WRITES Fs+inc
 U20.direct WRITES Fs+inc
 U20.alias_quiet pure ABSENT
+"""
+
+
+    // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling
+    // importing Ext22X; c.swift imports Ext22X too (not evaluated as a.swift). Mirrors (`*_mirror`) beside every B1-direction cell.
+    static let fx22 = """
+H22.a_live WRITES -+inv|Fs+inc|-+inv
+O22.o_nested pure ABSENT|ABSENT|ABSENT
+B22.b_field WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
+B22.b_field_mirror pure Fs+inv+inc|Fs+inc|Fs+inv+inc l3 -+inv|-|-+U+inv
+B22.b_param WRITES ABSENT|ABSENT|ABSENT l3 -+inv|Fs+inc|-+U+inv
+B22.b_local WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
+B22.b_global WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
+B22.b_global_mirror pure Fs+inv+inc|Fs+inc|Fs+inv+inc l3 -+inv|-|-+U+inv
+B22.b_ret WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
+B22.b_closure WRITES -+U+inv|-+U|-+U+inv l3 -+U+inv|Fs+U+inc|-+U+inv
+B22.b_ext_sibling WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+inv
+B22.b_ext_sibling_quiet pure -+inv|ABSENT|-+inv l3 -+inv|-|-+inv
+B22.b_nested pure ABSENT|ABSENT|ABSENT
+C22.c_field WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
+C22.c_field_mirror pure Fs+inv+inc|Fs+inc|Fs+inv+inc l3 -+inv|-|-+U+inv
+C22.c_ext WRITES -+inv|Fs+inc|-+inv
 """
 
 }

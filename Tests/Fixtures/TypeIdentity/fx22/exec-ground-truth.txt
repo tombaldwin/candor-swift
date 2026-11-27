@@ -1,0 +1,16 @@
+H22.a_live WRITES
+O22.o_nested pure
+B22.b_field WRITES
+B22.b_field_mirror pure
+B22.b_param WRITES
+B22.b_local WRITES
+B22.b_global WRITES
+B22.b_global_mirror pure
+B22.b_ret WRITES
+B22.b_closure WRITES
+B22.b_ext_sibling WRITES
+B22.b_ext_sibling_quiet pure
+B22.b_nested pure
+C22.c_field WRITES
+C22.c_field_mirror pure
+C22.c_ext WRITES

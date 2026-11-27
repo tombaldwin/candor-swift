@@ -10,6 +10,28 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+### ⚠ A field, global, declared return or callee-typed closure parameter reads the type its DECLARATION names (SOUNDNESS R1938 lane L3, R1927, R1928)
+
+Lane L2 decided a type spelling in the unit that wrote it. A field, a global, a declared return and a closure parameter typed from its
+callee's signature are spelled in a declaration elsewhere, and every unit reaching the value read it package-wide by simple name:
+`var f: Lib` in a file that imports Guess and not the sibling target Core bound Core's `Lib` (executed, `TypeIdentity/fx4`: the G-/F-
+rows ABSENT on v0.43.0 and main; the mirror — a loud scan `Kit` beside a pure dependency `Kit` — charged `Fs` to code that runs the pure
+one). Each such spelling is now decided ONCE, in its own declaration's scope, by L2's rule, and the binder carries the answer:
+- a scan name the declaration's scope cannot see reads as the dependency's type; `Guess.Teller()` beside the scan's own `Teller` is
+  Guess's (R1927; R1896's leaf-name refusal no longer applies to it); `let g = Guess.Lib()` and `let g = Outer.Vault()` are typed;
+- a use unit in another file of the module that imports nothing the declaring file does not (B3: legal in Swift 5, R1928) resolves the
+  receiver's module in the DECLARING file — join key, `invisible`, C12 evidence — instead of dropping the call;
+- a field spelled `N` inside a type that nests `N` binds that nested type (R1950 at the declaration);
+- an extension head `extension Lib: Wiper {}` that names a dependency type makes its conformer the dependency's: the protocol's dispatch
+  joins `<pkg>#Lib.<member>` chained and is disclosed `dispatch:Wiper.<member>` where nothing answers, instead of reaching the scan's
+  same-named type;
+- a closure parameter typed from a callee declared in this scan with a dependency type is typed (the annotated twin's binding), with the
+  callee's scope and file;
+- a field `M.N()` with M a dependency nobody can read is `Unknown {dispatch:<untyped>.<m>}` + `invisible:[M]` (`identity:foreign`).
+The R1066/R1104 `invisible` arms now consult the identity for a receiver L2/L3 read as a dependency type. Fixture `TypeIdentity/fx22`
+(executed, 16 cells, mirrors beside every B1-direction cell). Kill switch `CANDOR_TYPE_ID_L3_OFF` (restores main on every cell); probe
+lines `IDL3F`/`IDL3G`/`IDL3R`/`IDL3I`/`IDL3C`/`IDL3D`/`IDL3W`.
+
 ### ⚠ The report no longer depends on the process's hash seed (SOUNDNESS R1943)
 
 Two runs of one binary over one tree could differ: swift-collections' `BigString` read its Index comparison witnesses as

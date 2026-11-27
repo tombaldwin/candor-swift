@@ -2935,6 +2935,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
     }
     var locOf: [String: String] = [:]
+    // SOUNDNESS R1938 (lane L3) — THE FILE A CALL'S RECEIVER IS RESOLVED IN. Every dependency route below (the §2 join's packages,
+    // obligation 1's owner module, the `invisible` ledger, the C12 evidence, `identity:foreign`) asks its question of the unit's FILE.
+    // A receiver bound through a declaration (a field, a global, a declared return: `Call.declFileR1938`) has the type that
+    // declaration's file names, and a use unit in another file of the module may import nothing at all (B3, legal in Swift 5:
+    // fx4 `noimport.swift`, fx8/fx11 `b.swift`, R1896 `ext.swift` — ABSENT standalone and chained on v0.43.0 and main). So that call
+    // is evaluated in the DECLARING file — only where the use file imports nothing the declaring file does not, so no module the use
+    // file names is lost (an extension member a use-file-only import supplies keeps main's file). Per call: set at the top of the
+    // call loop, cleared after it; nil everywhere else, so `unitFileR1938(f)` is the unit's own file outside the loop.
+    var callFileOverrideR1938: String? = nil
+    func unitFileR1938(_ f: FnInfo) -> String { callFileOverrideR1938 ?? String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }) }
+    func l3CallFileR1938(_ call: Call, _ f: FnInfo) -> String? {
+        guard let d = call.declFileR1938 else { return nil }
+        let use = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        guard d != use, Set(fileImports[use] ?? []).isSubset(of: Set(fileImports[d] ?? [])) else { return nil }
+        if lsProbeOnR1938 { lsProbeR1938("IDL3D\t\(f.qual)\t\(call.path)\t\(use)\t->\t\(d)") }
+        return d
+    }
     var entryPoints: Set<String> = []
     // resolved target -> each call site's (calling function, arg kinds). The CALLER travels with the
     // args now (⟨0.34⟩ fix): callback-flow used to judge a callback param across the UNION of every call
@@ -3315,8 +3332,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     let r1104Off = Env.on("CANDOR_R1104_OFF")
     let r1066Probe = CallCollector.veinBProbe
     var sourceProvenCache: [String: Set<String>] = [:]
-    func sourceProvenDepModules(of spelled: String, inFile file: String, extendedInit: Bool = false) -> Set<String> {
-        let ck = "\(file)\u{0}\(spelled)\(extendedInit ? "\u{0}i" : "")"   // R1492: see `unreadableDepModules`
+    /// `foreignIdentity` (SOUNDNESS R1938, lanes L2/L3): the call's scope read the owner's name "as if undeclared" (`l2NameR1938`),
+    /// so the package-wide `localTypes`/`declaredTypes` hit is ANOTHER type of that name, not evidence the call stays in this scan.
+    func sourceProvenDepModules(of spelled: String, inFile file: String, extendedInit: Bool = false, foreignIdentity: Bool = false) -> Set<String> {
+        let ck = "\(file)\u{0}\(spelled)\(extendedInit ? "\u{0}i" : "")\(foreignIdentity ? "\u{0}f" : "")"   // R1492: see `unreadableDepModules`
         if let c = sourceProvenCache[ck] { return c }
         var segs = spelled.split(separator: ".").map(String.init)
         let imports = fileImports[file] ?? []
@@ -3326,7 +3345,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         var out = Set<String>(), direct = Set<String>()
         if let name = segs.first, !name.isEmpty, name.first?.isUppercase == true,
-           extendedInit || !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name) {
+           foreignIdentity || extendedInit || !localTypes.contains(name), foreignIdentity || !declaredTypes.contains(name),
+           !protocolMethods.keys.contains(name) {
             func declares(_ x: String) -> Bool {
                 !PLATFORM_MODULES.contains(x) && !KAPPA_MODULES.contains(x) && moduleDeclarations(x)?.names[name] == true
             }
@@ -3355,14 +3375,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// call stays in this scan. swift-certificates' `Time.makeTime` had read `invisible: [SwiftASN1]` only through a
     /// wrong overload edge; with the right overload its real reach into SwiftASN1 was undisclosed.
     func unreadableDepModules(of spelled: String, inFile file: String, generics: Set<String>,
-                              extendedInit: Bool = false) -> Set<String> {
+                              extendedInit: Bool = false, foreignIdentity: Bool = false) -> Set<String> {
         var segs = spelled.split(separator: ".").map(String.init)
         let imports = fileImports[file] ?? []
         var cands = blindModules(inFile: file).subtracting(ownTargetsByFile[file] ?? [])
         if segs.count > 1, imports.contains(segs[0]) { cands = cands.intersection([segs[0]]); segs.removeFirst() }
         guard let name = segs.first, !name.isEmpty, name.first?.isUppercase == true, name != "Self",
               !PLATFORM_MODULES.contains(name), !KAPPA_MODULES.contains(name),   // `Swift.print` names a module
-              extendedInit || !localTypes.contains(name), !declaredTypes.contains(name), !protocolMethods.keys.contains(name),
+              foreignIdentity || extendedInit || !localTypes.contains(name), foreignIdentity || !declaredTypes.contains(name),
+              !protocolMethods.keys.contains(name),
               !generics.contains(name), !typeGenericParamNamesAI.values.contains(where: { $0.contains(name) }),
               !STDLIB_NOMINALS.contains(name), !STDLIB_PROTOCOLS.contains(name),
               STDLIB_DIRECT_CONFORMANCES[name] == nil, !PLATFORM_VALUE_TYPES.contains(name),
@@ -3725,7 +3746,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// A platform type the consumer extends (`String`, `View`, `NSObject`) is none of these, and is not hedged as an external
     /// base on the strength of an extension alone.
     func dependencyDeclaresType(_ t: String, _ f: FnInfo) -> Bool {
-        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        let file = unitFileR1938(f)
         let imports = effectiveImports(file)
         if let roots = KAPPA_DEPENDENCY_ROOTS[t], imports.contains(where: { roots.contains($0) }) { return true }
         for m in imports {
@@ -4207,7 +4228,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
 
     let localProtocolNames = Set(protocolMethods.keys)  // loop-invariant: build once, not per fn
     // SOUNDNESS R1455 T4 — the callee-declared closure-parameter index (R1455T4.swift).
-    let closureSigsT4 = ClosureSigIndexT4.build(allFns, localTypes: localTypes, localProtocols: localProtocolNames,
+    var closureSigsT4 = ClosureSigIndexT4.build(allFns, localTypes: localTypes, localProtocols: localProtocolNames,
                                                 typeGenerics: typeGenericParamNamesAI,
                                                 nonTypeNames: localGenerics.nonTypeNames,
                                                 memberTypeAliases: memberTypeAliasesR915, fnTypeAliases: fnTypeAliases,
@@ -4746,6 +4767,230 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return out
     }()
+    // SOUNDNESS R1938 (lane L3) — IDENTITY RECORDED AT THE DECLARATION (TypeIdentityShadow.swift, L3). Every field, global and
+    // declared return is decided ONCE, in its own declaration's scope, by the per-scope rule L2 applies to a unit's spellings:
+    //   · a bare N the scan declares that the declaration's scope reads "as if undeclared" (no visible scan type of that name: fx4's
+    //     `var f: Lib` in a file importing Guess and not Core) -> `\u{1}N`;
+    //   · a module-level alias the declaration's file sees, whose target its own file reads that way (L2's `l2AliasesR1938`);
+    //   · `M.N` with M a non-own module the declaring file imports -> `\u{1}N` where the scan declares N (R1927: `Guess.Teller()`
+    //     beside the scan's own `Teller`), else no name;
+    //   · a name the scan does not declare at all (a dependency's type; not a platform name, not a generic) -> no name.
+    // Each carries the declaring file. A declaration decided differently from another under the same key (two files, two
+    // answers) is poisoned: the binder keeps main's reading. Platform names are left to LS's per-unit reading.
+    let l3OffR1938 = CallCollector.l3OffR1938
+    var l3FactsR1938 = L3DeclFactsR1938()
+    /// R1896's refusal of `Guess.Teller()` where the scan declares a `Teller` (`ownLeafNamesR1896`): under L3 the qualified
+    /// spelling is the dependency's type in every unit that reads it through the fact, so the field is typed for COLLECTORS only
+    /// (key -> field -> spelled), never in the shared `fields` the Driver's own readers consult.
+    var l3ExtraFieldsR1938: [String: [String: String]] = [:]
+    /// …and `let g = Guess.Lib()` (DeclCollector records no type for a qualified constructor): Swift module -> global -> spelled.
+    var l3ExtraGlobalsR1938: [String: [String: String]] = [:]
+    /// THE `identity:foreign` ARM FOR A DECLARATION (DESIGN §3, extended from L2): a field initialised `M.N()` where M is a dependency
+    /// module the declaring file imports whose sources NOBODY can read and no chained report covers. Whether `M.N` is a type, and which,
+    /// is not provable, so R1896 leaves the field untyped and its member calls are C12 drops with no evidence (fx4-unr
+    /// `Holder.h_qctor_lib` ABSENT over an executed write). key -> field -> M; the C12 terminal discloses there.
+    var l3ForeignFieldsR1938: [String: [String: String]] = [:]
+    /// THE CONFORMER A CONFORMANCE NAMES (fx4 `extension Lib: Wiper {}` in a file importing Guess and not Core: the conformer is
+    /// Guess's `Lib`, but `conformers[Wiper]` holds the simple name and the CHA reached Core's pure `Lib.wipeLib`, so
+    /// `GB(v: Lib()).run(p)` read `-` chained over an executed write). protocol -> conformer spelling -> the extension files whose
+    /// scope reads that head as a type the scan does not declare there. A conformer the scan ALSO conforms under its own type
+    /// (a declaration, or an extension whose head names the scan's type) is in `l3ScanConformersR1938` and keeps its edges.
+    var l3ForeignConformersR1938: [String: [String: Set<String>]] = [:]
+    var l3ScanConformersR1938: [String: Set<String>] = [:]
+    /// SOUNDNESS R1950 AT THE DECLARATION (lane L3): a field spelled bare `N` inside a type that NESTS `N` is that nested type
+    /// (Swift's member-type lookup), not the package-wide simple key. `struct O22 { struct Lib22 {…}; var f = Lib22() }` beside a
+    /// sibling target's top-level `Lib22`: `f.wipe22(p)` edged the sibling's `Lib22.wipe22` (fx22 `O22.o_nested`, on main too).
+    /// key -> field -> (the spelling recorded, the innermost path); applied to the collectors' table only, while it still holds that spelling.
+    var l3InnerFieldsR1938: [String: [String: (spelled: String, inner: String)]] = [:]
+    if !l3OffR1938, let l2 = l2IndexR1938 {
+        let ownMods = l2.idx.ownModules.union(projectModules)
+        func stripOpt(_ s: String) -> String {
+            var t = s
+            while t.hasSuffix("?") || t.hasSuffix("!") { t.removeLast() }
+            return t
+        }
+        /// The binder spelled `s` in `file`, inside the type path `path` (nil = file scope), with `generics` in scope.
+        func bind(_ s0: String, file: String, path: String?, generics: Set<String>) -> L3BindR1938? {
+            guard let m = l2.idx.moduleOf(file) else { return nil }
+            let s = stripOpt(s0)
+            // `Any`, `AnyObject`, `Never`, `Void`, `Self` name no nominal (measured: T4 typing `(Any) -> Int`'s parameter moved R1472's kill-switch arm)
+            guard !s.isEmpty, !s.contains("<"), !s.contains("["), !s.contains("("), !s.contains(" "),
+                  !["Self", "Any", "AnyObject", "Never", "Void", "Type", "Protocol"].contains(s) else { return nil }
+            let imps = Set(fileImports[file] ?? [])
+            if let dot = s.firstIndex(of: ".") {
+                let head = String(s[..<dot]), tail = String(s[s.index(after: dot)...])
+                guard !tail.contains("."), tail.first?.isUppercase == true, imps.contains(head), !ownMods.contains(head),
+                      !localTypes.contains(head), !PLATFORM_MODULES.contains(head), !generics.contains(head) else { return nil }
+                if LS_PLATFORM_NAMES_R1938.contains(tail) { return nil }
+                return L3BindR1938(ctx: declaredTypes.contains(tail) ? "\u{1}" + tail : "", file: file, spelled: s0)
+            }
+            // an uppercase FREE FUNCTION recorded as a constructor (`let g = MkLib()`, S10) names no type
+            guard s.first?.isUppercase == true, !generics.contains(s), !LS_PLATFORM_NAMES_R1938.contains(s),
+                  !localFreeFnNames.contains(s), freeFnByName[s] == nil else { return nil }
+            if l2.candidates.contains(s) {
+                let r = l2.decide(file: file, enclosingPath: path, generics: generics, bodyDecls: [], only: [s])
+                return r.ok.contains(s) ? L3BindR1938(ctx: "\u{1}" + s, file: file, spelled: s0) : nil
+            }
+            if let x = l2AliasesR1938[s] {
+                let vis = l2.idx.visibleModules(inFile: file)
+                return x.module == m || vis.contains(x.module) ? L3BindR1938(ctx: "\u{1}" + x.target, file: file, spelled: s0) : nil
+            }
+            // a type the scan does not DECLARE (it may extend it): nothing is shadowed, only the declaring file matters
+            guard !declaredTypes.contains(s), typeAliases[s] == nil || !localTypes.contains(typeAliases[s] ?? "") else { return nil }
+            return L3BindR1938(ctx: "", file: file, spelled: s0)
+        }
+        func gensOf(_ path: String?) -> Set<String> {
+            var g = Set<String>()
+            for seg in (path ?? "").split(separator: ".") { g.formUnion(typeGenericParamNamesAI[String(seg)] ?? []) }
+            return g
+        }
+        var poisonedF = Set<String>(), poisonedG = Set<String>(), poisonedR = Set<String>()
+        func addField(_ key: String, _ f: String, _ b: L3BindR1938) {
+            let k = key + "\u{0}" + f
+            if poisonedF.contains(k) { return }
+            if let e = l3FactsR1938.fields[key]?[f], e != b { l3FactsR1938.fields[key]?[f] = nil; poisonedF.insert(k); return }
+            l3FactsR1938.fields[key, default: [:]][f] = b
+        }
+        // ── declared returns (first: a global or field initialised by a factory takes the factory's identity) ──
+        var retBind: [String: L3BindR1938] = [:]
+        for c in collectors {
+            for (leaf, ds) in c.returnDecls where !leaf.contains(".") {
+                guard let vended = returnsIdx[leaf] else { continue }
+                for d in ds {
+                    guard let sp = typeName(d.type).name, sp == vended else { poisonedR.insert(leaf); continue }
+                    let g = d.generics.union(gensOf(d.scope))
+                    guard let b = bind(sp, file: c.file, path: d.scope, generics: g) else { poisonedR.insert(leaf); continue }
+                    if let e = retBind[leaf], e != b { poisonedR.insert(leaf) } else { retBind[leaf] = b }
+                }
+            }
+        }
+        for (leaf, b) in retBind where !poisonedR.contains(leaf) { l3FactsR1938.returns[leaf] = b }
+        // ── fields ──
+        for c in collectors {
+            var pathsByLeaf: [String: [String]] = [:]
+            for p in c.fieldsByPath.keys { pathsByLeaf[String(p.split(separator: ".").last ?? ""), default: []].append(p) }
+            for (ty, fs) in c.fields {
+                for (fname, v) in fs where !v.isFunction {
+                    guard let sp = v.name else { continue }
+                    let ps = (pathsByLeaf[ty] ?? []).filter { c.fieldsByPath[$0]?[fname] != nil }
+                    guard ps.count <= 1 else { continue }
+                    let path = ps.first ?? ty
+                    // R1950 at the declaration: the innermost nested type a module the file can see declares
+                    let bare = stripOpt(sp)
+                    if !bare.contains("."), !bare.contains("<"), l2.candidates.contains(bare), let m = l2.idx.moduleOf(c.file) {
+                        let r = l2.decide(file: c.file, enclosingPath: path, generics: gensOf(path), bodyDecls: [], only: [bare])
+                        if let inner = r.innermost[bare] {
+                            let ms = l2PathModulesR1950[inner] ?? []
+                            let vis = l2.idx.visibleModules(inFile: c.file)
+                            if !ms.contains("\u{0}unattributed"), ms.contains(m) || !ms.isDisjoint(with: vis) {
+                                for key in Set([ty, path]) where fields[key]?[fname]?.name == sp && sp == bare {
+                                    l3InnerFieldsR1938[key, default: [:]][fname] = (sp, inner)
+                                    if lsProbeOnR1938 { lsProbeR1938("IDL3I\t\(key).\(fname)\t\(sp)\t\(inner)") }
+                                }
+                            }
+                            continue
+                        }
+                    }
+                    guard let b = bind(sp, file: c.file, path: path, generics: gensOf(path)) else { continue }
+                    for key in Set([ty, path]) where fields[key]?[fname]?.name == sp { addField(key, fname, b) }
+                }
+            }
+        }
+        // static-factory fields (`static let shared = make()`) and R1896's qualified-constructor fields
+        for (ty, field, leaf) in staticFactoryFields {
+            if let b = l3FactsR1938.returns[leaf], fields[ty]?[field]?.name == b.spelled { addField(ty, field, b) }
+        }
+        for (ty, path, field, spelled, file) in ctorPathFieldsR1896 {
+            let keys = Set([ty, path])
+            let comps = spelled.split(separator: ".").map(String.init)
+            guard comps.count == 2, let b0 = bind(spelled, file: file, path: path, generics: gensOf(path)) else { continue }
+            if keys.allSatisfy({ fields[$0]?[field]?.name == spelled }) { for k in keys { addField(k, field, b0) }; continue }
+            // refused by R1896 only for the leaf's name (`ownLeafNamesR1896`): the module's readable sources must declare a TYPE N
+            guard !b0.ctx.isEmpty, keys.allSatisfy({ fields[$0]?[field] == nil }),
+                  let d = moduleDeclarations(comps[0]), !d.opaque, d.names[comps[1]] == true else { continue }
+            for k in keys { l3ExtraFieldsR1938[k, default: [:]][field] = spelled; addField(k, field, b0) }
+        }
+        for (ty, path, field, spelled, file) in ctorPathFieldsR1896 {
+            let comps = spelled.split(separator: ".").map(String.init)
+            guard comps.count == 2, Set([ty, path]).allSatisfy({ fields[$0]?[field]?.name == nil }), bind(spelled, file: file, path: path, generics: gensOf(path)) != nil,
+                  moduleDeclarations(comps[0]) == nil, !deps.coversModule(comps[0]), (declaredByFile[file] ?? []).contains(comps[0])
+            else { continue }
+            for k in Set([ty, path]) { l3ForeignFieldsR1938[k, default: [:]][field] = comps[0] }
+        }
+        // ── globals ──
+        for c in collectors {
+            for (g, sp) in c.globalTypes {
+                guard let b = bind(sp, file: c.file, path: nil, generics: []) else { poisonedG.insert(g); continue }
+                if let e = l3FactsR1938.globals[g], e != b { poisonedG.insert(g) } else { l3FactsR1938.globals[g] = b }
+            }
+            for (g, sp) in c.globalQualCtorsR1938 {
+                let comps = sp.split(separator: ".").map(String.init)
+                let cMod = swiftModuleOf(c.file)
+                // `let g = Outer.Vault()`: a nested type this scan DECLARES by its full path is the scan's (R1896's field rule)
+                if globalTypesByModule[cMod]?[g] == nil, declaredTypePathsAI.contains(sp) {
+                    l3ExtraGlobalsR1938[cMod, default: [:]][g] = sp; continue
+                }
+                guard comps.count == 2, globalTypesByModule[cMod]?[g] == nil, let b = bind(sp, file: c.file, path: nil, generics: []),
+                      let d = moduleDeclarations(comps[0]), !d.opaque, d.names[comps[1]] == true else { continue }
+                l3ExtraGlobalsR1938[cMod, default: [:]][g] = sp
+                if let e = l3FactsR1938.globals[g], e != b { poisonedG.insert(g) } else { l3FactsR1938.globals[g] = b }
+            }
+            for gf in c.globalFactories {
+                guard let b = l3FactsR1938.returns[gf.leaf] else { poisonedG.insert(gf.name); continue }
+                if let e = l3FactsR1938.globals[gf.name], e != b { poisonedG.insert(gf.name) } else { l3FactsR1938.globals[gf.name] = b }
+            }
+        }
+        for g in poisonedG { l3FactsR1938.globals[g] = nil }
+        // ── T4: a closure parameter typed from its CALLEE's signature is spelled in the callee's scope (fx4 `withLib(_ f: (Lib) ->
+        // Void)` in a file importing Guess, not Core). Where the callee's scope names a DEPENDENCY's type there, the parameter is typed
+        // with the written spelling (the annotated twin `{ (l: Lib) in … }` gets exactly that) and carries the callee's context
+        // and file: a scan name it reads "as if undeclared" (T4 had typed the scan's same-named type), or a name the scan does not
+        // declare (T4 refused it as a dependency type, and the call was dropped or hedged). Every other T4 refusal (an unreadable
+        // candidate, disagreeing overloads, a generic, an alias) still refuses: only the spelling's TYPE is decided here.
+        var t4Files = Set<String>()
+        for (leaf, sigs) in closureSigsT4.byLeaf {
+            for (i, sig) in sigs.enumerated() {
+                guard let file = sig.file else { continue }
+                var raw: [Int: [String?]] = [:]
+                for (k, ps) in sig.fnParams {
+                    let sp = sig.spellings[k] ?? []
+                    var typedNow = ps
+                    raw[k] = ps.enumerated().map { (j, typed) -> String? in
+                        guard j < sp.count, let s = sp[j], let b = bind(s, file: file, path: sig.scope, generics: sig.generics),
+                              typed != nil ? !b.ctx.isEmpty : true else { return nil }
+                        if typed == nil { typedNow[j] = s }
+                        return b.raw
+                    }
+                    if typedNow != ps { closureSigsT4.byLeaf[leaf]![i].fnParams[k] = typedNow }
+                }
+                if raw.values.contains(where: { $0.contains { $0 != nil } }) {
+                    closureSigsT4.byLeaf[leaf]![i].l3Raw = raw; t4Files.insert(file)
+                }
+            }
+        }
+        // ── conformances an extension head declares ──
+        for c in collectors {
+            for (t, proto) in c.extensionConformancesR1938 {
+                if bind(t, file: c.file, path: nil, generics: []) != nil { l3ForeignConformersR1938[proto, default: [:]][t, default: []].insert(c.file) }
+                else { l3ScanConformersR1938[proto, default: []].insert(t) }
+            }
+            for (proto, ts) in c.conformers { for t in ts where !c.extensionConformancesR1938.contains(where: { $0.type == t && $0.proto == proto }) {
+                l3ScanConformersR1938[proto, default: []].insert(t)
+            } }
+        }
+        var files = t4Files
+        for (_, fs) in l3FactsR1938.fields { for (_, b) in fs { files.insert(b.file) } }
+        for (_, b) in l3FactsR1938.globals { files.insert(b.file) }
+        for (_, b) in l3FactsR1938.returns { files.insert(b.file) }
+        for f in files { l3FactsR1938.importsByFile[f] = Set(fileImports[f] ?? []) }
+        if lsProbeOnR1938 {
+            for (k, fs) in l3FactsR1938.fields.sorted(by: { $0.key < $1.key }) {
+                for (f, b) in fs.sorted(by: { $0.key < $1.key }) { lsProbeR1938("IDL3F\t\(k).\(f)\t\(b.spelled)\t\(b.ctx.isEmpty ? "-" : String(b.ctx.dropFirst()))\t\(b.file)") }
+            }
+            for (g, b) in l3FactsR1938.globals.sorted(by: { $0.key < $1.key }) { lsProbeR1938("IDL3G\t\(g)\t\(b.spelled)\t\(b.ctx.isEmpty ? "-" : String(b.ctx.dropFirst()))\t\(b.file)") }
+            for (r, b) in l3FactsR1938.returns.sorted(by: { $0.key < $1.key }) { lsProbeR1938("IDL3R\t\(r)\t\(b.spelled)\t\(b.ctx.isEmpty ? "-" : String(b.ctx.dropFirst()))\t\(b.file)") }
+        }
+    }
     // SOUNDNESS R1938 (lane L2) — a call collected under one of L2's NON-platform names (the unit's scope reads `n` as a type the
     // scan does not declare there). The collector still types the receiver `n` where some extension keeps `n` in `localTypes`
     // (fx4 `extension Lib: Wiper {}` beside Core's unrelated `class Lib`), so the Driver must not land it on the SCAN's units of
@@ -4756,6 +5001,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         return n
     }
     var l2KeepCacheR1938: [String: Bool] = [:]
+    /// SOUNDNESS R1938 (lanes L2/L3) — LAYER 2 of the R1066/R1104 `invisible` arms: the call's receiver owner IS the name its scope
+    /// read "as if undeclared" (bare, or spelled with one module qualifier), so the package-wide `localTypes`/`declaredTypes` hit on
+    /// that name is another type's. Without it a receiver L2/L3 resolved to a dependency type read only obligation 1's key standalone
+    /// (fx4 `Holder.h_ann_lib`: `dispatch:Wiper.wipeLib` but no `invisible:[Guess]`, where the renamed control fx5nw reads it).
+    /// (Landed with lane L3, behind its switch: `CANDOR_TYPE_ID_L3_OFF` restores main.)
+    func l2ForeignOwnerR1938(_ call: Call, _ owner: String) -> Bool {
+        guard !CallCollector.l3OffR1938, let n = l2NameR1938(call) else { return false }
+        if owner == n { return true }
+        let segs = owner.split(separator: ".")
+        return segs.count == 2 && String(segs[1]) == n
+    }
     /// SOUNDNESS R1950 (lane L2) — see `Call.innerR1950`: a candidate unit of a DIFFERENT dotted type with the same leaf as the
     /// innermost nested type is not this constructor's. Kept: the innermost type's own units (either spelling of an own-module
     /// qualifier), any unit of another leaf, and any unit whose owner is a bare name (an `extension N` head may be the nested type).
@@ -4993,7 +5249,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         ts.remove(f.qual)
         if !ts.isEmpty { edges[f.qual, default: []].formUnion(ts) }
-        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+        let file = unitFileR1938(f)
         let chained = !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty
         let disclosed = chained && ws.contains { deps.anyChainedPackagePublishesLeaf($0) }
         if disclosed {
@@ -5322,6 +5578,13 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // SOUNDNESS R1896 — the receiver chain starts at a stored field of the enclosing type that nothing typed, and THIS package
         // declares a member of the leaf's name: the call may reach it. Said with the same token as every other C12 row; the
         // reason is "the field's type is unresolved", which is true of exactly the calls it is emitted for.
+        // SOUNDNESS R1938 (lane L3) — the head field's DECLARATION names `M.N()` with M a dependency nobody can read
+        // (`l3ForeignFieldsR1938`): the identity is not provable, and the member may be M's and do anything. Asked before R1896's
+        // own-field reason, which is also true here, because this one names the module.
+        var foreignModuleR1938: String? = nil
+        if evidence == nil, let h = call.fieldHeadNameR1938, let m = l3ForeignFieldsR1938[h.owner]?[h.field] {
+            evidence = "identity:foreign"; foreignModuleR1938 = m
+        }
         if evidence == nil, call.fieldHeadR1896, c12OwnLeaves.contains(leaf) { evidence = "own-field" }
         guard let ev = evidence else {
             // SOUNDNESS R1931 — THE REST OF THE OWN-LEAF RESIDUE: the receiver is untyped (a closure parameter, a `$0`, a
@@ -5343,6 +5606,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         if c12Probe { FileHandle.standardError.write("C12HEDGE\t\(f.qual)\t\(leaf)\t\(ev)\n".data(using: .utf8)!) }
         p.unknown.insert("dispatch:<untyped>.\(leaf)")
+        if let m = foreignModuleR1938 { p.invisible.insert(m) }   // the module the declaration names, read by nobody
         return p
     }
     let c12Probe = Env.trace("CANDOR_C12_PROBE")
@@ -5411,7 +5675,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let segs = owner.split(separator: ".").map(String.init)
             let head = segs.first ?? owner
             guard !declaredTypes.contains(head) else { continue }
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
             let open = effectiveImports(file).filter {
                 KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
@@ -5456,14 +5720,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
           }
         }
         if Env.trace("CANDOR_R548_PROBE"), !resolved {
-            let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let _pf = unitFileR1938(f)
             FileHandle.standardError.write(
                 ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
                  + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
                  + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
         }
         if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             let blind = blindModules(inFile: file)
             let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
             for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
@@ -5480,7 +5744,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                   !localTypes.contains(owner), !localProtocolNames.contains(owner),
                   !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
                   !PLATFORM_PROTOCOL_NAMES.contains(owner),
-                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let file = unitFileR1938(f),
                   let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
             // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
             // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
@@ -5496,7 +5760,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
             p.invisible.insert(module)
         } else if !resolved, !call.typed, let owner = call.extOwner,
-                  case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let _qf = unitFileR1938(f),
                   blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
             // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
             // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
@@ -5512,7 +5776,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
             // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
             // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             if (fileImports[file] ?? []).contains(owner) {
                 p.invisible.insert(owner)
                 if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
@@ -5522,10 +5786,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                   case let owner = f.genericBounds[raw] ?? raw,
-                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let file = unitFileR1938(f),
                   case let mods = { () -> Set<String> in
                       let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
-                                                         && call.leaf == "init" && owner == f.enclosingType)
+                                                         && call.leaf == "init" && owner == f.enclosingType,
+                                                     foreignIdentity: l2ForeignOwnerR1938(call, owner))
                       return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
                   }(), !mods.isEmpty {
             // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
@@ -5541,10 +5806,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             p.invisible.formUnion(mods)
         } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                   case let owner = f.genericBounds[raw] ?? raw,
-                  case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                  case let file = unitFileR1938(f),
                   case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
                                                        extendedInit: !CallCollector.r1492Off && call.leaf == "init"
-                                                           && owner == f.enclosingType),
+                                                           && owner == f.enclosingType,
+                                                       foreignIdentity: l2ForeignOwnerR1938(call, owner)),
                   !mods.isEmpty {
             // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
             // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
@@ -5593,6 +5859,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // this `merging` call never actually adjudicates a real collision, only documents which side wins.
         let effectiveGlobalTypes = (globalTypesByModule[fMod] ?? [:])
             .merging(crossModuleGlobalTypes(forFile: String(f.loc.prefix { $0 != ":" }), ownModule: fMod)) { own, _ in own }
+            .merging(l3ExtraGlobalsR1938[fMod] ?? [:]) { own, _ in own }   // SOUNDNESS R1938 (lane L3) — `let g = Guess.Lib()`
         // ── SOUNDNESS R584 — ONE PRECEDENCE, TWO MAPS ───────────────────────────────────────────────
         // "What does a TYPE-POSITION receiver spelling denote" is ONE question with two answers: a local
         // PROTOCOL (the bounded-CHA machinery R563 wired) and a local CONCRETE TYPE — a class bound, or
@@ -5707,12 +5974,18 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // SOUNDNESS R1896 (B3) — a field typed from an imported module's qualified constructor is typed ONLY in a file that imports
         // that module: elsewhere the qualified spelling cannot be read (`isModuleQualifier`), the call would drop with no marker,
         // and main's C12 hedge would be lost. There the field is read as it was on main: not recorded.
+        // SOUNDNESS R1938 (lane L3) — …unless the field's identity is recorded at its declaration: the qualified spelling is read
+        // with the DECLARING file's modules (`L3DeclFactsR1938.importsByFile`), and the call resolves its module there (B3).
         if !importedFieldModuleR1896.isEmpty {
-            let imps = Set(fileImports[String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })] ?? [])
+            let imps = Set(fileImports[unitFileR1938(f)] ?? [])
             for (k, fs) in importedFieldModuleR1896 {
-                for (field, mod) in fs where !imps.contains(mod) { unitFields[k]?[field] = nil }
+                for (field, mod) in fs where !imps.contains(mod) && l3FactsR1938.fields[k]?[field] == nil { unitFields[k]?[field] = nil }
             }
         }
+        for (k, fs) in l3ExtraFieldsR1938 { for (field, sp) in fs where unitFields[k]?[field] == nil { unitFields[k, default: [:]][field] = (sp, false) } }
+        for (k, fs) in l3InnerFieldsR1938 { for (field, x) in fs where unitFields[k]?[field]?.name == x.spelled { unitFields[k]![field] = (x.inner, false) } }
+        // …and an `identity:foreign` field is a KNOWN, untyped field of its type (so the C12 drop names its head)
+        for (k, fs) in l3ForeignFieldsR1938 { for (field, _) in fs where unitFields[k]?[field] == nil { unitFields[k, default: [:]][field] = (nil, false) } }
         if !CallCollector.r1481Off, let et = f.enclosingType, let gfs = genericParamFieldsR1481[et] {
             for (field, param) in gfs.sorted(by: { $0.key < $1.key }) where !f.genericParamNames.contains(param) {
                 // a FUNCTION carries R1463's bounds; an ACCESSOR unit carries none, so its own extension clause is read
@@ -5779,7 +6052,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                returns: returnsIdx,
                                metatypeReturns: metatypeReturnsIdx,                                  // R585
                                genericReturnArgs: genericReturnArgIdx,                               // R1044
-                               localGenerics: localGenericsFor(file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1044 residual, R1072
+                               localGenerics: localGenericsFor(file: unitFileR1938(f)),   // R1044 residual, R1072
                                globalMetatypes: globalMetatypesByModule[swiftModuleOf(f.loc)] ?? [:], // R585
                                globalMetatypeArrayElem: globalMetatypeArrayElemByModule[swiftModuleOf(f.loc)] ?? [:],
                                fieldMetatypes: r1513Facts.fieldMetatypes,                             // R585, R1513
@@ -5802,7 +6075,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                conditionallyShadowedTypes: conditionallyShadowedTypeNames,
                                mixedArmNamesR1714: Set(aliasCondPathsR1714.intersection(declCondPathsR1714.subtracting(declUncondPathsR1714))
                                    .map { $0.split(separator: ".").last.map(String.init) ?? $0 }),
-                               typeAliases: aliasesWithDependencies(forFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })),   // R1868(e)
+                               typeAliases: aliasesWithDependencies(forFile: unitFileR1938(f)),   // R1868(e)
                                typeAliasArms: typeAliasArms,
                                fnTypeAliases: fnTypeAliases,
                                enclosingMembers: f.enclosingType.map { t in
@@ -5818,7 +6091,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                ai: {
                                    guard aiBase.enabled else { return aiBase }
                                    var a = aiBase
-                                   a.file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })   // R1497
+                                   a.file = unitFileR1938(f)   // R1497
                                    if let m = aiAliasesWithDependencies(forFile: a.file ?? "", base: aiBase.fileAliases) {   // R1868(e)
                                        a.fileAliases = m
                                        a.depAliasNames = Set(depAliasFacts(forFile: a.file ?? "").overlay.keys).subtracting(aiBase.fileAliases.keys)
@@ -5840,7 +6113,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                closureSigsT4: closureSigsT4,                                          // R1455 T4
                                lsNamesR1938: {                                                        // R1938 LS
                                    guard let ls = lsShadowR1938 else { return [] }
-                                   let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                   let file = unitFileR1938(f)
                                    let r = ls.names(file: file, enclosingPath: f.enclosingTypePath ?? f.enclosingType,
                                                     generics: f.genericParamNames.union(f.genericBounds.keys),
                                                     bodyDecls: lsBodyDeclNamesR1938(Syntax(body)))
@@ -5856,7 +6129,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                lsKeepLocalR1938: lsExtendedTopLevelR1938,
                                l2FactsR1938: {                                                        // R1938 L2
                                    guard let l2 = l2IndexR1938 else { return L2UnitFactsR1938() }
-                                   let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                   let file = unitFileR1938(f)
                                    var facts = L2UnitFactsR1938()
                                    facts.qualified = true
                                    facts.ownModules = l2.idx.ownModules.union(projectModules)
@@ -5883,7 +6156,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                        }
                                    }
                                    return facts
-                               }())
+                               }(),
+                               l3FactsR1938: l3FactsR1938)                                            // R1938 L3
         // The locator-move set is flow-INSENSITIVE and must be complete before the first call is collected
         // (a rebind later in the text, or earlier in time inside a loop, still invalidates the claim). The
         // parameter names go with it: a body binder that SHADOWS a parameter is the same hazard, and the
@@ -5901,17 +6175,17 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // resolved a dependency alias is therefore attributed to the readable blind modules that declare the alias name, as
         // the release's spelling was. Non-gating (R133); a module a chained report covers is not blind and is not named.
         if !cc.usedDepAliases.isEmpty {
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             for a in cc.usedDepAliases.sorted() { blindDirect[f.qual, default: []].formUnion(sourceProvenDepModules(of: a, inFile: file)) }
         }
         if !cc.kappaFloorHits.isEmpty {   // R1879 / Q1 floor — κ answered a third-party entity
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             for h in cc.kappaFloorHits.sorted(by: { ($0.name, $0.spelled ?? "", $0.qualifier ?? "", $0.free ? 1 : 0) < ($1.name, $1.spelled ?? "", $1.qualifier ?? "", $1.free ? 1 : 0) }) {
                 attributeKappaFloor(f.qual, name: h.name, spelled: h.spelled, qualifier: h.qualifier, free: h.free, inFile: file)
             }
         }
         if !cc.platformBinderModules.isEmpty {   // R1879 — a readable dependency declaration the κ platform name may mean
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             let importable = importableByFile[file] ?? [], own = ownTargetsByFile[file] ?? []
             for m in cc.platformBinderModules.sorted() where !importable.contains(m) && !own.contains(m) && !deps.coversModule(m) {
                 if q1Probe { FileHandle.standardError.write("Q1FLOOR \(f.qual) platform-binder -> [\(m)]\n".data(using: .utf8)!) }
@@ -5984,7 +6258,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // So only a read on ANOTHER type's receiver asks; `self.m` / bare `m` stays as the release left it.
                 let boundHere = type == f.enclosingType
                 if !r1486Off, !provided, !boundHere, fields[type]?[member] == nil, !extProv.isEmpty, !deps.isEmpty {
-                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let file = unitFileR1938(f)
                     var hits: [DepEntry] = []
                     for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                         for k in [type] + extProv { if let e = deps.lookup("\(p)#\(k).\(member)") { hits.append(e) } }
@@ -6102,7 +6376,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if let inMod = globalsByModule[readerModule]?[name], inMod.count == 1 { return inMod[0] }
             if globalUnitNames.contains(name) { return name }
             if !deps.isEmpty, CallCollector.r847Off {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) where bareNameDepEntry(p, name, f) != nil {
                     return "\(p)#\(name)"
                 }
@@ -6147,7 +6421,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // rust needed the same edge on their side of the boundary). Effects attach directly, since
                 // the dep's unit lives in another report. Only the file's own imports are consulted and only
                 // an unambiguous single hit joins, so an unimported or ambiguous name resolves to nothing.
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 var hits: [DepEntry] = []
                 // R565 — the key is `<PACKAGE>#<name>`, and this loop used to spell a MODULE there.
                 var kappaSameEntity = false
@@ -6253,14 +6527,15 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         // SOUNDNESS R1086 — a literal operand proves a platform parameter type unbindable only where the caller's file
         // imports nothing but the platform and this project (see `operatorOperandsAdmit`).
-        r1081Flag.foreignImports = (fileImports[String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })] ?? []).filter {
+        r1081Flag.foreignImports = (fileImports[unitFileR1938(f)] ?? []).filter {
             !PLATFORM_MODULES.contains($0) && !KAPPA_MODULES.contains($0) && !projectModules.contains($0)
         }
         for var call in cc.calls {
+            callFileOverrideR1938 = l3CallFileR1938(call, f)   // SOUNDNESS R1938 (lane L3)
             // SOUNDNESS R1938 (lane L2) — the `identity:foreign` arm (see `l2IdentityForeignR1938`), on a MEMBER call only (the
             // constructor of the same receiver is the binding, not a dispatch).
             if let n = l2NameR1938(call), !call.unqualified, call.path != n, call.leaf != "init", call.leaf != n {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 if l2IdentityForeignR1938(n, inFile: file) {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:<untyped>.\(call.leaf)")
@@ -6272,7 +6547,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // reference forms nothing, which is the release's reading.
             if call.typeBaseRefR1873, let owner = call.extOwner,
                !depDeclaresStaticFunctionR1873(owner, call.leaf,
-                                               file: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })) {
+                                               file: unitFileR1938(f)) {
                 continue
             }
             // SOUNDNESS R1499 — see `r1499Unreachable`: the release's floor edge would name a local body this call cannot run.
@@ -6307,7 +6582,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // `resolved`, the publish arms and every hedge downstream are never reached by this marker.
             if call.path.hasPrefix("<curated>.") {
                 guard let owner = call.extOwner, !deps.isEmpty else { continue }
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 // The SAME answer the ordinary member join gives the non-κ twin of this call, tier by tier: the
                 // owner's own key first; on a miss, the ⟨0.40⟩ walk (a member the dependency type INHERITS, a
                 // protocol-extension default, a conformance another package adds — R858/R859/R865), so a κ verb
@@ -6348,7 +6623,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // CALL-TARGET ROUND 2 — the measured-not-shipped disclosure fallback (`CallCollector.siteFallback`, emitted
             // only under `CANDOR_CT2_FALLBACK`): a recognised site whose operand could not be typed discloses.
             if call.path.hasPrefix("<site>.c12.") {   // curated-routing S3: an unidentified explicit member call (lane L8)
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 applyTerminal(terminalDecision(.unidentifiedMember, call, f, file: file), to: f.qual, file: file)
                 continue
             }
@@ -6403,7 +6678,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // join misses, or whose kind is unknown, ADDS `Unknown` (⟨0.23⟩'s miss rule, word for word).
             if call.path.hasPrefix("<holds>.") {
                 guard !r843Off, let hop = call.holdsHop, !deps.isEmpty else { continue }
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 let (targets, distrusted) = holdsTargets(hop, file, call.ownerModule)
                 for t in targets {
                     let a = surfaceAnswer(t, call.leaf, forcedProtocol: false)
@@ -6430,7 +6705,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if call.path.hasPrefix("<platext>.") {
                 guard !r1071pOff else { continue }
                 let leaf = call.leaf
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 let recv = call.extOwner.map { f.genericBounds[$0] ?? $0 }
                 // A PROTOCOL receiver (`<S: Sequence>`, `some Collection`, `any P`) is answered by refinement below;
                 // only a concrete type's own member displaces a protocol extension's.
@@ -6563,7 +6838,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             let r974aTick = depApplyTick.n
             defer {
                 if !CallCollector.r974aOff, !call.argWitnesses.isEmpty, !call.path.hasPrefix("<"), !call.argRef,
-                   case let r974aFile = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                   case let r974aFile = unitFileR1938(f),
                    depApplyTick.n != r974aTick || (!resolved && !deps.chainedPkgs(importing: fileImports[r974aFile] ?? []).isEmpty
                                                  && r974aUnanswered(call, f, r974aFile)) {
                     for w in call.argWitnesses {
@@ -6652,7 +6927,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // them is the sound direction. Inheritance rather than an edge, because the dep's unit
                     // lives in another report and there is no node to edge to.
                     if !resolved, !deps.isEmpty {
-                        let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                        let file = unitFileR1938(f)
                         for sup in supertypesOf[et] ?? [] where sup != et {
                             for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {   // R565
                                 // R867 — `lookupStatic`: a `super.` call is statically dispatched, so the
@@ -6706,7 +6981,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             if let eff = kappaMember(root: sup, member: member) {
                                 direct[f.qual, default: []].insert(eff)
                                 attributeKappaFloor(f.qual, name: sup, qualifier: nil, free: false,
-                                                    inFile: String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }))   // R1879 / Q1 floor
+                                                    inFile: unitFileR1938(f))   // R1879 / Q1 floor
                             }
                         }
                     }
@@ -6856,7 +7131,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             // A stdlib SCALAR (`RAND_ROOTS`: the integer, floating-point and Bool types) the scan does not
                             // declare, and whose operator no imported module's readable sources add in an `extension` of
                             // it (that would be a dependency's overload, which the hedge may be covering).
-                            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                            let file = unitFileR1938(f)
                             guard !r1073Off, isOperator, RAND_ROOTS.contains(type), !declaredTypes.contains(type),
                                   !cc.droppedMember,
                                   !(fileImports[file] ?? []).contains(where: { moduleExtensionMembers($0)?[type]?[member] != nil })
@@ -6943,7 +7218,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         var depAnswer: DepEntry?
                         if fluentEff != nil || unknownSup != nil, !deps.isEmpty,
                            !Env.on("CANDOR_R657_OFF") {
-                            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                            let file = unitFileR1938(f)
                             let pkgs = deps.chainedPkgs(importing: fileImports[file] ?? [])   // R565
                             for keys in [[type], extSupers.filter { !STD_PURE_PROTOCOLS.contains($0) }] {
                                 var hits: [DepEntry] = []
@@ -6968,7 +7243,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             let refined = providerSupers(type).filter {
                                 !localTypes.contains($0) && !STD_PURE_PROTOCOLS.contains($0) && !extSupers.contains($0) }
                             if !refined.isEmpty {
-                                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                                let file = unitFileR1938(f)
                                 for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
                                     for k in refined { if let e = deps.lookup("\(p)#\(k).\(member)") { applyDepEntry(e, to: f.qual) } }
                                 }
@@ -7425,7 +7700,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 guard !localTypes.contains(abs), !localProtocolNames.contains(abs),
                       !STD_PURE_PROTOCOLS.contains(abs), !RAW_VALUE_BASE_TYPES.contains(abs),
                       !localTypes.contains(owner), !localProtocolNames.contains(owner) else { return nil }
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 // SOUNDNESS R705 (unchained arm) — the κ ledger's `invisible: [M]` is NOT a sufficient disclosure here,
                 // which the paragraph above assumed: it names the dependency that DECLARES the abstraction, while the
                 // witness the caller passes may be a LOCAL conformer. Executed (`swiftagent-v043/fx/r705u`): a local
@@ -7560,7 +7835,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // requirement gate (`protoOrSuperDeclares`, the sibling site's answer to the same
                 // question) and its own removal audit. Keeping the trigger makes this change exactly one
                 // thing — the OWNER of a key that was already published — and the A/B says so: ADDED 0.
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 // SOUNDNESS R826 — a CONVENTION owner publishes its key only where the §2 join below
                 // ANSWERED it (see there). Published unconditionally it re-mints the keys R567(a) removed
                 // for platform singletons — `Alamofire#DispatchQueue.async`, `…#NotificationCenter.addObserver`
@@ -7617,7 +7892,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // when the package IS chained that the ledger correctly falls silent (§2 rule 3) and the
             // silence becomes the claim worth spending a disclosure on.
             if call.path.hasPrefix("<untyped>.") {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 // ⟨0.23⟩ HALF 2 — DETERMINATION (SPEC §2 `typeSurface.returns`). Ask the dependency what
                 // its factory RETURNS, then key the ordinary chained lookup with it. Both ends of the
                 // surface are fully qualified in the producing package's namespace — the same namespace
@@ -7869,7 +8144,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // whose receiver type this package only EXTENDS; the `!resolved` guard above it is unchanged,
             // so a member the extension itself provides never reaches here.
             if !resolved, !deps.isEmpty, !call.typed || r651Extended {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 var hits: [DepEntry] = []
                 // R565 — `m` was a MODULE and the key prefix is a PACKAGE. `mods` carries the modules
                 // that resolved to this package, because the `owner == m` arm below asks about the
@@ -8018,7 +8293,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // token and the SAME chained gate R567(a)'s refusal uses — this is that refusal, deferred to
             // the one point where it is known whether the dependency answered. A HIT never reaches here.
             if !resolved, call.conventionOwner {
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 if !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty {
                     direct[f.qual, default: []].insert("Unknown")
                     whyMap[f.qual, default: []].insert("dispatch:untyped cross-package receiver")
@@ -8081,7 +8356,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     let segs = owner.split(separator: ".").map(String.init)
                     let head = segs.first ?? owner
                     guard !declaredTypes.contains(head) else { continue }
-                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let file = unitFileR1938(f)
                     let own = (importableByFile[file] ?? []).union(ownTargetsByFile[file] ?? [])
                     let open = effectiveImports(file).filter {
                         KAPPA_DEPENDENCY_MODULES.contains($0) && !own.contains($0) && !deps.coversModule($0) }
@@ -8127,14 +8402,14 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                   }
                 }
                 if Env.trace("CANDOR_R548_PROBE"), !resolved {
-                    let _pf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let _pf = unitFileR1938(f)
                     FileHandle.standardError.write(
                         ("R548 fn=\(f.qual) leaf=\(call.leaf) unqual=\(call.unqualified) "
                          + "extOwner=\(call.extOwner ?? "-") blind=\(blindModules(inFile: _pf).sorted()) "
                          + "foreignOwner=\(foreignOwnerModule(inFile: _pf) ?? "-")\n").data(using: .utf8)!)
                 }
                 if !resolved && call.unqualified && !(call.argRef && call.selfFieldRef && !r1104Off) {   // R1104
-                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let file = unitFileR1938(f)
                     let blind = blindModules(inFile: file)
                     let kdep = kappaDepOpenModules(inFile: file)   // R1868(iii) F5 — a κ-dependency module's free function
                     for m in effectiveImports(file) where blind.contains(m) || kdep.contains(m) {   // R827
@@ -8151,7 +8426,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                           !localTypes.contains(owner), !localProtocolNames.contains(owner),
                           !STD_PURE_PROTOCOLS.contains(owner), !STDLIB_ITERATION_PROTOCOLS.contains(owner),
                           !PLATFORM_PROTOCOL_NAMES.contains(owner),
-                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let file = unitFileR1938(f),
                           let module = foreignOwnerModule(inFile: file), blindModules(inFile: file).contains(module) {
                     // SOUNDNESS R706 (residual) — A MEMBER CALL THROUGH AN EXPLICIT PROTOCOL SPELLING (`any P`, `some P`,
                     // `<T: P>`) WHOSE OWNER IS A BLIND DEPENDENCY. SPEC §2 (`invisible`): the per-function attribution of
@@ -8167,7 +8442,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if r706iProbe { FileHandle.standardError.write("VBHIT\tR706I\t\(f.qual) \(owner).\(call.leaf) -> \(module)\n".data(using: .utf8)!) }
                     blindDirect[f.qual, default: []].insert(module)
                 } else if !resolved, !call.typed, let owner = call.extOwner,
-                          case let _qf = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let _qf = unitFileR1938(f),
                           blindModules(inFile: _qf).contains(owner) || kappaDepOpenModules(inFile: _qf).contains(owner) {
                     // SOUNDNESS R651 — `!call.typed` PINS THIS ARM'S POPULATION AND CHANGES NOTHING TODAY.
                     // Before R651 no typed call carried an `extOwner`, so this conjunct was implied; R651
@@ -8183,7 +8458,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     // only the module the call text targets, so the sweep-[33]/[36] guard (member calls on
                     // stdlib/κ-pure receivers must NOT flood blind imports) is untouched: an unresolvable member
                     // call on any OTHER receiver still attributes nothing and stays covered by the scan ledger.
-                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                    let file = unitFileR1938(f)
                     if (fileImports[file] ?? []).contains(owner) {
                         blindDirect[f.qual, default: []].insert(owner)
                         if KAPPA_MODULES.contains(owner) {   // R1868(iii) F5 — `AsyncHTTPClient.hcFree(p)`
@@ -8193,10 +8468,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     }
                 } else if !r1066Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                           case let owner = f.genericBounds[raw] ?? raw,
-                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let file = unitFileR1938(f),
                           case let mods = { () -> Set<String> in
                               let t = sourceProvenDepModules(of: owner, inFile: file, extendedInit: !CallCollector.r1492Off
-                                                                 && call.leaf == "init" && owner == f.enclosingType)
+                                                                 && call.leaf == "init" && owner == f.enclosingType,
+                                                             foreignIdentity: l2ForeignOwnerR1938(call, owner))
                               return t.isEmpty ? sourceExtendingDepModules(of: owner, member: call.leaf, inFile: file) : t
                           }(), !mods.isEmpty {
                     // SOUNDNESS R1071 — or whose sources EXTEND it (a platform type) with this public member.
@@ -8212,10 +8488,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     blindDirect[f.qual, default: []].formUnion(mods)
                 } else if !r1104Off, !resolved, !call.unqualified, !call.path.hasPrefix("<"), let raw = call.extOwner,
                           case let owner = f.genericBounds[raw] ?? raw,
-                          case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+                          case let file = unitFileR1938(f),
                           case let mods = unreadableDepModules(of: owner, inFile: file, generics: f.genericParamNames,
                                                                extendedInit: !CallCollector.r1492Off && call.leaf == "init"
-                                                                   && owner == f.enclosingType),
+                                                                   && owner == f.enclosingType,
+                                                               foreignIdentity: l2ForeignOwnerR1938(call, owner)),
                           !mods.isEmpty {
                     // SOUNDNESS R1104 — R1066'S QUESTION WHEN THE DEPENDENCY HAS NO SOURCES TO ASK. A package scanned before
                     // `swift package resolve` has no `.build/checkouts`, so `sourceProvenDepModules` finds no declarer and the
@@ -8235,7 +8512,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     blindDirect[f.qual, default: []].formUnion(mods)
                 }
             } else {
-                let tfile = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let tfile = unitFileR1938(f)
                 applyTerminal(terminalDecision(.unresolvedCall(resolved: resolved), call, f, file: tfile), to: f.qual, file: tfile)
             }
             // ── SOUNDNESS R705, THE DISCLOSURE ────────────────────────────────────────────────────────
@@ -8308,7 +8585,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                let owner = call.extOwner, !call.path.hasPrefix("<"),
                !localTypes.contains(owner), !localProtocolNames.contains(owner),
                !STD_PURE_PROTOCOLS.contains(owner), !RAW_VALUE_BASE_TYPES.contains(owner),
-               case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+               case let file = unitFileR1938(f),
                case let chained = deps.chainedPkgs(importing: fileImports[file] ?? []),
                existentialSpelled.contains(owner) || !(subtypesOf[owner] ?? []).isEmpty
                 || (!r706Off && chained.contains { deps.surface.knownKind("\($0.pkg)#\(owner)") == "protocol" }
@@ -8347,6 +8624,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 }
             }
         }
+        callFileOverrideR1938 = nil   // SOUNDNESS R1938 (lane L3) — the override is per CALL; see `l3CallFileR1938`
 
         // Bounded CHA over local protocols (SPEC §4, 0.5): the protocol is local and declares the
         // method; resolve ≤12 conformers, otherwise honest Unknown.
@@ -8443,7 +8721,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 let foreignSupers = seenProto.filter {
                     !localProtocolNames.contains($0) && !localTypes.contains($0) && !STD_PURE_PROTOCOLS.contains($0)
                 }
-                let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+                let file = unitFileR1938(f)
                 let chained = deps.chainedPkgs(importing: fileImports[file] ?? [])
                 if !foreignSupers.isEmpty, !chained.isEmpty {
                     var answered = false
@@ -8509,11 +8787,34 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                 // through the overload table) took the union branch and unioned empty sets — no edge and
                 // no `Unknown`. The comment above claiming overloads resolve here exactly as on the
                 // typed-call path was true of the provided half and false of this one.
-                let implResults = conf.map {
-                    memberTargets("\($0).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc))
+                // SOUNDNESS R1938 (lane L3) — a conformer an extension head names as a DEPENDENCY's type (`l3ForeignConformersR1938`)
+                // is that type, not the scan's same-named one: its witness is asked of the chained report by its own key, as R859
+                // asks a foreign protocol's, and where nothing answers it the dispatch is disclosed. The scan's same-named type's
+                // members are kept only where the scan ALSO conforms under its own type.
+                let foreignConf = l3ForeignConformersR1938[d.proto] ?? [:]
+                var foreignUnanswered = false
+                let implResults = conf.map { c -> Set<String> in
+                    guard let fs = foreignConf[c] else { return memberTargets("\(c).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc)) }
+                    let segs = c.split(separator: ".").map(String.init)
+                    let key = segs.count == 2 && fs.allSatisfy({ (fileImports[$0] ?? []).contains(segs[0]) }) ? segs[1] : c
+                    var answered = false
+                    for file in fs.sorted() {
+                        for (p, _) in deps.chainedPkgs(importing: fileImports[file] ?? []) {
+                            if let e = deps.lookup("\(p)#\(key).\(d.member)") { applyDepEntry(e, to: f.qual); answered = true }
+                        }
+                    }
+                    if lsProbeOnR1938 { lsProbeR1938("IDL3W\t\(f.qual)\t\(d.proto).\(d.member)\t\(c)\tanswered=\(answered)") }
+                    if !answered { foreignUnanswered = true }
+                    return (l3ScanConformersR1938[d.proto]?.contains(c) ?? false)
+                        ? memberTargets("\(c).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc)) : []
                 }
                 let resolvedCount = implResults.filter { !$0.isEmpty }.count
-                if resolvedCount == conf.count || providedEdged {
+                let foreignResolved = conf.filter { foreignConf[$0] != nil && !(l3ScanConformersR1938[d.proto]?.contains($0) ?? false) }.count
+                if foreignUnanswered {
+                    for ts in implResults { edges[f.qual, default: []].formUnion(ts) }
+                    direct[f.qual, default: []].insert("Unknown")
+                    whyMap[f.qual, default: []].insert("dispatch:\(d.proto).\(d.member)")
+                } else if resolvedCount + foreignResolved >= conf.count || providedEdged {
                     for ts in implResults { edges[f.qual, default: []].formUnion(ts) }
                 } else {
                     direct[f.qual, default: []].insert("Unknown")
@@ -8705,7 +9006,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             // precise-or-nothing.
             if !r1473Off, cc.stringifyExistentialR1473.contains(where: { $0 == d }),
                !localProtocolNames.contains(d.proto), !declaredTypes.contains(d.proto),
-               case let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" }),
+               case let file = unitFileR1938(f),
                !deps.chainedPkgs(importing: fileImports[file] ?? []).isEmpty,
                deps.anyChainedPackagePublishesLeaf(d.member) {
                 if r1473Probe {
@@ -8742,7 +9043,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // `propertyEdges` entry precisely so a local type sharing a dependency type's name resolves to
         // its OWN unit and can never inherit the dependency's (candor-spec SCAN-BOUNDARY-WORK-QUEUE §3c).
         if !deps.isEmpty, !cc.externalMembers.isEmpty {
-            let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
+            let file = unitFileR1938(f)
             for (cand, kinds) in cc.externalMembers.sorted(by: { $0.key < $1.key }) {
                 let isProp = kinds.contains("prop")
                 var hits: [DepEntry] = []
