@@ -7,3 +7,4 @@ public final class Kit22 { public init() {}
 public final class Pipe22 { public init() {}
     public func ownWipe22(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
 public func depWrite22(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) }
+public struct Enc22 { public init() {} }                     // a dependency type the scan makes conform (its witness is the scan's)

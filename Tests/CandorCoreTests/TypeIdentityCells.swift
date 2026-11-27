@@ -463,6 +463,7 @@ B22.b_nested pure ABSENT|ABSENT|ABSENT
 C22.c_field WRITES -+inv|ABSENT|-+inv l3 -+inv|Fs+inc|-+U+inv
 C22.c_field_mirror pure Fs+inv+inc|Fs+inc|Fs+inv+inc l3 -+inv|-|-+U+inv
 C22.c_ext WRITES -+inv|Fs+inc|-+inv
+W22.w_witness WRITES Fs+inc|Fs+inc|Fs+inc # a dependency type conforming to a scan protocol by a scan extension whose member is the witness (pool: vapor FormDataEncoder); round 1 dropped it to -+U
 """
 
 }

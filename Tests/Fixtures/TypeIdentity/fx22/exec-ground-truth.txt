@@ -14,3 +14,4 @@ B22.b_nested pure
 C22.c_field WRITES
 C22.c_field_mirror pure
 C22.c_ext WRITES
+W22.w_witness WRITES

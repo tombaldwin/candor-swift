@@ -4796,6 +4796,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// scope reads that head as a type the scan does not declare there. A conformer the scan ALSO conforms under its own type
     /// (a declaration, or an extension whose head names the scan's type) is in `l3ScanConformersR1938` and keeps its edges.
     var l3ForeignConformersR1938: [String: [String: Set<String>]] = [:]
+    /// …of those, the heads that name a scan-DECLARED name read "as if undeclared" (a collision): only there are the scan's units of
+    /// that name another type's. For a head the scan only extends, every unit of that name is an extension member of the dependency
+    /// type — a real witness (vapor `extension FormDataEncoder: ContentEncoder { func encode … }`).
+    var l3CollidingConformersR1938: [String: Set<String>] = [:]
     var l3ScanConformersR1938: [String: Set<String>] = [:]
     /// SOUNDNESS R1950 AT THE DECLARATION (lane L3): a field spelled bare `N` inside a type that NESTS `N` is that nested type
     /// (Swift's member-type lookup), not the package-wide simple key. `struct O22 { struct Lib22 {…}; var f = Lib22() }` beside a
@@ -4971,7 +4975,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // ── conformances an extension head declares ──
         for c in collectors {
             for (t, proto) in c.extensionConformancesR1938 {
-                if bind(t, file: c.file, path: nil, generics: []) != nil { l3ForeignConformersR1938[proto, default: [:]][t, default: []].insert(c.file) }
+                if let b = bind(t, file: c.file, path: nil, generics: []) {
+                    l3ForeignConformersR1938[proto, default: [:]][t, default: []].insert(c.file)
+                    if !b.ctx.isEmpty { l3CollidingConformersR1938[proto, default: []].insert(t) }
+                }
                 else { l3ScanConformersR1938[proto, default: []].insert(t) }
             }
             for (proto, ts) in c.conformers { for t in ts where !c.extensionConformancesR1938.contains(where: { $0.type == t && $0.proto == proto }) {
@@ -8803,13 +8810,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             if let e = deps.lookup("\(p)#\(key).\(d.member)") { applyDepEntry(e, to: f.qual); answered = true }
                         }
                     }
-                    if lsProbeOnR1938 { lsProbeR1938("IDL3W\t\(f.qual)\t\(d.proto).\(d.member)\t\(c)\tanswered=\(answered)") }
-                    if !answered { foreignUnanswered = true }
-                    return (l3ScanConformersR1938[d.proto]?.contains(c) ?? false)
-                        ? memberTargets("\(c).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc)) : []
+                    let all = memberTargets("\(c).\(d.member)", d.argc, d.argTypes, swiftModuleOf(f.loc))
+                    // the scan's units of that name: every one where the head only EXTENDS a dependency type (they are its extension
+                    // members, real witnesses); where it collides, only those filed where the name reads "as if undeclared" too
+                    // (L2's layer-2 rule), unless the scan also conforms under its own type
+                    let simple = c.split(separator: ".").last.map(String.init) ?? c
+                    let own: Set<String> = (l3ScanConformersR1938[d.proto]?.contains(c) ?? false) || !(l3CollidingConformersR1938[d.proto]?.contains(c) ?? false)
+                        ? all : all.filter { l2KeepsTargetR1938($0, simple) }
+                    if lsProbeOnR1938 { lsProbeR1938("IDL3W\t\(f.qual)\t\(d.proto).\(d.member)\t\(c)\tanswered=\(answered)\town=\(own.count)/\(all.count)") }
+                    if !answered && own.isEmpty { foreignUnanswered = true }
+                    return own
                 }
                 let resolvedCount = implResults.filter { !$0.isEmpty }.count
-                let foreignResolved = conf.filter { foreignConf[$0] != nil && !(l3ScanConformersR1938[d.proto]?.contains($0) ?? false) }.count
+                let foreignResolved = conf.indices.filter { foreignConf[conf[$0]] != nil && implResults[$0].isEmpty }.count
                 if foreignUnanswered {
                     for ts in implResults { edges[f.qual, default: []].formUnion(ts) }
                     direct[f.qual, default: []].insert("Unknown")

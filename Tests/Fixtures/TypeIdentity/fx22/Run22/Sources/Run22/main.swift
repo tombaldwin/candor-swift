@@ -18,3 +18,4 @@ cell("B22.b_nested") { _ = B22().b_nested($0) }
 cell("C22.c_field") { C22().c_field($0) }
 cell("C22.c_field_mirror") { _ = C22().c_field_mirror($0) }
 cell("C22.c_ext") { C22().c_ext($0) }
+cell("W22.w_witness") { W22().w_witness(Enc22Box.make(), $0) }
