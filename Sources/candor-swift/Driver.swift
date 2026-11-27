@@ -490,6 +490,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     var globalFactories: [(module: String, name: String, leaf: String)] = []
     // SOUNDNESS R1931 — (module, global, chain) for a global initialised by a member-call chain (see DeclCollector).
     var globalMemberFactoriesR1931: [(module: String, name: String, head: String, headIsCtor: Bool, hops: [String])] = []
+    // SOUNDNESS R1931 (round 2) — the MODULES that DECLARE (not extend) each type path, and that declare each `returnDecls` key:
+    // a chain hop may land only on a type its global's own module declares, read in that module's own return clauses.
+    var declModulesByTypePathR1931: [String: Set<String>] = [:]
+    var returnDeclModulesR1931: [String: Set<String>] = [:]
+    var moduleNamesR1931: Set<String> = []
     // Merged `DeclCollector.typeGenericBounds` across every file — a type's generic param may be BOUND by
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
@@ -1161,6 +1166,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
         globalMemberFactoriesR1931.append(contentsOf: c.globalMemberFactories.map { (cMod, $0.name, $0.head, $0.headIsCtor, $0.hops) })
+        for tp in c.declaredTypePaths { declModulesByTypePathR1931[tp, default: []].insert(cMod) }
+        for k in c.returnDecls.keys { returnDeclModulesR1931[k, default: []].insert(cMod) }
+        moduleNamesR1931.insert(cMod); moduleNamesR1931.formUnion(c.imports)
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
         for (t, bs) in c.typeDeclGenericBounds { typeDeclGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }   // R1481
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
@@ -2580,13 +2588,30 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     if !DeclCollector.r1931GOff {
         let r1931Probe = Env.trace("CANDOR_R1931_PROBE")
         func simpleR1931(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
-        func isLocalR1931(_ t: String) -> Bool { localTypes.contains(simpleR1931(t)) || localTypePaths.contains(t) }
-        func hopR1931(_ t: String, _ m: String) -> String? {
+        // ROUND 2 (Fable merge review B1): "a type this scan declares" was a PACKAGE-wide simple-name match, so a hop declared
+        // `-> Guess.Lib` (or an unqualified `-> Lib` in a target where Swift binds the DEPENDENCY's `Lib`, while another target
+        // declares a pure `Lib`) typed the global by the scan's same-named type, and the use site bound its pure member — main's
+        // C12 `Unknown` became a silence. Now every type in the chain (the head's and each hop's) must be the ONE type of that
+        // simple name the whole scan DECLARES (not merely extends), declared in the global's OWN module (whose declarations
+        // shadow every import, so the unqualified spelling there can only be it), with no typealias of that name anywhere and,
+        // for a dotted spelling, a first segment that is not a module. Each hop's return clause must likewise be declared
+        // only in that module. Anything else stays untyped, i.e. main's C12 hedge.
+        func ownTypeR1931(_ t: String, _ mod: String) -> Bool {
             let st = simpleR1931(t)
-            if CallCollector.selfReturnKeysR1506.contains("\(t).\(m)") || CallCollector.selfReturnKeysR1506.contains("\(st).\(m)") { return t }
-            guard let f = returnFactsIdx["\(t).\(m)"] ?? returnFactsIdx["\(st).\(m)"], let sc = f.scalar, !f.isFunction,
+            let paths = declModulesByTypePathR1931.keys.filter { simpleR1931($0) == st }
+            guard paths.count == 1, let p = paths.first, declModulesByTypePathR1931[p] == [mod],
+                  t == p || t == st, typeAliases[st] == nil, !typeAliases.keys.contains(where: { simpleR1931($0) == st }) else { return false }
+            if t.contains("."), moduleNamesR1931.contains(String(t.prefix { $0 != "." })) { return false }
+            return true
+        }
+        func hopR1931(_ t: String, _ m: String, _ mod: String) -> String? {
+            let st = simpleR1931(t)
+            let keys = ["\(t).\(m)", "\(st).\(m)"]
+            guard keys.allSatisfy({ (returnDeclModulesR1931[$0] ?? [mod]) == [mod] }) else { return nil }
+            if CallCollector.selfReturnKeysR1506.contains(keys[0]) || CallCollector.selfReturnKeysR1506.contains(keys[1]) { return t }
+            guard let f = returnFactsIdx[keys[0]] ?? returnFactsIdx[keys[1]], let sc = f.scalar, !f.isFunction,
                   f.arrayElem == nil, f.arrayElemNested == nil, f.dictValue == nil, f.metatype == nil, f.tuple.isEmpty,
-                  isLocalR1931(sc) else { return nil }
+                  ownTypeR1931(sc, mod) else { return nil }
             return sc
         }
         var decided: [String: [String: String?]] = [:]   // module -> name -> type (.some(nil) = the declarations disagree)
@@ -2596,10 +2621,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             var seen: [String: [String: String?]] = [:]
             for g in globalMemberFactoriesR1931 where decided[g.module]?[g.name] == nil {
                 var t: String?
-                if g.headIsCtor { t = localTypes.contains(g.head) ? g.head : nil }
+                if g.headIsCtor { t = g.head }
                 else if let gt = globalTypesByModule[g.module]?[g.head], g.head != g.name { t = gt }
-                else if g.head.first?.isUppercase == true, localTypes.contains(g.head) { t = g.head }
-                for m in g.hops { guard let cur = t else { break }; t = hopR1931(cur, m) }
+                else if g.head.first?.isUppercase == true { t = g.head }
+                if let h = t, !ownTypeR1931(h, g.module) { t = nil }
+                for m in g.hops { guard let cur = t else { break }; t = hopR1931(cur, m, g.module) }
                 if let prev = seen[g.module]?[g.name] { if prev != t { seen[g.module, default: [:]][g.name] = .some(nil) } }
                 else { seen[g.module, default: [:]][g.name] = .some(t) }
             }

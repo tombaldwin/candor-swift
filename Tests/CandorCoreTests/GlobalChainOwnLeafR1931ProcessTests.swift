@@ -20,6 +20,8 @@ import Foundation
 public final class Lib { public init() {}
     public func wipeLib(_ p: String) -> Int { p.count } }        // a dependency type sharing App's `Lib` name: PURE
 public func depWrite(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) }
+public final class Store { public init() {}
+    public func wipeStore(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }   // LOUD; App's Store is pure
 """#
     private static let globals = #"""
 import Foundation
@@ -30,6 +32,14 @@ public final class Lib { public init() {}
 public final class Loader { public init() {}
     public func open(_ n: String) -> Lib { Lib() }
     public func calmOpen(_ n: String) -> CalmLib { CalmLib() } }
+public final class Store { public init() {}
+    public func wipeStore(_ p: String) -> Int { p.count } }                  // PURE; Guess's Store writes
+public final class DepLoader { public init() {}
+    public func openDep(_ n: String) -> Guess.Store { Guess.Store() }        // module-qualified DEPENDENCY type sharing App's name
+    public func openOwn(_ n: String) -> Store { Store() } }                  // App's own pure Store (twin)
+let depLoader = DepLoader()
+let gDep = depLoader.openDep("x")
+let gOwnStore = depLoader.openOwn("y")
 public final class CalmLib { public init() {}
     public func hushLib(_ p: String) -> Int { p.count } }
 public final class Builder { public init() {}
@@ -68,6 +78,8 @@ public struct G {
     public func g_shadow_param(_ gLib: CalmLib, _ p: String) -> Int { gLib.hushLib(p) }
     public func g_gen(_ p: String) { gGen.wipeLib(p) }
     public func g_echo(_ p: String) { gEcho.wipeLib(p) }
+    public func g_dep(_ p: String) { gDep.wipeStore(p) }
+    public func g_ownstore(_ p: String) -> Int { gOwnStore.wipeStore(p) }
     public func g_live(_ p: String) { depWrite(p) }   // the chained-join liveness control (Guess's write)
 }
 """#
@@ -171,10 +183,12 @@ public struct R {
         // EXECUTED WRITES, not typed (protocol-extension hop, uppercase free-function head, private name with two types): hedged
         let hedged: [(String, String)] = [("G.g_ext", "wipeLib"), ("G.g_mk", "wipeLib"), ("G.g_priv", "wipeLib"),
                                           ("G.g_gen", "wipeLib"), ("G.g_echo", "wipeLib"),
+                                          // round 2 (Fable B1): a hop declared `-> Guess.Store` must not bind App's PURE `Store`
+                                          ("G.g_dep", "wipeStore"),
                                           ("R.r_lifetime", "wipeVault"), ("R.r_unmanaged", "wipeVault"), ("R.r_mapped", "wipeVault"),
                                           ("R.r_twohop", "relayVault")]
         // EXECUTED pure twins (unique leaves whose every declaration is pure): no charge, no hedge
-        let pure = ["G.g_calm", "G2.g_priv2", "G.g_shadow", "G.g_shadow_param", "R.r_lifetime_pure", "R.r_unmanaged_pure", "R.r_mapped_pure"]
+        let pure = ["G.g_ownstore", "G.g_calm", "G2.g_priv2", "G.g_shadow", "G.g_shadow_param", "R.r_lifetime_pure", "R.r_unmanaged_pure", "R.r_mapped_pure"]
         for chained in [true, false] {
             let r = try rows(fx, chained: chained)
             for c in resolved {
@@ -192,4 +206,83 @@ public struct R {
         let off = try rows(fx, chained: true, env: ["CANDOR_R1931_GLOBAL_OFF": "1"])
         XCTAssertFalse(off["G.g_lib"]?.effects.contains("Fs") ?? false, "CANDOR_R1931_GLOBAL_OFF must restore the untyped global")
     }
+
+    /// ROUND 2 (Fable merge review B1, spelling 2) — a multi-target package: `Core` declares a PURE `Lib`; `Feature` does not import
+    /// Core, imports Guess, and declares `Loader.open(_:) -> Lib`, which Swift binds to `Guess.Lib` (it writes; executed). The hop's
+    /// return names no type Feature's own module declares, so the global stays untyped and main's C12 hedge stays, in both arms.
+    func testAHopReturningAnotherTargetsSimpleNameStaysHedged() throws {
+        let bin = try ProcessHarness.binaryURL(for: Self.self)
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-r1931b-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ rel: String, _ text: String) throws {
+            let u = root.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: u, atomically: true, encoding: .utf8)
+        }
+        try write("Guess/Package.swift", """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "Guess", products: [.library(name: "Guess", targets: ["Guess"])], targets: [.target(name: "Guess")])
+        """)
+        try write("Guess/Sources/Guess/lib.swift", Self.loudLibDep)
+        try write("app2/Package.swift", """
+        // swift-tools-version:5.9
+        import PackageDescription
+        let package = Package(name: "App2", products: [.library(name: "Feature", targets: ["Feature"]), .library(name: "Core", targets: ["Core"])],
+            dependencies: [.package(path: "../Guess")],
+            targets: [.target(name: "Core"),
+                      .target(name: "Feature", dependencies: [.product(name: "Guess", package: "Guess")])])
+        """)
+        try write("app2/Sources/Core/core.swift", Self.core2)
+        try write("app2/Sources/Feature/feature.swift", Self.feature2)
+        let depDir = root.appendingPathComponent("depR")
+        try FileManager.default.createDirectory(at: depDir, withIntermediateDirectories: true)
+        let rd = try ProcessHarness.run(bin, [root.appendingPathComponent("Guess").path, "--out", depDir.appendingPathComponent("rGuess").path])
+        XCTAssertEqual(rd.code, 0, "dependency scan must succeed — stderr: \(rd.err)")
+        for extra in try FileManager.default.contentsOfDirectory(atPath: depDir.path)
+            where !(extra.hasSuffix(".Swift.json") && !extra.contains("callgraph") && !extra.contains("hierarchy")) {
+            try FileManager.default.removeItem(at: depDir.appendingPathComponent(extra))
+        }
+        for chained in [true, false] {
+            let tag = "o-\(UUID().uuidString)"
+            let r = try ProcessHarness.run(bin, [root.appendingPathComponent("app2").path, "--out", root.appendingPathComponent(tag).path],
+                                           env: chained ? ["CANDOR_DEPS": depDir.path] : [:])
+            XCTAssertEqual(r.code, 0, "consumer scan must succeed — stderr: \(r.err)")
+            let hit = try FileManager.default.contentsOfDirectory(atPath: root.path)
+                .first { $0.hasPrefix(tag) && $0.hasSuffix(".Swift.json") && !$0.contains("callgraph") && !$0.contains("hierarchy") }
+            let d = try JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent(hit ?? "missing"))) as? [String: Any]
+            var by: [String: [String: Any]] = [:]
+            for f in (d?["functions"] as? [[String: Any]]) ?? [] {
+                by[((f["fn"] as? String) ?? "?").split(separator: "(").first.map(String.init) ?? "?"] = f
+            }
+            let why = Set((by["F.f_dep"]?["unknownWhy"] as? [String]) ?? [])
+            XCTAssertTrue(why.contains("dispatch:<untyped>.wipeLib"), "chained=\(chained) F.f_dep writes through Guess.Lib: the hedge must stay — \(by["F.f_dep"] ?? [:])")
+            XCTAssertEqual(((by["F.f_live"]?["inferred"] as? [String]) ?? []).contains("Fs"), chained, "the chained join must be live")
+        }
+    }
+
+    private static let loudLibDep = #"""
+import Foundation
+public final class Lib { public init() {}
+    public func wipeLib(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }
+public func depWrite(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) }
+"""#
+    private static let core2 = #"""
+// another TARGET of the same package declares a pure `Lib`; Feature does not import Core
+public final class Lib { public init() {}
+    public func wipeLib(_ p: String) -> Int { p.count } }
+"""#
+    private static let feature2 = #"""
+import Foundation
+import Guess
+public final class Loader { public init() {}
+    public func open(_ n: String) -> Lib { Lib() } }     // UNQUALIFIED: in this target `Lib` is Guess.Lib (it writes)
+let loader = Loader()
+let gLib = loader.open("x")
+public struct F {
+    public init() {}
+    public func f_dep(_ p: String) { gLib.wipeLib(p) }   // EXECUTED: WRITES (Guess.Lib)
+    public func f_live(_ p: String) { depWrite(p) }      // liveness control
+}
+"""#
 }

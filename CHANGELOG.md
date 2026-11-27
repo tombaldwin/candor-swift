@@ -15,7 +15,9 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 `private let library = toolchainLoader.load(path: p)` recorded no type: a module-scope global was typed only by an annotation, a bare
 constructor, a free factory or `T.shared`, so every `library.load(symbol:)` was R1455's dropped member call. A global initialised by
 `head.m1(…).m2(…)` (head a typed global, a type this scan declares, or its constructor) is now typed hop by hop from the RECEIVER's own
-declared return (`Owner.member`, or `-> Self`), only where every hop lands on a type this scan declares and every declaration of the
+declared return (`Owner.member`, or `-> Self`), only where every type in the chain is the one type of that simple name the scan declares,
+declared in the global's own module (a `-> Guess.Lib` hop, or an unqualified `-> Lib` in a target where Swift binds a dependency's `Lib`
+while another target declares one, stays untyped), each hop's return clause is declared in that module, and every declaration of the
 name in its module agrees; a hop answered by a protocol extension, a generic-specialised head, a hop returning a generic parameter and
 an uppercase free-function head stay untyped. Kill switch `CANDOR_R1931_GLOBAL_OFF` (it can replace a chained C12 `Unknown` with the
 resolved member's own row). And a C12 drop the hedge did not reach whose leaf only THIS package declares (a closure parameter, a `$0`,
