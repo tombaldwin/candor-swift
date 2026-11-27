@@ -9379,6 +9379,19 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // a PURE computed one are absent from the dep report — and it is a candidate set rather than a
         // `propertyEdges` entry precisely so a local type sharing a dependency type's name resolves to
         // its OWN unit and can never inherit the dependency's (candor-spec SCAN-BOUNDARY-WORK-QUEUE §3c).
+        // SOUNDNESS R1938 lane L4 — …and an UNJOINED property read on a dependency's type (no chained report covers its module) is a
+        // demonstrable call into that module: `self.headers.debugDescription` with `headers: HTTPFields` read nothing standalone, so
+        // vapor's `Response.description` was disclosed only through a wrong-type edge (`self.body` read as `Request.Body`) that this
+        // lane removes. Disclosure only: the module joins `invisible` where a readable blind module the file imports declares the
+        // type (`sourceProvenDepModules`, the R1868 alias arm's own test), as a method call on the same receiver already does.
+        if !CallCollector.l4OffR1938, !cc.externalMembers.isEmpty {
+            let file = unitFileR1938(f)
+            for (cand, kinds) in cc.externalMembers.sorted(by: { $0.key < $1.key }) where kinds.contains("prop") {
+                guard let dot = cand.lastIndex(of: ".") else { continue }
+                let ms = sourceProvenDepModules(of: String(cand[..<dot]), inFile: file)
+                if !ms.isEmpty { blindDirect[f.qual, default: []].formUnion(ms) }
+            }
+        }
         if !deps.isEmpty, !cc.externalMembers.isEmpty {
             let file = unitFileR1938(f)
             for (cand, kinds) in cc.externalMembers.sorted(by: { $0.key < $1.key }) {

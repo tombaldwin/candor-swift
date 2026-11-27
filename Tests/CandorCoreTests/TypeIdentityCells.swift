@@ -477,6 +477,7 @@ UseP26.p_shared WRITES Fs+inc|Fs+inc|Fs+inc # must not move: a SIMPLE key two fi
 Back26.g_switch_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs # a case payload bound against `self` where another enum shares the case name (main: hedged; v0.43.0 ABSENT)
 Back26.g_if_case_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs
 UseH26.h_top_owner WRITES Fs+inc|Fs+inc|Fs+inc # must not move: an OWNER simple name shared with a nested type that nests the field's type; 996abe9 read ABSENT
+HoldS26.s_dep_prop WRITES ABSENT|Fs+inc|ABSENT l4 -+inv|Fs|ABSENT # a property read on a dependency-typed field names the module standalone (unreadable: unchanged)
 """
 
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling

@@ -35,3 +35,5 @@ cell("UseP26.p_shared") { UseP26().p_shared($0) }
 cell("Back26.g_switch_self") { var b = Back26.custom(LoudStore26()); b.g_switch_self($0) }
 cell("Back26.g_if_case_self") { Back26.custom(LoudStore26()).g_if_case_self($0) }
 cell("UseH26.h_top_owner") { UseH26().h_top_owner($0) }
+let depMarker = NSTemporaryDirectory() + "/fx26-depprop"
+try? FileManager.default.removeItem(atPath: depMarker); _ = HoldS26().s_dep_prop(""); print("HoldS26.s_dep_prop", FileManager.default.fileExists(atPath: depMarker) ? "WRITES" : "pure")

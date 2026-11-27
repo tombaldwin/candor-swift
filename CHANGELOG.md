@@ -34,6 +34,9 @@ Also in this lane:
 - the declaration-site binding rewrites only the PATH key where the owner's simple name names several types. A shared key took one
   declaration's answer for all of them: swift-crypto's `ASN1.SubjectPublicKeyInfo` retyped CryptoExtras' own field, and swift-nio's two
   `NewSequence`s retyped each other.
+- a property read on a dependency's type with no chained report (`self.headers.debugDescription`, `headers: HTTPFields`) names the
+  module in `invisible`, as a method call on the same receiver does. Standalone it named nothing, and vapor's `Response.description`
+  was disclosed only through the wrong-type edge this lane removes. Disclosure only.
 The "unique leaf" fallback is no longer reached by the bare spellings L2/L4 decide. It stays the last resort for a dotted head's lookup:
 retiring it there dropped `Summary.maxNodeSize` inside swift-collections' generic `Rope` with no hedge. Kill switch
 `CANDOR_TYPE_ID_L4_OFF` (also off under `CANDOR_TYPE_ID_L2_OFF`).

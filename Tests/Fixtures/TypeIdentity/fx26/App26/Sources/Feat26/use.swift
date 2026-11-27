@@ -92,3 +92,7 @@ public struct Alg26 { public init() {}
 public struct Info26 { public init() {}; public var alg = Alg26() }
 public struct UseH26 { public init() {}
     public func h_top_owner(_ p: String) { Info26().alg.alg26(p) } }                                                 // WRITES (top-level Alg26)
+// (i) a property read on a dependency-typed field (vapor `Response.description` reading `headers.debugDescription`)
+public struct HoldS26 { public init() {}
+    var st = DepStat26()
+    public func s_dep_prop(_ p: String) -> Int { st.code26 } }                                                      // WRITES (marker)
