@@ -197,13 +197,14 @@ final class TypeIdentityMatrixTests: XCTestCase {
     }
     /// fx22 (lane L3 attack): fields, a parameter's field, a local bound from a field, a global, a factory return and a T4 closure
     /// parameter, all decided in a.swift and read from b.swift (no imports) and c.swift (imports a module a.swift does not). The
-    /// mirrors lose the sibling's loud `Kit22.tap22`; the nested field binds its own `O22.Lib22` (R1950 at the declaration).
+    /// mirrors lose the sibling's loud `Kit22.tap22`. `O22.o_nested` pins today's wrong (pure) nested binding for L4.
     func testFx22_L3DeclarationScope() throws {
         try matrix(X.fx22, "fx22", edges: [
             E("B22.b_field_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
             E("B22.b_global_mirror", has: ["Kit22.tap22"], lane: .l3, targetHasNot: ["Kit22.tap22"]),
-            E("O22.o_nested", has: ["Lib22.wipe22"], hasNot: ["O22.Lib22.wipe22"], lane: .l3, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
-            E("B22.b_nested", has: ["Lib22.wipe22"], lane: .l3, targetHas: ["O22.Lib22.wipe22"], targetHasNot: ["Lib22.wipe22"]),
+            // the nested field still binds the sibling's top-level `Lib22` (pre-existing; R1950 at the declaration is probe-only, L4)
+            E("O22.o_nested", has: ["Lib22.wipe22"], hasNot: ["O22.Lib22.wipe22"]),
+            E("B22.b_nested", has: ["Lib22.wipe22"]),
         ])
     }
 }

@@ -4804,7 +4804,8 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// SOUNDNESS R1950 AT THE DECLARATION (lane L3): a field spelled bare `N` inside a type that NESTS `N` is that nested type
     /// (Swift's member-type lookup), not the package-wide simple key. `struct O22 { struct Lib22 {…}; var f = Lib22() }` beside a
     /// sibling target's top-level `Lib22`: `f.wipe22(p)` edged the sibling's `Lib22.wipe22` (fx22 `O22.o_nested`, on main too).
-    /// key -> field -> (the spelling recorded, the innermost path); applied to the collectors' table only, while it still holds that spelling.
+    /// key -> field -> (the spelling recorded, the innermost path). PROBE ONLY (`IDL3I`): applying it lost protocol-extension members the
+    /// engine reaches through simple-name supertype keys (pool A/B, round 1b); the supertype walk is L4's.
     var l3InnerFieldsR1938: [String: [String: (spelled: String, inner: String)]] = [:]
     if !l3OffR1938, let l2 = l2IndexR1938 {
         let ownMods = l2.idx.ownModules.union(projectModules)
@@ -5990,7 +5991,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             }
         }
         for (k, fs) in l3ExtraFieldsR1938 { for (field, sp) in fs where unitFields[k]?[field] == nil { unitFields[k, default: [:]][field] = (sp, false) } }
-        for (k, fs) in l3InnerFieldsR1938 { for (field, x) in fs where unitFields[k]?[field]?.name == x.spelled { unitFields[k]![field] = (x.inner, false) } }
+        // (R1950 at the declaration is MEASURED, NOT APPLIED: typing the field by its nested path lost protocol-extension members the
+        // engine resolves through simple-name supertype keys — swift-markdown `Table.isEmpty` -> `Markup.isEmpty`, swift-syntax
+        // `SyntaxProtocol.range` — on the pool. Probe `IDL3I` lists the sites; the walk is L4's.)
+
         // …and an `identity:foreign` field is a KNOWN, untyped field of its type (so the C12 drop names its head)
         for (k, fs) in l3ForeignFieldsR1938 { for (field, _) in fs where unitFields[k]?[field] == nil { unitFields[k, default: [:]][field] = (nil, false) } }
         if !CallCollector.r1481Off, let et = f.enclosingType, let gfs = genericParamFieldsR1481[et] {
