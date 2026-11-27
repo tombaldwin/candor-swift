@@ -28,6 +28,12 @@ Also in this lane:
 - that binding is applied again: a field spelled `N` inside a type that nests or inherits `N` is that type (R1984, fx22 `O22.o_nested`);
 - a constructor of a scan class with no initializer of its own edges the initializer it inherits (R1972). `final class TopI: LoudB {}`
   with `TopI()` read pure over an executed write, top-level or nested. The climb is additive.
+- a case payload bound from a pattern matched against `self` (`switch self { case .custom(var s): … }`) takes the enclosing enum's own
+  case. The package-wide case-name index drops a name two enums share, which left swift-certificates' `CertificateStore.Backing.append`
+  silent under the wrong-type edge this lane removes from its callers;
+- the declaration-site binding rewrites only the PATH key where the owner's simple name names several types. A shared key took one
+  declaration's answer for all of them: swift-crypto's `ASN1.SubjectPublicKeyInfo` retyped CryptoExtras' own field, and swift-nio's two
+  `NewSequence`s retyped each other.
 The "unique leaf" fallback is no longer reached by the bare spellings L2/L4 decide. It stays the last resort for a dotted head's lookup:
 retiring it there dropped `Summary.maxNodeSize` inside swift-collections' generic `Rope` with no hedge. Kill switch
 `CANDOR_TYPE_ID_L4_OFF` (also off under `CANDOR_TYPE_ID_L2_OFF`).
