@@ -670,12 +670,6 @@ final class DeclCollector: SyntaxVisitor {
     /// `CallCollector`'s type-receiver resolvers read it.
     var globalMetatypes: [String: String] = [:]
     var globalFactories: [(name: String, leaf: String)] = []
-    /// SOUNDNESS R1931 — a module-scope global initialised by a MEMBER-CALL CHAIN (`let library = toolchainLoader.load(path: p)`,
-    /// `let b = ClientBootstrap(group: g).channelOption(o, value: v)`): the head (a global, a type, or a constructor) and the
-    /// member calls after it. Typed in the Driver once every return clause is known (`resolveGlobalMemberFactoriesR1931`),
-    /// by the receiver's own `Owner.member` return — never by the bare leaf, which two types may share.
-    var globalMemberFactories: [(name: String, head: String, headIsCtor: Bool, hops: [String])] = []
-    static let r1931GOff = Env.on("CANDOR_R1931_GLOBAL_OFF")
     /// R79 — the SUBSET of `globalTypes`'/`globalFactories`' names declared `public`/`open`. Swift access
     /// control means a non-public global is genuinely invisible outside its own module; the Driver
     /// consults this (module-sliced, like `globalTypesByModule`) to decide whether a CROSS-module lookup
@@ -989,11 +983,6 @@ final class DeclCollector: SyntaxVisitor {
             return
         }
         guard let initVal = initExpr else { return }
-        if !Self.r1931GOff, let chain = Self.memberCallChainR1931(initVal) {
-            globalMemberFactories.append((name, chain.head, chain.headIsCtor, chain.hops))
-            if isPublicGlobal { globalPublic.insert(name) }
-            return
-        }
         if let call = initVal.as(FunctionCallExprSyntax.self),
            let ctor = call.calledExpression.as(DeclReferenceExprSyntax.self) {
             if ctor.baseName.text.first?.isUppercase == true {
@@ -1017,35 +1006,6 @@ final class DeclCollector: SyntaxVisitor {
             // SOUNDNESS R1506 — `let gMeta = Loud.self`: the UNANNOTATED spelling of R585's b7 global (same residual).
             globalMetatypes[name] = mb
         }
-    }
-    /// SOUNDNESS R1931 — `head.m1(…).m2(…)` / `Head(…).m1(…)`: at least one member CALL after a bare identifier head (or a
-    /// constructor call on one). Property hops, subscripts, closures-as-callee and optional chaining are refused (nil), so
-    /// what is typed is only what the Driver can answer hop by hop from declared returns. `try`/`await`/`!` are peeled.
-    static func memberCallChainR1931(_ raw: ExprSyntax) -> (head: String, headIsCtor: Bool, hops: [String])? {
-        func peel(_ e: ExprSyntax) -> ExprSyntax {
-            var e = e
-            while true {
-                if let t = e.as(TryExprSyntax.self) { e = t.expression; continue }
-                if let a = e.as(AwaitExprSyntax.self) { e = a.expression; continue }
-                if let f = e.as(ForceUnwrapExprSyntax.self) { e = f.expression; continue }
-                if let p = e.as(TupleExprSyntax.self), p.elements.count == 1, let x = p.elements.first, x.label == nil { e = x.expression; continue }
-                return e
-            }
-        }
-        var hops: [String] = []
-        var e = peel(raw)
-        while let call = e.as(FunctionCallExprSyntax.self), let ma = call.calledExpression.as(MemberAccessExprSyntax.self),
-              let b = ma.base {
-            let m = ma.declName.baseName.text
-            if m == "init" || m.first?.isUppercase == true { return nil }   // a nested-type / `.init` constructor is not a factory hop
-            hops.insert(m, at: 0)
-            e = peel(b)
-        }
-        guard !hops.isEmpty else { return nil }
-        if let d = e.as(DeclReferenceExprSyntax.self) { return (d.baseName.text, false, hops) }
-        if let c = e.as(FunctionCallExprSyntax.self), let d = c.calledExpression.as(DeclReferenceExprSyntax.self),
-           d.baseName.text.first?.isUppercase == true { return (d.baseName.text, true, hops) }
-        return nil
     }
     /// SOUNDNESS R1506 — the type a metatype LITERAL initializer names (`Loud.self`, `A.B.self`), or nil. Type-spelled
     /// components only: `x.self` on a VALUE is legal Swift and names no metatype. Read sites still pass the base through

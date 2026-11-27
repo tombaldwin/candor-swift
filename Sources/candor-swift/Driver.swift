@@ -488,13 +488,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // (`let x = makeX()`) — the leaf's return type isn't known until `returnsIdx` is built, so resolution
     // is deferred exactly like `staticFactoryFields` above.
     var globalFactories: [(module: String, name: String, leaf: String)] = []
-    // SOUNDNESS R1931 — (module, global, chain) for a global initialised by a member-call chain (see DeclCollector).
-    var globalMemberFactoriesR1931: [(module: String, name: String, head: String, headIsCtor: Bool, hops: [String])] = []
-    // SOUNDNESS R1931 (round 2) — the MODULES that DECLARE (not extend) each type path, and that declare each `returnDecls` key:
-    // a chain hop may land only on a type its global's own module declares, read in that module's own return clauses.
-    var declModulesByTypePathR1931: [String: Set<String>] = [:]
-    var returnDeclModulesR1931: [String: Set<String>] = [:]
-    var moduleNamesR1931: Set<String> = []
     // Merged `DeclCollector.typeGenericBounds` across every file — a type's generic param may be BOUND by
     // a conditional-conformance extension living anywhere (later in the same file, or another file), so
     // the merge has to complete before `unresolvedGenericFields` below can be retried.
@@ -1165,10 +1158,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         globalMetatypesByModule[cMod, default: [:]].merge(c.globalMetatypes) { a, _ in a }              // R585
         globalMetatypeArrayElemByModule[cMod, default: [:]].merge(c.globalMetatypeArrayElem) { a, _ in a }
         globalFactories.append(contentsOf: c.globalFactories.map { (cMod, $0.name, $0.leaf) })
-        globalMemberFactoriesR1931.append(contentsOf: c.globalMemberFactories.map { (cMod, $0.name, $0.head, $0.headIsCtor, $0.hops) })
-        for tp in c.declaredTypePaths { declModulesByTypePathR1931[tp, default: []].insert(cMod) }
-        for k in c.returnDecls.keys { returnDeclModulesR1931[k, default: []].insert(cMod) }
-        moduleNamesR1931.insert(cMod); moduleNamesR1931.formUnion(c.imports)
         for (t, bs) in c.typeGenericBounds { typeGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }
         for (t, bs) in c.typeDeclGenericBounds { typeDeclGenericBoundsAll[t, default: [:]].merge(bs) { a, _ in a } }   // R1481
         for (t, ps) in c.typeGenericFnParams { typeGenericFnParamsAll[t, default: []].formUnion(ps) }   // R243
@@ -2576,71 +2565,6 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     // consumer of `returnsIdx`.
     for (module, name, leaf) in globalFactories where globalTypesByModule[module]?[name] == nil {
         if let vended = returnsIdx[leaf] { globalTypesByModule[module, default: [:]][name] = vended }
-    }
-    // SOUNDNESS R1931 — …AND A GLOBAL INITIALISED BY A MEMBER-CALL CHAIN: `private let library = toolchainLoader.load(path: p)`
-    // (SourceKitten: 447 global initialisers then call `library.load(symbol:)`, and every one was R1455's C12 drop — no edge,
-    // and unchained no `Unknown`, over `DynamicLinkLibrary.load`'s `dlsym`). The head is typed as a global (`globalTypesByModule`),
-    // a local type (a static factory `T.make()`), or a local constructor; each hop by the RECEIVER's own `Owner.member` return
-    // (`returnFactsIdx`, which poisons a key whose declarations disagree) or its `-> Self` key — never by the bare leaf, which
-    // two types may share. Every hop must land on a type THIS scan declares, so a dependency's spelling is never recorded
-    // (the B1/B2 shape of R1896's round 1). A name declared twice in one module (two `private let library`) is typed only
-    // where every declaration agrees. Additive: it types a name nothing typed; `CANDOR_R1931_GLOBAL_OFF=1` restores that.
-    if !DeclCollector.r1931GOff {
-        let r1931Probe = Env.trace("CANDOR_R1931_PROBE")
-        func simpleR1931(_ t: String) -> String { t.split(separator: ".").last.map(String.init) ?? t }
-        // ROUND 2 (Fable merge review B1): "a type this scan declares" was a PACKAGE-wide simple-name match, so a hop declared
-        // `-> Guess.Lib` (or an unqualified `-> Lib` in a target where Swift binds the DEPENDENCY's `Lib`, while another target
-        // declares a pure `Lib`) typed the global by the scan's same-named type, and the use site bound its pure member — main's
-        // C12 `Unknown` became a silence. Now every type in the chain (the head's and each hop's) must be the ONE type of that
-        // simple name the whole scan DECLARES (not merely extends), declared in the global's OWN module (whose declarations
-        // shadow every import, so the unqualified spelling there can only be it), with no typealias of that name anywhere and,
-        // for a dotted spelling, a first segment that is not a module. Each hop's return clause must likewise be declared
-        // only in that module. Anything else stays untyped, i.e. main's C12 hedge.
-        func ownTypeR1931(_ t: String, _ mod: String) -> Bool {
-            let st = simpleR1931(t)
-            let paths = declModulesByTypePathR1931.keys.filter { simpleR1931($0) == st }
-            guard paths.count == 1, let p = paths.first, declModulesByTypePathR1931[p] == [mod],
-                  t == p || t == st, typeAliases[st] == nil, !typeAliases.keys.contains(where: { simpleR1931($0) == st }) else { return false }
-            if t.contains("."), moduleNamesR1931.contains(String(t.prefix { $0 != "." })) { return false }
-            return true
-        }
-        func hopR1931(_ t: String, _ m: String, _ mod: String) -> String? {
-            let st = simpleR1931(t)
-            let keys = ["\(t).\(m)", "\(st).\(m)"]
-            guard keys.allSatisfy({ (returnDeclModulesR1931[$0] ?? [mod]) == [mod] }) else { return nil }
-            if CallCollector.selfReturnKeysR1506.contains(keys[0]) || CallCollector.selfReturnKeysR1506.contains(keys[1]) { return t }
-            guard let f = returnFactsIdx[keys[0]] ?? returnFactsIdx[keys[1]], let sc = f.scalar, !f.isFunction,
-                  f.arrayElem == nil, f.arrayElemNested == nil, f.dictValue == nil, f.metatype == nil, f.tuple.isEmpty,
-                  ownTypeR1931(sc, mod) else { return nil }
-            return sc
-        }
-        var decided: [String: [String: String?]] = [:]   // module -> name -> type (.some(nil) = the declarations disagree)
-        var progress = true, rounds = 0
-        while progress, rounds < 6 {
-            progress = false; rounds += 1
-            var seen: [String: [String: String?]] = [:]
-            for g in globalMemberFactoriesR1931 where decided[g.module]?[g.name] == nil {
-                var t: String?
-                if g.headIsCtor { t = g.head }
-                else if let gt = globalTypesByModule[g.module]?[g.head], g.head != g.name { t = gt }
-                else if g.head.first?.isUppercase == true { t = g.head }
-                if let h = t, !ownTypeR1931(h, g.module) { t = nil }
-                for m in g.hops { guard let cur = t else { break }; t = hopR1931(cur, m, g.module) }
-                if let prev = seen[g.module]?[g.name] { if prev != t { seen[g.module, default: [:]][g.name] = .some(nil) } }
-                else { seen[g.module, default: [:]][g.name] = .some(t) }
-            }
-            for (mod, names) in seen {
-                for (n, t) in names {
-                    // a name some other binder typed, or a declaration of it no hop could type, is left to that answer
-                    guard globalTypesByModule[mod]?[n] == nil else { continue }
-                    guard let typed = t else { continue }
-                    decided[mod, default: [:]][n] = .some(typed)
-                    globalTypesByModule[mod, default: [:]][n] = typed
-                    if r1931Probe { FileHandle.standardError.write("R1931G\t\(mod)\t\(n)\t\(typed)\n".data(using: .utf8)!) }
-                    progress = true
-                }
-            }
-        }
     }
     // R85 — derive `publicGlobalTypesByModule` HERE, in the one place, now that both passes that can
     // populate `globalTypesByModule` (the per-file merge above and this factory-resolution loop) have

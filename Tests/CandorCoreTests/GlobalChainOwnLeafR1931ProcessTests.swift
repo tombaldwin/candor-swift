@@ -2,17 +2,14 @@ import XCTest
 import Foundation
 @testable import CandorCore
 
-/// SOUNDNESS R1931 — two halves of R1455's own-leaf C12 residue (a call on a receiver no stage-1 rule typed, whose leaf only THIS
-/// package declares), every cell EXECUTED first under swiftc (each function either creates the marker file or does not), read
-/// standalone AND chained to a real producer report (the join is live: `G.g_live` charges `Fs` only chained).
-///   resolution  a module-scope global initialised by a MEMBER-CALL CHAIN (`let gLib = loader.open("x")`, `Lib.make()`,
-///               `Loader().open("y")`, `Builder().opt(1).opt(2).build()`) is typed hop by hop from the receiver's own declared return,
-///               so the call on it binds the real member. A hop answered only by a protocol extension, an uppercase FREE function head,
-///               and a private name two files declare with different types stay untyped (and hedged, below).
-///   hedge       an untyped receiver whose leaf this package declares discloses `Unknown {dispatch:<untyped>.<m>}` when some same-named
-///               member has an effect (decided after the graph); a leaf whose every declaration is pure costs nothing (pure twins).
-/// Main read the resolved cells `-+U` standalone and ABSENT chained (the dependency also declares `wipeLib`, so the source arm hedged
-/// standalone, and the chained report, which publishes no body for the pure `wipeLib`, withdrew it), and the hedge cells ABSENT on both.
+/// SOUNDNESS R1931 — the own-leaf C12 residue: a call on a receiver no stage-1 rule typed, whose leaf only THIS package declares,
+/// discloses `Unknown {dispatch:<untyped>.<m>}` when some same-named member this scan has a body for carries an effect (decided
+/// after the graph); a leaf whose every declaration is pure costs nothing (the pure twins). Every cell was EXECUTED first under
+/// swiftc (each function either creates the marker file or does not), and is read standalone AND chained to a real producer report
+/// (the join is live: `G.g_live` charges `Fs` only chained). The `g_*` globals initialised by a member-call chain are NOT typed (the
+/// round-1 resolution was withdrawn: binding a global's type by simple name is a design question, Fable merge review B1/B2), so
+/// they are hedged, never bound to a same-named type: `G.g_dep` and the multi-target test pin that a dependency type sharing a
+/// scan type's simple name keeps main's hedge.
 final class GlobalChainOwnLeafR1931ProcessTests: XCTestCase {
 
     private static let dep = #"""
@@ -176,24 +173,20 @@ public struct R {
         return out
     }
 
-    func testMemberChainGlobalIsTypedAndOwnLeafResidueDiscloses() throws {
+    func testOwnLeafResidueDisclosesWhereASameNamedMemberHasEffects() throws {
         let fx = try make(); defer { try? FileManager.default.removeItem(at: fx.root) }
-        // EXECUTED WRITES, resolved: charged `Fs` in both arms
-        let resolved = ["G.g_lib", "G.g_static", "G.g_ctor", "G.g_self", "G3.g_noimport"]
-        // EXECUTED WRITES, not typed (protocol-extension hop, uppercase free-function head, private name with two types): hedged
-        let hedged: [(String, String)] = [("G.g_ext", "wipeLib"), ("G.g_mk", "wipeLib"), ("G.g_priv", "wipeLib"),
+        // EXECUTED WRITES, a global or local the engine does not type, leaf declared (and effectful) in this package: hedged
+        let hedged: [(String, String)] = [("G.g_lib", "wipeLib"), ("G.g_static", "wipeLib"), ("G.g_ctor", "wipeLib"),
+                                          ("G.g_self", "wipeLib"), ("G3.g_noimport", "wipeLib"),("G.g_ext", "wipeLib"), ("G.g_mk", "wipeLib"), ("G.g_priv", "wipeLib"),
                                           ("G.g_gen", "wipeLib"), ("G.g_echo", "wipeLib"),
                                           // round 2 (Fable B1): a hop declared `-> Guess.Store` must not bind App's PURE `Store`
                                           ("G.g_dep", "wipeStore"),
                                           ("R.r_lifetime", "wipeVault"), ("R.r_unmanaged", "wipeVault"), ("R.r_mapped", "wipeVault"),
                                           ("R.r_twohop", "relayVault")]
         // EXECUTED pure twins (unique leaves whose every declaration is pure): no charge, no hedge
-        let pure = ["G.g_ownstore", "G.g_calm", "G2.g_priv2", "G.g_shadow", "G.g_shadow_param", "R.r_lifetime_pure", "R.r_unmanaged_pure", "R.r_mapped_pure"]
+        let pure = ["G.g_calm", "G2.g_priv2", "G.g_shadow", "G.g_shadow_param", "R.r_lifetime_pure", "R.r_unmanaged_pure", "R.r_mapped_pure"]
         for chained in [true, false] {
             let r = try rows(fx, chained: chained)
-            for c in resolved {
-                XCTAssertTrue(r[c]?.effects.contains("Fs") ?? false, "chained=\(chained) \(c): the global's member writes a file — rows: \(r)")
-            }
             for (c, leaf) in hedged {
                 XCTAssertTrue(r[c]?.why.contains("dispatch:<untyped>.\(leaf)") ?? false, "chained=\(chained) \(c): must disclose — rows: \(r)")
             }
@@ -202,14 +195,11 @@ public struct R {
             }
             XCTAssertEqual(r["G.g_live"]?.effects.contains("Fs") ?? false, chained, "the chained join must be live")
         }
-        // the resolution's switch restores the untyped global, so the assertion above can fail
-        let off = try rows(fx, chained: true, env: ["CANDOR_R1931_GLOBAL_OFF": "1"])
-        XCTAssertFalse(off["G.g_lib"]?.effects.contains("Fs") ?? false, "CANDOR_R1931_GLOBAL_OFF must restore the untyped global")
     }
 
-    /// ROUND 2 (Fable merge review B1, spelling 2) — a multi-target package: `Core` declares a PURE `Lib`; `Feature` does not import
-    /// Core, imports Guess, and declares `Loader.open(_:) -> Lib`, which Swift binds to `Guess.Lib` (it writes; executed). The hop's
-    /// return names no type Feature's own module declares, so the global stays untyped and main's C12 hedge stays, in both arms.
+    /// Fable merge review B1, spelling 2 — a multi-target package: `Core` declares a PURE `Lib`; `Feature` does not import Core,
+    /// imports Guess, and declares `Loader.open(_:) -> Lib`, which Swift binds to `Guess.Lib` (it writes; executed). The global
+    /// must never be typed by the scan's same-named `Lib`: main's C12 hedge stays, in both arms.
     func testAHopReturningAnotherTargetsSimpleNameStaysHedged() throws {
         let bin = try ProcessHarness.binaryURL(for: Self.self)
         let root = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("candor-r1931b-\(UUID().uuidString)")

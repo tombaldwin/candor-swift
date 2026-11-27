@@ -10,20 +10,14 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
-### ⚠ A global initialised by a member-call chain is typed; the rest of the own-leaf C12 residue is hedged where the member has effects (SOUNDNESS R1931)
+### ⚠ The own-leaf C12 residue is hedged where a same-named member has effects (SOUNDNESS R1931)
 
-`private let library = toolchainLoader.load(path: p)` recorded no type: a module-scope global was typed only by an annotation, a bare
-constructor, a free factory or `T.shared`, so every `library.load(symbol:)` was R1455's dropped member call. A global initialised by
-`head.m1(…).m2(…)` (head a typed global, a type this scan declares, or its constructor) is now typed hop by hop from the RECEIVER's own
-declared return (`Owner.member`, or `-> Self`), only where every type in the chain is the one type of that simple name the scan declares,
-declared in the global's own module (a `-> Guess.Lib` hop, or an unqualified `-> Lib` in a target where Swift binds a dependency's `Lib`
-while another target declares one, stays untyped), each hop's return clause is declared in that module, and every declaration of the
-name in its module agrees; a hop answered by a protocol extension, a generic-specialised head, a hop returning a generic parameter and
-an uppercase free-function head stay untyped. Kill switch `CANDOR_R1931_GLOBAL_OFF` (it can replace a chained C12 `Unknown` with the
-resolved member's own row). And a C12 drop the hedge did not reach whose leaf only THIS package declares (a closure parameter, a `$0`,
-a pattern binder, a local bound from a call, a generic-typed parameter) now reads `Unknown {dispatch:<untyped>.<m>}` when some
-same-named member this scan has a body for carries an effect, decided after the call graph (R1071's fixpoint), so a leaf whose every
-declaration is pure costs nothing. Additive, no switch.
+A C12 drop the hedge did not reach whose leaf only THIS package declares (a closure parameter, a `$0`, a pattern binder, a local
+bound from a call, a generic-typed parameter, a global the engine cannot type) now reads `Unknown {dispatch:<untyped>.<m>}` when
+some same-named member this scan has a body for carries an effect, decided after the call graph (R1071's fixpoint), so a leaf
+whose every declaration is pure costs nothing. Additive, no switch. (A first draft also typed globals initialised by a
+member-call chain; it was withdrawn: typing a global by a simple type name binds the wrong type where the global's module sees a
+dependency's type of that name.)
 
 ### ⚠ An unannotated field initialised by a path-qualified constructor is typed; an untyped field head is hedged (SOUNDNESS R1896)
 
