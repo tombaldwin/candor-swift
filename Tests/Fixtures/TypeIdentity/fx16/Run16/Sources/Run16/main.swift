@@ -1,5 +1,6 @@
 import Foundation
 import Feat16
+import Ext16
 let dir = CommandLine.arguments[1]
 func cell(_ n: String, _ f: (String) throws -> Void) { let p = dir + "/" + n; try? FileManager.default.removeItem(atPath: p); try? f(p); print(n, FileManager.default.fileExists(atPath: p) ? "WRITES" : "pure") }
 let u = U16()
@@ -29,3 +30,5 @@ cell("Outer16d.q_found_write") { try Outer16d().q_found_write($0) }
 cell("Outer16e.q_dep") { Outer16e().q_dep($0) }
 cell("Outer16e.q_nested_pure") { _ = Outer16e().q_nested_pure($0) }
 cell("Outer16f.r_unseen_nested") { _ = Outer16f().r_unseen_nested($0) }
+cell("U16.implicit_member") { _ = u.implicit_member($0) }
+cell("Ext16Use.q_own_loud") { Ext16Use().q_own_loud($0) }

@@ -419,6 +419,8 @@ Outer16d.q_nested_loud WRITES Fs+inv+inc|Fs+inc|Fs+inv+inc
 Outer16d.q_found_write WRITES -+inv|-|-+inv l2 Fs|Fs|Fs
 Outer16e.q_dep WRITES -+inv|-|-+inv l2 -+inv|Fs|-+U+inv
 Outer16e.q_nested_pure pure ABSENT|ABSENT|ABSENT
+U16.implicit_member WRITES Fs+inc|Fs+inc|Fs+inc ^l2 Fs+inv+inc|Fs+inc|Fs+U+inv+inc # control: an implicit member typed `Outer16g.Gear16` beside a bare (Dep16) `Gear16`
+Ext16Use.q_own_loud WRITES Fs+inc|Fs+inc|Fs+inc # control: `Feat16.Pipe16()` — an OWN module qualifier is never "as if undeclared"
 Outer16f.r_unseen_nested pure ABSENT|ABSENT|ABSENT # R1950 control: Ext16 nests a LOUD `Outer16f.Tank16` from a module Feat16 does not import
 """
 

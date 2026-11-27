@@ -8,3 +8,5 @@ public final class Kit16 { public init() {}
 public final class Box16 { public init() {}
     public func seal16(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) } }          // LOUD
 public func depLive16(_ p: String) { FileManager.default.createFile(atPath: p, contents: nil) }
+public final class Gear16 { public init() {}                                                        // PURE init; a scan type nests a Gear16 too
+    public func spin16(_ p: String) -> Int { p.count } }

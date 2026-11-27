@@ -5849,6 +5849,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                                    let file = String((locOf[f.qual] ?? f.loc).prefix { $0 != ":" })
                                    var facts = L2UnitFactsR1938()
                                    facts.qualified = true
+                                   facts.ownModules = l2.idx.ownModules.union(projectModules)
                                    let spelled = l2SpelledNamesR1938(Syntax(body))
                                    let r = l2.decide(file: file, enclosingPath: f.enclosingTypePath ?? f.enclosingType,
                                                      generics: f.genericParamNames.union(f.genericBounds.keys),

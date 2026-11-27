@@ -25,3 +25,13 @@ public struct U16 { public init() {}
 extension Outer16 {
     public func s4_own(_ p: String) -> Int { Box16().seal16(p) }                                // pure: Outer16.Box16 (visible nested)
 }
+// R999 re-walks an implicit member `.make16(p)` as a synthesized `Gear16.make16` from the parameter's type `Outer16g.Gear16`; that
+// synthesized leaf is not a spelling of the unit's, so it must not read "as if undeclared" though the unit spells bare `Gear16`
+// (Dep16's) elsewhere.
+public struct Outer16g { public init() {}
+    public struct Gear16 { public init() {}
+        public static func make16(_ p: String) -> Gear16 { FileManager.default.createFile(atPath: p, contents: nil); return Gear16() } } }
+public func take16(_ g: Outer16g.Gear16) {}
+extension U16 {
+    public func implicit_member(_ p: String) -> Int { let n = Gear16().spin16(p); take16(.make16(p)); return n }   // WRITES (make16)
+}

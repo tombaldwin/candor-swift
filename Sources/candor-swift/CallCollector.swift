@@ -520,6 +520,8 @@ final class CallCollector: SyntaxVisitor {
         guard let r = lsCtxRawR1938, !r.hasPrefix("\u{1}") else { return nil }
         return l2R1938.innermost[r]
     }
+    /// A node of the parsed file (its root is the source file), not one the engine synthesized to re-walk a spelling.
+    static func lsIsSourceR1938(_ n: Syntax) -> Bool { n.root.is(SourceFileSyntax.self) }
     static func lsDecodeR1938(_ raw: String) -> String { raw.hasPrefix("\u{1}") ? String(raw.dropFirst()) : raw }
     private var lsViewsR1938: [String: (local: Set<String>, declared: Set<String>)] = [:]
     private func lsViewR1938(_ n: String) -> (local: Set<String>, declared: Set<String>) {
@@ -2252,7 +2254,8 @@ final class CallCollector: SyntaxVisitor {
     /// conformances are bound through `localTypes` exactly as for the bare spelling (fx5 `Guess.Lib` with `extension Lib: Wiper`
     /// keeps its `dispatch:Wiper.wipeLib` hedge; measured: dropping it there lowered the row).
     private func l2QualifiedR1938(_ m: String, _ n: String) -> String? {
-        guard l2R1938.qualified, n.first?.isUppercase == true, isModuleQualifier(m), declaredTypesAllR1938.contains(n) else { return nil }
+        guard l2R1938.qualified, n.first?.isUppercase == true, !l2R1938.ownModules.contains(m), isModuleQualifier(m),
+              declaredTypesAllR1938.contains(n) else { return nil }
         return "\u{1}" + n
     }
     /// A bare `N` used as a type in EXPRESSION position (`N(…)`, `N.init(…)`, `N.m(…)`), never a value of that name.
@@ -9837,7 +9840,10 @@ final class CallCollector: SyntaxVisitor {
 
     override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
         let prev = lsCtxRawR1938
-        lsCtxRawR1938 = lsCallNameR1938(node)
+        // only a SOURCE spelling decides (R999 re-walks a synthesized `T.member` for an implicit `.member`, whose leaf `T` is the
+        // engine's own spelling, not the unit's: measured on swift-nio, `.here()` typed `FileSystemError.SourceLocation` read
+        // `SourceLocation` "as if undeclared" and dropped the right edge)
+        lsCtxRawR1938 = Self.lsIsSourceR1938(Syntax(node)) ? lsCallNameR1938(node) : nil
         defer { lsCtxRawR1938 = prev }
         if let n = lsCtxR1938 { lsProbeR1938("IDLS\t\(ai.file ?? "-")\t\(r1455Qual)\tcall\t\(n)\t\(node.calledExpression.trimmedDescription.prefix(60))\(lsCtxInnerR1938.map { "\tinner=" + $0 } ?? "")") }
         let before = calls.count
@@ -11639,7 +11645,7 @@ final class CallCollector: SyntaxVisitor {
     // effectful property READS (no call): κ chains AND local accessor units (computed getters)
     override func visit(_ node: MemberAccessExprSyntax) -> SyntaxVisitorContinueKind {
         let prev = lsCtxRawR1938
-        lsCtxRawR1938 = node.base.flatMap { lsReceiverNameR1938($0) }
+        lsCtxRawR1938 = Self.lsIsSourceR1938(Syntax(node)) ? node.base.flatMap { lsReceiverNameR1938($0) } : nil
         defer { lsCtxRawR1938 = prev }
         return visitMemberAccessR1938(node)
     }

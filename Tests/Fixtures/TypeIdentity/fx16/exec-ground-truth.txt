@@ -24,3 +24,5 @@ Outer16d.q_found_write WRITES
 Outer16e.q_dep WRITES
 Outer16e.q_nested_pure pure
 Outer16f.r_unseen_nested pure
+U16.implicit_member WRITES
+Ext16Use.q_own_loud WRITES

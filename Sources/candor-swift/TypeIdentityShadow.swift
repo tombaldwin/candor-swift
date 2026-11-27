@@ -286,17 +286,20 @@ struct L2UnitFactsR1938 {
     var innermost: [String: String] = [:]
     /// `M.N` with M an imported non-own module reads N "as if undeclared"
     var qualified = false
+    /// the scan's own modules (manifest/Xcode targets): `Own.N` is the scan's own type, never "as if undeclared" (measured on
+    /// SourceKitten: `SourceKittenFramework.Structure(file:)` lost its edge before this)
+    var ownModules: Set<String> = []
     var isEmpty: Bool { names.isEmpty && aliases.isEmpty && innermost.isEmpty && !qualified }
 }
 
-/// Every type-shaped identifier a unit's body spells (a type position, or an uppercase reference / member name in an expression):
-/// the names L2 decides for the unit. Over-inclusive on purpose (a value named `Lib` is still filtered at the binder).
+/// Every BARE type-shaped identifier a unit's body spells (a type position, or an uppercase reference in an expression): the names
+/// L2 decides for the unit. A member name (`Outer.Inner`'s `Inner`) is not a bare spelling and is not decided. Over-inclusive on
+/// purpose otherwise (a value named `Lib` is still filtered at the binder).
 func l2SpelledNamesR1938(_ body: Syntax?) -> Set<String> {
     guard let body else { return [] }
     final class V: SyntaxVisitor {
         var out: Set<String> = []
         override func visit(_ n: IdentifierTypeSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
-        override func visit(_ n: MemberTypeSyntax) -> SyntaxVisitorContinueKind { out.insert(n.name.text); return .visitChildren }
         override func visit(_ n: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
             if n.baseName.text.first?.isUppercase == true { out.insert(n.baseName.text) }
             return .visitChildren

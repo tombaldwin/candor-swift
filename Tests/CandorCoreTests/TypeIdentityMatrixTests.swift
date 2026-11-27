@@ -159,6 +159,8 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Outer16e.q_nested_pure", has: ["Lib16.wipe16"], lane: .l2, targetHas: ["Outer16e.Lib16.init", "Outer16e.Lib16.wipe16"], targetHasNot: ["Lib16.wipe16"]),
             // the innermost rewrite must not reach a nested type declared by an extension in a module this file cannot see
             E("Outer16f.r_unseen_nested", has: ["Tank16.init", "Tank16.fill16"], hasNot: ["Outer16f.Tank16.fill16"]),
+            E("U16.implicit_member", has: ["Outer16g.Gear16.make16"], lane: .l2, targetHas: ["Outer16g.Gear16.make16"], targetHasNot: ["Outer16g.Gear16.init"]),
+            E("Ext16Use.q_own_loud", has: ["Pipe16.flow16"]),
         ])
     }
     func testFx12_LSAttack() throws {
