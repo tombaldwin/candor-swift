@@ -277,6 +277,7 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("Tbl26.e_field", has: ["Body26.mark26"], lane: .l4, targetHas: ["Mk26.mark26"], targetHasNot: ["Body26.mark26"]),
             E("Plain26.e_top", has: ["Body26.mark26"], hasNot: ["Mk26.mark26"]),
             E("Plain26.e_top_prop", has: ["Body26.markProp26"], hasNot: ["Mk26.markProp26"]),
+            E("UseP26.p_shared", has: ["ProdB26.Src26.put26"]),
         ])
     }
 }

@@ -31,3 +31,4 @@ func propCell(_ n: String, _ f: () -> Void) { try? FileManager.default.removeIte
 propCell("Tbl26.e_field_prop") { _ = Tbl26().e_field_prop("") }
 propCell("Tbl26.e_local_prop") { _ = Tbl26().e_local_prop("") }
 propCell("Plain26.e_top_prop") { _ = Plain26().e_top_prop("") }
+cell("UseP26.p_shared") { UseP26().p_shared($0) }

@@ -67,3 +67,12 @@ public struct Tbl26 { public init() {}
 public struct Plain26 { public init() {}
     public func e_top(_ p: String) -> Int { Body26().mark26(p) }                         // pure: the top-level Body26's own mark26
     public func e_top_prop(_ p: String) -> Int { Body26().markProp26 } }                  // pure (marker)
+// (f) two declarations share the SIMPLE name of a nested type whose field is spelled bare (`Pair26.src: Src26` in ProdA26 and in
+// ProdB26, the swift-nio `NewSequence.source` shape): the shared simple key must not take one declaration's binding
+public struct ProdA26 {
+    public struct Src26 { public init() {}
+        public func put26(_ p: String) -> Int { p.count } }                                               // PURE
+    public struct Pair26 { public init() {}; public var src = Src26() }
+    public static func make() -> Pair26 { Pair26() } }
+public struct UseP26 { public init() {}
+    public func p_shared(_ p: String) { let q = ProdB26.make(); _ = q.src.put26(p) } }                     // WRITES (ProdB26's)

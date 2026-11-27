@@ -315,6 +315,18 @@ enum L4WalkHitR1938: Equatable {
     case foreignNested(String)
 }
 
+/// A type spelling with every generic argument clause removed, keeping any member after it (`P<A, B>.Source` -> `P.Source`).
+func l4StripGenericsR1938(_ s: String) -> String {
+    guard s.contains("<") else { return s }
+    var out = "", depth = 0
+    for ch in s {
+        if ch == "<" { depth += 1; continue }
+        if ch == ">" { depth = max(0, depth - 1); continue }
+        if depth == 0 { out.append(ch) }
+    }
+    return out.replacingOccurrences(of: " ", with: "")
+}
+
 /// Platform supertypes the walk may cross: their member types are the generated table's, and a package-declared name is not one.
 let L4_PLATFORM_SUPERS_R1938: Set<String> = STD_SUPERS_PUBLIC.union(PLATFORM_REFINES.keys).union(PLATFORM_LEAVES)
     .union(STDLIB_PROTOCOLS.filter { !$0.contains(".") })
@@ -344,7 +356,7 @@ extension LsShadowIndexR1938 {
     /// refusal reason.
     private func l4AliasTarget(_ targets: Set<String>, owner p: String) -> Result<String, L4Refusal> {
         guard targets.count == 1, var t = targets.first else { return .failure(L4Refusal("alias-ambiguous:\(p)")) }
-        if let lt = t.firstIndex(of: "<") { t = String(t[..<lt]) }
+        t = l4StripGenericsR1938(t)
         t = stripOwnModule(t) ?? t
         var segs = p.split(separator: ".").map(String.init)
         while !segs.isEmpty {

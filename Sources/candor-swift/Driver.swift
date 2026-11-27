@@ -4820,7 +4820,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         if !CallCollector.l4OffR1938 {
             var direct: [String: [String]] = [:]
             for (sub, sups) in pathSupers {
-                let ss = sups.map { s -> String in s.firstIndex(of: "<").map { String(s[..<$0]) } ?? s }
+                let ss = sups.map(l4StripGenericsR1938)
                 direct[sub, default: []].append(contentsOf: ss)
                 if let q = strip(sub) { direct[q, default: []].append(contentsOf: ss) }
             }
@@ -4944,6 +4944,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
     /// key -> field -> (the spelling recorded, the innermost path). PROBE ONLY (`IDL3I`): applying it lost protocol-extension members the
     /// engine reaches through simple-name supertype keys (pool A/B, round 1b); the supertype walk is L4's.
     var l3InnerFieldsR1938: [String: [String: (spelled: String, inner: String)]] = [:]
+    var l3InnerPoisonR1938: Set<String> = []
     if !l3OffR1938, let l2 = l2IndexR1938 {
         let ownMods = l2.idx.ownModules.union(projectModules)
         func stripOpt(_ s: String) -> String {
@@ -5026,6 +5027,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                             let vis = l2.idx.visibleModules(inFile: c.file)
                             if !ms.contains("\u{0}unattributed"), ms.contains(m) || !ms.isDisjoint(with: vis) {
                                 for key in Set([ty, path]) where fields[key]?[fname]?.name == sp && sp == bare {
+                                    // lane L4: a SIMPLE key two declarations share (`NewSequence` in both async producers)
+                                    // must not take one declaration's answer: two different inners poison the key, which keeps
+                                    // main's union (measured on the pool: swift-nio's `copyRequiredQueue.source.yield` lost the
+                                    // non-throwing producer's edge to the last writer before this)
+                                    if let e = l3InnerFieldsR1938[key]?[fname], e.inner != inner { l3InnerPoisonR1938.insert(key + "\u{0}" + fname) }
                                     l3InnerFieldsR1938[key, default: [:]][fname] = (sp, inner)
                                     if lsProbeOnR1938 { lsProbeR1938("IDL3I\t\(key).\(fname)\t\(sp)\t\(inner)") }
                                 }
@@ -6259,7 +6265,11 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         // SOUNDNESS R1938 lane L4 / R1984 — APPLIED once a path-typed receiver climbs its path-keyed supertypes (`l4PathSupersR1938`):
         // the field is the nested type (or the inherited one, or a member alias's target) Swift binds at the declaration.
         if !CallCollector.l4OffR1938 {
-            for (k, fs) in l3InnerFieldsR1938 { for (field, x) in fs where unitFields[k]?[field]?.name == x.spelled { unitFields[k]![field] = (x.inner, false) } }
+            for (k, fs) in l3InnerFieldsR1938 {
+                for (field, x) in fs where unitFields[k]?[field]?.name == x.spelled && !l3InnerPoisonR1938.contains(k + "\u{0}" + field) {
+                    unitFields[k]![field] = (x.inner, false)
+                }
+            }
         }
 
         // …and an `identity:foreign` field is a KNOWN, untyped field of its type (so the C12 drop names its head)

@@ -473,6 +473,7 @@ Plain26.e_top pure ABSENT|ABSENT|ABSENT
 Tbl26.e_field_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
 Tbl26.e_local_prop WRITES ABSENT|ABSENT|ABSENT l4 Fs|Fs|Fs
 Plain26.e_top_prop pure ABSENT|ABSENT|ABSENT
+UseP26.p_shared WRITES Fs+inc|Fs+inc|Fs+inc # must not move: a SIMPLE key two files' declarations share (ProdA26/ProdB26.Pair26) keeps main's union; a439c1e bound the last writer (ABSENT)
 """
 
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling

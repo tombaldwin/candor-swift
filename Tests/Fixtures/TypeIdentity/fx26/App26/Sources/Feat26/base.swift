@@ -36,3 +36,9 @@ extension Mk26 { public func mark26(_ p: String) { FileManager.default.createFil
 public struct Body26 { public init() {}
     public func mark26(_ p: String) -> Int { p.count }                                                       // PURE top-level twin
     public var markProp26: Int { 0 } }
+// (f) ProdB26 lives in ANOTHER FILE than ProdA26 (use.swift), as swift-nio's two producers do
+public struct ProdB26 {
+    public struct Src26 { public init() {}
+        public func put26(_ p: String) -> Int { FileManager.default.createFile(atPath: p, contents: nil); return 0 } }   // LOUD
+    public struct Pair26 { public init() {}; public var src = Src26() }
+    public static func make() -> Pair26 { Pair26() } }
