@@ -27,3 +27,4 @@ Back26.g_switch_self WRITES
 Back26.g_if_case_self WRITES
 UseH26.h_top_owner WRITES
 HoldS26.s_dep_prop WRITES
+TagJ26.j_eq pure

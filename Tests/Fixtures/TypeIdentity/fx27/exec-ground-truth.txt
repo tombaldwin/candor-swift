@@ -1,0 +1,15 @@
+I27.noinit_path WRITES
+I27.noinit_name pure
+I27.conv_path WRITES
+I27.conv_x pure
+I27.desig pure
+OSub27.via_super WRITES
+O27.sub_go pure
+O27.sub_quiet WRITES
+O27.base_go WRITES
+O27.upcast_go pure
+Q27.class_wins pure
+Q27.default_runs WRITES
+Q27.existential pure
+GSub27.gen_nested WRITES
+Plain27.top pure

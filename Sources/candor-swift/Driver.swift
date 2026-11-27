@@ -2046,7 +2046,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             if head == ep + ".init" { l4InitsByOwnerR1972[ep, default: []].append(f) }
         }
     }
-    func l4InheritedInitsR1972(_ start: String, argc: Int) -> [String] {
+    /// Does init `f` take this call's argument labels (Swift's selection among the inherited designated initializers)? nil when the
+    /// call's labels are not recorded.
+    func l4InitLabelsFitR1972(_ f: FnInfo, _ labels: [String?]?) -> Bool? {
+        guard let labels, f.paramLabels.count == f.paramSig.count else { return nil }
+        var j = 0
+        for (lab, p) in zip(f.paramLabels, f.paramSig) {
+            let want: String? = lab == "_" ? nil : lab
+            if j < labels.count, labels[j] == want {
+                j += 1
+                if p.variadic { while j < labels.count, labels[j] == nil { j += 1 } }
+            } else if !p.hasDefault && !p.variadic {
+                return false
+            }
+        }
+        return j == labels.count
+    }
+    func l4InheritedInitsR1972(_ start: String, argc: Int, labels: [String?]? = nil) -> [String] {
         guard !CallCollector.l4OffR1938 else { return [] }
         var cur = start, seen = Set<String>()
         while seen.insert(cur).inserted {
@@ -2054,6 +2070,10 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
             guard classNamesAll.contains(leaf) else { return [] }
             if let own = l4InitsByOwnerR1972[cur], !own.isEmpty {
                 guard cur != start else { return [] }
+                // Fable's merge review B1 (fx27): Swift picks ONE inherited designated initializer by LABEL (`Sub(name:)` runs
+                // `init(name:)`, never a same-arity `init(path:)`); the arity filter is only the fallback when labels are not recorded
+                let byLabel = own.filter { l4InitLabelsFitR1972($0, labels) == true }
+                if !byLabel.isEmpty { return byLabel.map(\.qual).sorted() }
                 let fit = own.filter { $0.paramSig.count >= argc && $0.paramSig.dropFirst(argc).allSatisfy { $0.hasDefault || $0.variadic } }
                 return (fit.isEmpty ? own : fit).map(\.qual).sorted()
             }
@@ -5507,6 +5527,23 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
         }
         return []
     }
+    /// Fable's merge review of lane L4, B2 — the `dispatch:<sup>.<member>` hedge for a PATH-typed receiver (the supers L4 added)
+    /// names only a supertype that could supply `member`: not a scan type (its units answered or did not), and not a platform
+    /// protocol that does not require it (`ExpressibleByStringLiteral.==`, `ExpressibleByDictionaryLiteral.??` were false reasons on
+    /// Yams `Tag.==` and four other packages). A simple-keyed receiver keeps the release's choice unchanged.
+    func l4HedgeSupR1938(_ type: String, _ member: String, _ chosen: String?, _ cands: [String]) -> String? {
+        guard !CallCollector.l4OffR1938, l4PathKeyedR1938(type) else { return chosen }
+        let ok: (String) -> Bool = { sup in
+            if localTypePaths.contains(sup) { return false }
+            let leaf = sup.split(separator: ".").last.map(String.init) ?? sup
+            for q in [sup, leaf] where STDLIB_PROTOCOLS.contains(q) || PLATFORM_LEAVES.contains(q) || STD_SUPERS_PUBLIC.contains(q) {
+                return !stdlibRequirementWitnessesR1473(q, member).isEmpty
+            }
+            return true
+        }
+        if let c = chosen, ok(c) { return c }
+        return cands.first(where: ok)
+    }
     /// Charge (in one tree) and disclose (chained) a requirement `m` read or called on a value DECLARED as platform
     /// protocol `p`. `site` names the spelling, for the probe.
     func stdlibRequirementDispatchR1473(_ p: String, _ m: String, _ f: FnInfo, site: String) {
@@ -7582,8 +7619,9 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                         } else if let eff = fluentEff {
                             direct[f.qual, default: []].insert(eff)
                             resolved = true
-                        } else if let sup = ((r1073Off || unknownSup == nil) ? unknownSup
-                                                 : hedgeSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })) {
+                        } else if let sup = l4HedgeSupR1938(type, member, ((r1073Off || unknownSup == nil) ? unknownSup
+                                                 : hedgeSupers.first(where: { !STD_PURE_PROTOCOLS.contains($0) })),
+                                                 hedgeSupers.filter { !STD_PURE_PROTOCOLS.contains($0) }) {
                             direct[f.qual, default: []].insert("Unknown")
                             whyMap[f.qual, default: []].insert("dispatch:\(sup).\(member)")
                             resolved = true
@@ -7881,7 +7919,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     if r1950CtorOn { resolved = true }   // R1950: a scan type's construction, whatever the filter left
                     if admitted == 0 { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                     if let c = l4CtorClassR1972(call) {   // R1972
-                        for t in l4InheritedInitsR1972(c, argc: argc) where edges[f.qual, default: []].insert(t).inserted {
+                        for t in l4InheritedInitsR1972(c, argc: argc, labels: call.argLabels) where edges[f.qual, default: []].insert(t).inserted {
                             callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         }
                     }
@@ -7897,7 +7935,7 @@ func analyze(sourcePaths: [String], rootDir: String, pkgName: String, deps: DepI
                     edges[f.qual, default: []].formUnion(admittedR1504)
                     if admittedR1504.isEmpty { _ = extensionOnlyCtorDepJoinR1504(call.path, f) }   // SOUNDNESS R1504
                     if let c = l4CtorClassR1972(call) {   // R1972
-                        for t in l4InheritedInitsR1972(c, argc: argc) where edges[f.qual, default: []].insert(t).inserted {
+                        for t in l4InheritedInitsR1972(c, argc: argc, labels: call.argLabels) where edges[f.qual, default: []].insert(t).inserted {
                             callsiteArgs[t, default: []].append((f.qual, call.args)); callsiteArgTypes[t, default: []].append((f.qual, call.argTypes, call.genericForward, call.witnessArgs, call.wOwnersR1176))
                         }
                     }

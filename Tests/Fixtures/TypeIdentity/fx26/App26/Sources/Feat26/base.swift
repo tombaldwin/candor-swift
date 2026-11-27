@@ -48,3 +48,5 @@ public enum NsH26 {
     public struct Alg26 { public init() {}
         public func alg26(_ p: String) -> Int { p.count } }                                                       // PURE, nested
     public struct Info26 { public init() {}; public var alg = Alg26() } }
+// (j) the top-level twin that makes `TagJ26.NameJ26` a PATH-typed receiver
+public struct NameJ26 { public init() {} }

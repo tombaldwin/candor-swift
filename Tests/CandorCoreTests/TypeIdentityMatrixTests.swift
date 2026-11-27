@@ -282,4 +282,13 @@ final class TypeIdentityMatrixTests: XCTestCase {
             E("UseH26.h_top_owner", has: ["Alg26.alg26"], hasNot: ["NsH26.Alg26.alg26"]),
         ])
     }
+    /// fx27 (Fable's merge review of lane L4, B1): an inherited initializer is chosen by the call's LABELS.
+    func testFx27_InheritedInitByLabel() throws {
+        try matrix(X.fx27, "fx27", edges: [
+            E("I27.noinit_path", hasNot: ["Base27.init(String)"], lane: .l4, targetHas: ["Base27.init(String)"], targetHasNot: ["Base27.init(String)#1"]),
+            E("I27.noinit_name", hasNot: ["Base27.init(String)", "Base27.init(String)#1"], lane: .l4, targetHas: ["Base27.init(String)#1"], targetHasNot: ["Base27.init(String)"]),
+            E("I27.conv_path", has: ["ConvOnly27.init"], hasNot: ["Base27.init(String)"]),
+            E("Plain27.top", has: ["Node27.fire27"]),
+        ])
+    }
 }

@@ -478,6 +478,28 @@ Back26.g_switch_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs # a case payload bound again
 Back26.g_if_case_self WRITES -+U|-+U|-+U l4 Fs|Fs|Fs
 UseH26.h_top_owner WRITES Fs+inc|Fs+inc|Fs+inc # must not move: an OWNER simple name shared with a nested type that nests the field's type; 996abe9 read ABSENT
 HoldS26.s_dep_prop WRITES ABSENT|Fs+inc|ABSENT l4 -+inv|Fs|ABSENT # a property read on a dependency-typed field names the module standalone (unreadable: unchanged)
+TagJ26.j_eq pure -+U+inv|-+U|-+U+inv l4 -+inv|ABSENT|-+inv # Fable B2: no `dispatch:ExpressibleByStringLiteral.==` on a path-typed receiver (the protocol declares no `==`)
+"""
+
+    // Fable's merge review of lane L4 (fx27, executed): inherited initializers chosen by LABEL (B1: `NoInit27(name:)` runs the PURE
+    // `init(name:)`, never the same-arity loud `init(path:)`), a convenience-only subclass (pinned at main: a pre-existing silence row),
+    // overrides and `super.` calls, protocol-extension default vs class member, a generic superclass's nested type.
+    static let fx27 = """
+I27.noinit_path WRITES ABSENT l4 Fs
+I27.noinit_name pure ABSENT
+I27.conv_path WRITES ABSENT # pre-existing: a convenience-only subclass still inherits the designated inits (row)
+I27.conv_x pure ABSENT
+I27.desig pure ABSENT
+OSub27.via_super WRITES Fs+inc
+O27.sub_go pure ABSENT
+O27.sub_quiet WRITES Fs+inc
+O27.base_go WRITES Fs+inc
+O27.upcast_go pure Fs+inc # pre-existing CHA over-approximation
+Q27.class_wins pure ABSENT
+Q27.default_runs WRITES Fs+inc
+Q27.existential pure Fs+inc # pre-existing CHA over-approximation
+GSub27.gen_nested WRITES ABSENT l4 Fs
+Plain27.top pure ABSENT
 """
 
     // lane L3 attack cells (fx22): a.swift (imports Base22 only) declares every binder; b.swift imports nothing; s.swift is a sibling

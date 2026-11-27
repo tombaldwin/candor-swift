@@ -27,7 +27,9 @@ Also in this lane:
   `Tbl.Body` was dropped (fx26 `Tbl26.e_local`, ABSENT), and this is what made L3 withdraw the declaration-site innermost binding;
 - that binding is applied again: a field spelled `N` inside a type that nests or inherits `N` is that type (R1984, fx22 `O22.o_nested`);
 - a constructor of a scan class with no initializer of its own edges the initializer it inherits (R1972). `final class TopI: LoudB {}`
-  with `TopI()` read pure over an executed write, top-level or nested. The climb is additive.
+  with `TopI()` read pure over an executed write, top-level or nested. The climb is additive, and it picks the inherited initializer
+  by the call's argument LABELS (`Sub(name:)` runs `init(name:)`, never a same-arity `init(path:)`; arity only when labels are not
+  recorded). A subclass with any initializer of its own is not climbed (its convenience-only case is a pre-existing silence);
 - a case payload bound from a pattern matched against `self` (`switch self { case .custom(var s): … }`) takes the enclosing enum's own
   case. The package-wide case-name index drops a name two enums share, which left swift-certificates' `CertificateStore.Backing.append`
   silent under the wrong-type edge this lane removes from its callers;
@@ -37,6 +39,9 @@ Also in this lane:
 - a property read on a dependency's type with no chained report (`self.headers.debugDescription`, `headers: HTTPFields`) names the
   module in `invisible`, as a method call on the same receiver does. Standalone it named nothing, and vapor's `Response.description`
   was disclosed only through the wrong-type edge this lane removes. Disclosure only.
+- the external-supertype hedge on a PATH-typed receiver names only a supertype that could supply the member: not a scan type, and not a
+  platform protocol that does not require it (`dispatch:ExpressibleByStringLiteral.==` on Yams' nested `Tag.Name` named a member the
+  protocol does not declare).
 The "unique leaf" fallback is no longer reached by the bare spellings L2/L4 decide. It stays the last resort for a dotted head's lookup:
 retiring it there dropped `Summary.maxNodeSize` inside swift-collections' generic `Rope` with no hedge. Kill switch
 `CANDOR_TYPE_ID_L4_OFF` (also off under `CANDOR_TYPE_ID_L2_OFF`).

@@ -96,3 +96,10 @@ public struct UseH26 { public init() {}
 public struct HoldS26 { public init() {}
     var st = DepStat26()
     public func s_dep_prop(_ p: String) -> Int { st.code26 } }                                                      // WRITES (marker)
+// (j) Fable's merge review B2: a NESTED type conforming to a literal protocol, compared with a synthesized `==` (Yams `Tag.Name`):
+// no `dispatch:ExpressibleByStringLiteral.==` hedge, which names a member that protocol does not declare
+public struct TagJ26 { public init() {}
+    public struct NameJ26: ExpressibleByStringLiteral, Equatable { public let raw: String
+        public init(stringLiteral v: String) { raw = v } }
+    public var name: NameJ26 = "a"
+    public func j_eq(_ p: String) -> Bool { name == "b" } }                                                        // pure
