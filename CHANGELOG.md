@@ -10,6 +10,8 @@ with the new build — the AS-EFF-005 guard refuses a cross-build baseline by de
 
 ## Unreleased
 
+- **Declares spec ⟨0.44⟩** (SPEC §4 `dispatchesOn` clarification; no behaviour change for it). Docs and the floor pin name 0.44.
+
 ### ⚠ A bare type name resolves through the supertypes Swift walks (SOUNDNESS R1938 type-identity lane L4; R1948, R1972, R1984)
 
 A bare type name inside a type is looked up the way Swift looks it up: the enclosing type's own member types and member aliases, then its
